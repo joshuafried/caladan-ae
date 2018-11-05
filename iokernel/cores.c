@@ -14,14 +14,16 @@
 #include <iokernel/queue.h>
 
 #include "defs.h"
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include "../ksched/ksched.h"
 
 /*#define CORES_NOHT 1*/
 
 static unsigned int nr_avail_cores;
 static unsigned int total_cores;
 static DEFINE_BITMAP(online_cores, NCPU);
-
-DEFINE_BITMAP(avail_cores, NCPU);
+static DEFINE_BITMAP(avail_cores, NCPU);
 struct core_assignments core_assign;
 unsigned int nrts = 0;
 struct thread *ts[NCPU];
@@ -38,6 +40,8 @@ unsigned int get_total_cores(void)
 {
 	return total_cores;
 }
+static int KSCHED_FD;
+
 
 /**
  * cpu_to_sibling_cpu - gets the sibling (hyperthread pair) of a cpu
@@ -62,25 +66,97 @@ struct core {
 static struct core core_history[NCPU];
 
 /**
- * core_reserve - record that core is now in use by thread
- * @core: the core to reserve
+ * core_is_preempting - returns true if core is mid-preemption.
+ */
+static inline bool core_is_preempting(unsigned int core)
+{
+	return core_history[core].next != NULL;
+}
+
+static struct ksched_wake_req *wake_reqs;
+
+static void wake_single(struct thread *th, int core, bool preempt)
+{
+	struct ksched_wakeup *w = &wake_reqs->wakeups[wake_reqs->nr++];
+	w->next_tid = th->tid;
+	w->cpu = core;
+	w->preempt = preempt;
+
+}
+
+void flush_wake_requests(void)
+{
+	if (!wake_reqs->nr)
+		return;
+
+	BUG_ON(ioctl(KSCHED_FD, KSCHED_IOC_WAKE, wake_reqs));
+
+	wake_reqs->nr = 0;
+}
+
+
+/**
+ * core_wake_idle - wake thread on idle core
+ * @core: the core to use
  * @th: the thread that will use core
  */
-static inline void core_reserve(unsigned int core, struct thread *th)
+static inline void core_wake_idle(unsigned int core, struct thread *th)
 {
 	assert(bitmap_test(avail_cores, core));
 
 	bitmap_clear(avail_cores, core);
 	nr_avail_cores--;
 
-	BUG_ON(core_history[core].next && th != core_history[core].next);
+	assert(!core_is_preempting(core));
+
+	proc_get(th->p);
+
+	assert(!th->parked);
 
 	if (core_history[core].prev)
 		proc_put(core_history[core].prev->p);
-	proc_get(th->p);
 
 	core_history[core].prev = core_history[core].current;
 	core_history[core].current = th;
+	core_history[core].next = NULL;
+
+	wake_single(th, core, false);
+}
+
+/**
+ * core_reserve_preempt - record that th is preempting on core
+ * @core: the core to preempt
+ * @th: the thread that will use core
+ */
+static inline void core_preempt(unsigned int core, struct thread *th)
+{
+	assert(!bitmap_test(avail_cores, core));
+	assert(!core_is_preempting(core));
+	assert(!th->parked);
+
+	proc_get(th->p);
+	core_history[core].next = th;
+	core_history[core].current->p->inflight_preempts++;
+
+	wake_single(th, core, true);
+}
+
+/**
+ * core_finish_preempt - record that core has finished preemption
+ * @core: the core that is completing preemption
+ */
+static inline void core_finish_preempt(unsigned int core)
+{
+	assert(!bitmap_test(avail_cores, core));
+	assert(core_is_preempting(core));
+
+	if (core_history[core].prev)
+		proc_put(core_history[core].prev->p);
+
+	core_history[core].current->p->inflight_preempts--;
+
+	core_history[core].prev = core_history[core].current;
+	core_history[core].current = core_history[core].next;
 	core_history[core].next = NULL;
 }
 
@@ -108,6 +184,7 @@ static inline void core_init(unsigned int core)
 	total_cores++;
 	core_history[core].current = NULL;
 	core_history[core].prev = NULL;
+	core_history[core].next = NULL;
 }
 
 /**
@@ -232,8 +309,6 @@ static inline void thread_reserve(struct thread *th, unsigned int core)
 	assert(th->parked == true);
 
 	bitmap_clear(p->available_threads, kthread);
-	if (unlikely(core != th->core))
-		th->reaffinitize = true;
 	th->core = core;
 	p->active_threads[p->active_thread_count] = th;
 	th->at_idx = p->active_thread_count++;
@@ -272,7 +347,7 @@ static inline void thread_cede(struct thread *th)
 
 	/* remove the thread from the polling array (if queues are empty) */
 	th->parked = true;
-	if (lrpc_empty(&th->txpktq))
+	if (lrpc_empty(&th->txpktq) && lrpc_empty(&th->txcmdq))
 		unpoll_thread(th);
 }
 
@@ -369,7 +444,7 @@ static int pick_core_for_proc(struct proc *p)
 		if (core_available(buddy_core))
 			return buddy_core;
 
-		if (nr_avail_cores > 0 || core_history[buddy_core].next != NULL)
+		if (nr_avail_cores > 0 || core_is_preempting(buddy_core))
 			continue;
 
 		buddy_proc = core_history[buddy_core].current->p;
@@ -385,7 +460,7 @@ static int pick_core_for_proc(struct proc *p)
 		return core;
 
 	/* core is busy, should we preempt it? */
-	if (nr_avail_cores == 0 && core_history[core].next == NULL) {
+	if (nr_avail_cores == 0 && !core_is_preempting(core)) {
 		core_proc = core_history[core].current->p;
 		if (core_proc != p && proc_is_bursting(core_proc))
 			return core;
@@ -402,7 +477,7 @@ static int pick_core_for_proc(struct proc *p)
 			continue;
 		if (!proc_is_bursting(core_history[i].current->p))
 			continue;
-		if (core_history[i].next != NULL)
+		if (core_is_preempting(i))
 			continue;
 		return i;
 	}
@@ -421,17 +496,11 @@ static int pick_core_for_proc(struct proc *p)
  */
 static struct thread *pick_thread_for_core(int core)
 {
-	struct thread *th_next;
 	int buddy_core;
 	struct proc *p;
 
-	/* if this core was preempted, grant it to the thread that is waiting for
-	 * it */
-	th_next = core_history[core].next;
-	if (th_next != NULL && !th_next->p->removed) {
-		core_history[core].current->p->inflight_preempts--;
-		return th_next;
-	}
+	/* With ksched, this function is no longer called mid-preemption */
+	assert(!core_is_preempting(core));
 
 	/* try to find an overloaded proc to grant this core to */
 	if (no_overloaded_procs())
@@ -468,42 +537,6 @@ chose_proc:
 	return pick_thread_for_proc(p, core);
 }
 
-/**
- * wake_kthread_on_core - wake the kthread on the specified core.
- * @p: the process to choose a kthread from
- * @core: the core to wake a kthread on
- */
-static void wake_kthread_on_core(struct thread *th, int core)
-{
-	int ret;
-	ssize_t s;
-	uint64_t val;
-
-	BUG_ON(!core_available(core)); /* core should be idle now */
-
-	/* mark core and kthread as reserved */
-	core_reserve(core, th);
-	if (th->parked)
-		thread_reserve(th, core);
-
-	/* assign the kthread to its core */
-	if (th->reaffinitize) {
-		ret = cores_pin_thread(th->tid, th->core);
-		if (unlikely(ret < 0)) {
-			log_err("cores: failed to pin tid %d to core %d",
-				th->tid, th->core);
-			/* continue running but performance is unpredictable */
-		} else {
-			th->reaffinitize = false;
-		}
-	}
-
-
-	val = th->core + 1;
-	/* wake up the kthread */
-	s = write(th->park_efd, &val, sizeof(val));
-	BUG_ON(s != sizeof(uint64_t));
-}
 
 /**
  * cores_park_kthread - parks the given kthread and frees its core.
@@ -517,26 +550,46 @@ bool cores_park_kthread(struct thread *th, bool force)
 	struct proc *p = th->p;
 	unsigned int core = th->core;
 	unsigned int kthread = th - p->threads;
-	ssize_t s;
-	uint64_t val;
 	struct thread *th_new;
 
 	assert(kthread < NCPU);
 
+	/* We missed an earlier park message, ignore this */
+	if (th->ooo_preempt > 0) {
+		th->ooo_preempt--;
+		return true;
+	}
+
 	/* make sure this core and kthread are currently reserved */
-	BUG_ON(bitmap_test(avail_cores, core));
-	BUG_ON(bitmap_test(p->available_threads, kthread));
+	assert(!bitmap_test(avail_cores, core));
+	assert(!bitmap_test(p->available_threads, kthread));
 
 	/* check for race conditions with the runtime */
-	if (core_history[core].next == NULL && !force) {
+	if (!core_is_preempting(core) && !force) {
 		lrpc_poll_send_tail(&th->rxq);
 		if (unlikely(lrpc_get_cached_length(&th->rxq) > 0)) {
 			/* the runtime parked while packets were in flight */
-			val = th->core + 1;
-			s = write(th->park_efd, &val, sizeof(val));
-			BUG_ON(s != sizeof(uint64_t));
+			wake_single(th, th->core, false);
 			return false;
 		}
+	}
+
+	thread_cede(th);
+	if (core_is_preempting(core)) {
+
+		/* We may receive the preemptee's park message before the preemptor's */
+		bool ooo_park_msg = (th == core_history[core].next);
+		core_finish_preempt(core);
+
+		if (!ooo_park_msg)
+			/* preemptor is now running on this core */
+			return true;
+
+		/* Next park message from preempted thread should have no effect */
+		core_history[core].prev->ooo_preempt++;
+
+		/* Mark preempted thread as usable as well */
+		thread_cede(core_history[core].prev);
 	}
 
 #if 0
@@ -550,14 +603,15 @@ bool cores_park_kthread(struct thread *th, bool force)
 	}
 #endif
 
-	/* mark core and kthread as available */
+	/* mark core as available */
 	core_cede(core);
-	thread_cede(th);
 
 	/* try to find another thread to run on this core */
 	th_new = pick_thread_for_core(core);
-	if (th_new)
-		wake_kthread_on_core(th_new, core);
+	if (th_new) {
+		thread_reserve(th_new, core);
+		core_wake_idle(core, th_new);
+	}
 
 	return true;
 }
@@ -590,23 +644,19 @@ struct thread *cores_add_core(struct proc *p)
 	}
 	BUG_ON(!bitmap_test(p->available_threads, th - p->threads));
 
+	thread_reserve(th, core);
+
 	if (core_available(core)) {
 		/* core is idle, immediately wake a kthread on it */
-		wake_kthread_on_core(th, core);
+		core_wake_idle(core, th);
 		return th;
 	}
 
 	/* core is busy, preempt the currently running thread */
-	thread_reserve(th, core);
 	th_current = core_history[core].current;
 	proc_set_overloaded(th_current->p);
-	th_current->p->inflight_preempts++;
-	BUG_ON(core_history[core].next);
-	core_history[core].next = th;
-	if (unlikely(syscall(SYS_tgkill, th_current->p->pid,
-		     th_current->tid, SIGUSR1) < 0)) {
-		WARN();
-	}
+	BUG_ON(core_is_preempting(core));
+	core_preempt(core, th);
 
 	return th;
 }
@@ -770,6 +820,8 @@ void cores_adjust_assignments(void)
 
 		cores_add_core(p);
 	}
+
+	flush_wake_requests();
 }
 
 /*
@@ -838,6 +890,14 @@ int cores_init(void)
 		if (cpu_info_tbl[i].package == 0)
 			core_init(i);
 	}
+
+	KSCHED_FD = open("/dev/ksched", O_RDWR);
+	if (KSCHED_FD < 0) return KSCHED_FD;
+
+	wake_reqs = malloc(sizeof(struct ksched_wake_req) + NCPU * sizeof(struct ksched_wakeup));
+	if (!wake_reqs)
+		return -ENOMEM;
+	wake_reqs->nr = 0;
 
 	log_info("cores: linux on core %d, control on %d, dataplane on %d",
 		 core_assign.linux_core, core_assign.ctrl_core,

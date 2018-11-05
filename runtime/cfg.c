@@ -149,6 +149,7 @@ static int parse_runtime_guaranteed_kthreads(const char *name, const char *val)
 		log_err("must be < %d (number of CPUs)", cpu_count);
 		return -EINVAL;
 	} else if (tmp < 1) {
+		panic("Current IOKernel does not support < 1 guaranteed kthreads");
 		log_warn("< 1 guaranteed kthreads is not recommended for networked apps");
 	}
 

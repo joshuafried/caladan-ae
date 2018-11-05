@@ -180,6 +180,8 @@ bool rx_burst(void)
 		rx_one_pkt(bufs[i]);
 	}
 
+	flush_wake_requests();
+
 	return nb_rx > 0;
 }
 

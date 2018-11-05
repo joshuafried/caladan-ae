@@ -40,7 +40,6 @@ struct thread {
 	struct proc		*p;
 	unsigned int		parked:1;
 	unsigned int		waking:1;
-	unsigned int		reaffinitize:1;
 	struct lrpc_chan_out	rxq;
 	struct lrpc_chan_in	txpktq;
 	struct lrpc_chan_in	txcmdq;
@@ -58,6 +57,8 @@ struct thread {
 	unsigned int		at_idx;
 	/* list link for when idle */
 	struct list_node	idle_link;
+
+	unsigned int ooo_preempt;
 };
 
 struct proc {
@@ -307,3 +308,5 @@ extern void cores_adjust_assignments();
 extern void proc_set_overloaded(struct proc *p);
 extern unsigned int get_nr_avail_cores(void);
 extern unsigned int get_total_cores(void);
+extern unsigned int get_available_cores(void);
+extern void flush_wake_requests(void);
