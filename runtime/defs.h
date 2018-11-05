@@ -501,6 +501,7 @@ extern int net_init(void);
 extern int arp_init(void);
 extern int trans_init(void);
 extern int smalloc_init(void);
+extern int kthread_init(void);
 
 /* late initialization */
 extern int ioqueues_register_iokernel(void);

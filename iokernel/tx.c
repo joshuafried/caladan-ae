@@ -191,7 +191,7 @@ static int tx_drain_queue(struct thread *t, int n,
 		unsigned long payload;
 
 		if (!lrpc_recv(&t->txpktq, &cmd, &payload)) {
-			if (unlikely(t->parked))
+			if (unlikely(t->parked && lrpc_empty(&t->txcmdq)))
 				unpoll_thread(t);
 			break;
 		}

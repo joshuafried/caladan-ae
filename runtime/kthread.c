@@ -4,8 +4,11 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/eventfd.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sched.h>
 
 #include <base/atomic.h>
 #include <base/cpu.h>
@@ -15,6 +18,8 @@
 #include <runtime/timer.h>
 
 #include "defs.h"
+
+#include "../ksched/ksched.h"
 
 /* protects @ks and @nrks below */
 DEFINE_SPINLOCK(klock);
@@ -35,6 +40,8 @@ struct kthread *ks[NCPU];
 __thread struct kthread *mykthread;
 /* Map of cpu to kthread */
 struct cpu_record cpu_map[NCPU] __attribute__((aligned(CACHE_LINE_SIZE)));
+
+static __thread int ksched_fd;
 
 static struct kthread *allock(void)
 {
@@ -162,23 +169,22 @@ found:
 static void kthread_yield_to_iokernel(void)
 {
 	struct kthread *k = myk();
-	ssize_t s;
-	uint64_t assigned_core, last_core = k->curr_cpu;
+	uint64_t last_core = k->curr_cpu;
 
-	/* yield to the iokernel */
-	s = read(k->park_efd, &assigned_core, sizeof(assigned_core));
-	while (unlikely(s != sizeof(uint64_t) && errno == EINTR)) {
-		/* preempted while yielding, yield again */
-		assert(preempt_needed());
+	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_PARK));
+#if 0
+	while (ioctl(ksched_fd, KSCHED_IOC_PARK)) {
+		BUG_ON(errno != EINTR);
+		BUG_ON(!preempt_needed());
 		clear_preempt_needed();
-		s = read(k->park_efd, &assigned_core, sizeof(assigned_core));
 	}
-	BUG_ON(s != sizeof(uint64_t));
+#endif
 
-	k->curr_cpu = assigned_core - 1;
+	k->curr_cpu = sched_getcpu();
+
 	if (k->curr_cpu != last_core)
 		STAT(CORE_MIGRATIONS)++;
-	store_release(&cpu_map[assigned_core - 1].recent_kthread, k);
+	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
 }
 
 /*
@@ -250,9 +256,20 @@ void kthread_park(bool voluntary)
  */
 void kthread_wait_to_attach(void)
 {
-	kthread_yield_to_iokernel();
+	struct kthread *k = myk();
+	ksched_fd = open("/dev/ksched", O_RDONLY);
+	BUG_ON(ksched_fd < 0);
+
+	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_START));
+	k->curr_cpu = sched_getcpu();
+	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
 
 	/* attach the kthread for the first time */
 	kthread_attach();
 	atomic_inc(&runningks);
+}
+
+int kthread_init(void)
+{
+	return 0;
 }

@@ -9,6 +9,8 @@
 #include <linux/fs.h>
 #include <linux/errno.h>
 #include <linux/cdev.h>
+#include <linux/cpu.h>
+#include <linux/kthread.h>
 #include <linux/smp.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
@@ -16,6 +18,7 @@
 #include <linux/uaccess.h>
 #include <asm/mwait.h>
 
+#include <asm-generic/local.h>
 #include "ksched.h"
 
 MODULE_LICENSE("GPL");
@@ -23,11 +26,25 @@ MODULE_LICENSE("GPL");
 /* the character device that provides the ksched IOCTL interface */
 static struct cdev ksched_cdev;
 
+#define PID_QUEUE_DEPTH 2
+#define PIDS_MASK (PID_QUEUE_DEPTH - 1)
+
 struct ksched_percpu {
+	/* Make sure there is no false sharing for gen */
+	unsigned long pad1[8];
 	unsigned long	gen;
+	unsigned long pad2[7 + 8];
+
+	unsigned long waker_cached_gen;
+	unsigned long pad3[7];
+
 	unsigned long	last_gen;
-	pid_t		prev_pid;
-	pid_t		next_pid;
+	pid_t	pids[PID_QUEUE_DEPTH];
+
+	local_t signalled;
+	unsigned int running;
+	struct task_struct *waiter_thread;
+
 } ____cacheline_aligned_in_smp;
 
 /* per-cpu data shared between parked cores and the waker core */
@@ -46,6 +63,26 @@ static struct task_struct *ksched_lookup_task(pid_t nr)
 	return pid_task(find_vpid(nr), PIDTYPE_PID);
 }
 
+/**
+ * deschedule - put the curent task to sleep and invoke schedule()
+ */
+static long deschedule(void)
+{
+	__set_current_state(TASK_INTERRUPTIBLE);
+	schedule();
+	__set_current_state(TASK_RUNNING);
+	return 0;
+}
+
+
+/**
+ * ksched_wakeup_pid - wakeup a task
+ * @cpu: the core to pin the task to
+ * @pid: the pid number
+ *
+ * Returns 1 if the process was woken up, 0 if it was already running,
+ * or a number less than 0 if an error occurred.
+ */
 static int ksched_wakeup_pid(int cpu, pid_t pid)
 {
 	struct task_struct *p;
@@ -66,8 +103,102 @@ static int ksched_wakeup_pid(int cpu, pid_t pid)
 		return ret;
 	}
 
-	wake_up_process(p);
+	ret = wake_up_process(p);
 	put_task_struct(p);
+
+	return ret;
+}
+
+/**
+ * ksched_preempt - signal a task to park
+ * @pid: the pid number
+ *
+ */
+static void ksched_preempt(pid_t pid)
+{
+	struct task_struct *t;
+
+	rcu_read_lock();
+	t = ksched_lookup_task(pid);
+	if (!t)
+		goto out;
+
+	send_sig(SIGUSR1, t, 0);
+
+out:
+	rcu_read_unlock();
+}
+
+/**
+ * run_next - find and wake next task for core
+ *
+ * WARNING: must be called with interrupts disabled OR p->running == 0
+ * to prevent running with the IPI handler
+ *
+ * Returns the awoken pid or 0 if none could be found
+ */
+static pid_t run_next(void)
+{
+	struct ksched_percpu *p;
+	unsigned long gen;
+	pid_t pid;
+
+	p = this_cpu_ptr(&kp);
+
+	gen = smp_load_acquire(&p->gen);
+	if (gen == p->last_gen)
+		return 0;
+
+	pid = READ_ONCE(p->pids[p->last_gen++ & PIDS_MASK]);
+	if (!pid)
+		return 0;
+
+	if (pid != current->pid)
+		ksched_wakeup_pid(smp_processor_id(), pid);
+
+	local_set(&p->signalled, 0);
+	smp_store_release(&p->running, 1);
+
+	/* if a preempt is pending, make sure that pid reparks */
+	/* Now that p->running = 1, we may race with ipi handler */
+	if (smp_load_acquire(&p->gen) != p->last_gen &&
+			local_inc_return(&p->signalled) == 1)
+		ksched_preempt(pid);
+
+	return pid;
+
+}
+
+static int ksched_waiter_thread(void *arg)
+{
+	struct ksched_percpu *p = this_cpu_ptr(&kp);
+	unsigned long gen;
+
+	while (!kthread_should_stop()) {
+
+		if (run_next())
+			deschedule();
+
+		gen = smp_load_acquire(&p->gen);
+		if (gen != p->last_gen)
+			continue;
+
+		/* then arm the monitor address and recheck to avoid a race */
+		__monitor(&p->gen, 0, 0);
+		gen = smp_load_acquire(&p->gen);
+		if (gen != p->last_gen)
+			continue;
+
+		/* finally, execute mwait, and recheck after waking up */
+		__mwait(0, MWAIT_ECX_INTERRUPT_BREAK);
+		gen = smp_load_acquire(&p->gen);
+		if (gen != p->last_gen)
+			continue;
+
+		/* run another task if needed */
+		if (need_resched())
+			schedule();
+	}
 
 	return 0;
 }
@@ -75,115 +206,61 @@ static int ksched_wakeup_pid(int cpu, pid_t pid)
 static long ksched_park(void)
 {
 	struct ksched_percpu *p;
-	unsigned long gen;
 	pid_t pid;
 	int cpu;
 
 	cpu = get_cpu();
-	p = this_cpu_ptr(&kp);
-
 	local_irq_disable();
+
 	if (unlikely(signal_pending(current))) {
 		local_irq_enable();
 		put_cpu();
 		return -ERESTARTSYS;
 	}
 
-	while (true) {
-		/* first see if the condition is met without waiting */
-		gen = smp_load_acquire(&p->gen);
-		if (gen != p->last_gen)
-			break;
+	p = this_cpu_ptr(&kp);
+	pid = run_next();
 
-		/* then arm the monitor address and recheck to avoid a race */
-		__monitor(&p->gen, 0, 0);
-		gen = smp_load_acquire(&p->gen);
-		if (gen != p->last_gen)
-			break;
-
-		/* finally, execute mwait, and recheck after waking up */
-		__mwait(0, MWAIT_ECX_INTERRUPT_BREAK);
-		gen = smp_load_acquire(&p->gen);
-		if (gen != p->last_gen)
-			break;
-
-		/* we woke up for some reason other than our condition */
+	/* Is the next pid immediately available? */
+	if (pid) {
 		local_irq_enable();
-		if (unlikely(signal_pending(current))) {
-			put_cpu();
-			return -ERESTARTSYS;
+		put_cpu();
+		if (pid == current->pid) {
+			return 0;
+		} else {
+			return deschedule();
 		}
-		put_cpu();
-
-		/* run another task if needed */
-		if (need_resched())
-			schedule();
-
-		cpu = get_cpu();
-		p = this_cpu_ptr(&kp);
-		local_irq_disable();
 	}
 
-	/* the pid was set before the generation number (x86 is TSO) */
-	pid = READ_ONCE(p->next_pid);
-	p->last_gen = gen;
+	p->running = 0;
+	wake_up_process(p->waiter_thread);
+	smp_wmb();
 	local_irq_enable();
-
-	/* are we waking the current pid? */
-	if (pid == current->pid) {
-		put_cpu();
-		return 0;
-	}
-	ksched_wakeup_pid(cpu, pid);
 	put_cpu();
-
-	/* put this task to sleep and reschedule so the next task can run */
-	__set_current_state(TASK_INTERRUPTIBLE);
-	schedule();
-	__set_current_state(TASK_RUNNING);
-	return 0;
-}
-
-static long ksched_start(void)
-{
-	/* put this task to sleep and reschedule so the next task can run */
-	__set_current_state(TASK_INTERRUPTIBLE);
-	schedule();
-	__set_current_state(TASK_RUNNING);
-	return 0;
+	return deschedule();
 }
 
 static void ksched_ipi(void *unused)
 {
 	struct ksched_percpu *p = this_cpu_ptr(&kp);
-	struct task_struct *t;
 	unsigned long gen;
-
 
 	/* if last_gen is the current gen, ksched_park() beat us here */
 	gen = smp_load_acquire(&p->gen);
 	if (gen == p->last_gen)
 		return;
 
-	if (!p->prev_pid) {
-		/* wake up the next pid */
-		ksched_wakeup_pid(smp_processor_id(), p->next_pid);
-	} else {
-		/* otherwise send a signal to the old pid */ 
-		rcu_read_lock();
-		t = ksched_lookup_task(p->prev_pid);
-		if (!t) {
-			rcu_read_unlock();
-			return;
-		}
-		send_sig(SIGUSR1, t, 0);
-		rcu_read_unlock();
+	/* if !p->running, waiter thread will handle the preemption */
+	if (!p->running)
+		return;
+
+	if (local_inc_return(&p->signalled) == 1) {
+		ksched_preempt(p->pids[(p->last_gen - 1) & PIDS_MASK]);
 	}
 }
 
 static long ksched_wake(struct ksched_wake_req __user *req)
 {
-	static unsigned long gen = 0;
 	struct ksched_wakeup wakeup;
 	struct ksched_percpu *p;
 	cpumask_var_t mask;
@@ -198,7 +275,6 @@ static long ksched_wake(struct ksched_wake_req __user *req)
 		return -ENOMEM;
 	cpumask_clear(mask);
 
-	gen++;
 	for (i = 0; i < nr; i++) {
 		ret = copy_from_user(&wakeup, &req->wakeups[i],
 				     sizeof(wakeup));
@@ -212,15 +288,20 @@ static long ksched_wake(struct ksched_wake_req __user *req)
 		}
 
 		p = per_cpu_ptr(&kp, wakeup.cpu);
-		p->prev_pid = wakeup.prev_tid;
-		p->next_pid = wakeup.next_tid;
-		smp_store_release(&p->gen, gen);
-		if (wakeup.preempt)
+		p->pids[p->waker_cached_gen++ & PIDS_MASK] = wakeup.next_tid;
+		smp_store_release(&p->gen, p->waker_cached_gen);
+
+		if (wakeup.preempt) {
 			cpumask_set_cpu(wakeup.cpu, mask);
+		}
 	}
 
-	if (!cpumask_empty(mask))
+	if (!cpumask_empty(mask)) {
+		get_cpu();
 		smp_call_function_many(mask, ksched_ipi, NULL, false);
+		put_cpu();
+	}
+
 	free_cpumask_var(mask);
 	return 0;
 }
@@ -238,7 +319,7 @@ ksched_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case KSCHED_IOC_PARK:
 		return ksched_park();
 	case KSCHED_IOC_START:
-		return ksched_start();
+		return deschedule();
 	case KSCHED_IOC_WAKE:
 		return ksched_wake((void __user *)arg);
 	default:
@@ -248,13 +329,79 @@ ksched_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	return -ENOTTY;
 }
 
+static int start_waiter_threads(void)
+{
+	struct ksched_percpu *p;
+	struct task_struct *k;
+
+	int  cpu;
+	int ret = 0;
+	get_online_cpus();
+
+	for_each_online_cpu(cpu) {
+		p = per_cpu_ptr(&kp, cpu);
+		memset(p, 0, sizeof(*p));
+
+		// TODO: have IOKernel tell us where to run
+		if (cpu_to_node(cpu) > 0)
+			continue;
+		if (cpu == 2 || cpu == 26 || cpu % 2 == 1)
+			continue;
+
+		k = kthread_create_on_node(ksched_waiter_thread, NULL, 0, "ksched/0:%d", cpu);
+		if (!IS_ERR(k)) {
+			p->waiter_thread = k;
+			kthread_bind(k, cpu);
+			wake_up_process(k);
+		} else {
+			ret = PTR_ERR(k);
+			goto out;
+		}
+	}
+
+out:
+	put_online_cpus();
+	return ret;
+}
+
+static int stop_waiter_threads(void)
+{
+	struct ksched_percpu *p;
+	int cpu;
+	get_online_cpus();
+	for_each_online_cpu(cpu) {
+		p = per_cpu_ptr(&kp, cpu);
+		if (p->waiter_thread) {
+			kthread_stop(p->waiter_thread);
+			p->waiter_thread = NULL;
+		}
+	}
+	put_online_cpus();
+	return 0;
+}
+
+static bool iokernel_running;
+
 static int ksched_open(struct inode *inode, struct file *filp)
 {
+	if (filp->f_cred->uid.val == 0 && !iokernel_running) {
+		iokernel_running = true;
+		start_waiter_threads();
+	} else {
+		// todo filp->private_data = current->pid;
+	}
+
 	return 0;
 }
 
 static int ksched_release(struct inode *inode, struct file *filp)
 {
+	if (filp->f_cred->uid.val == 0 && iokernel_running) {
+		iokernel_running = false;
+		stop_waiter_threads();
+	} else {
+		// TODO: restart waiter thread on core
+	}
 	return 0;
 }
 
@@ -265,12 +412,13 @@ static struct file_operations ksched_ops = {
 	.release =	ksched_release,
 };
 
+static dev_t devno;
+
 static int __init ksched_init(void)
 {
-	dev_t devno = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
 	int ret;
 
-	ret = register_chrdev_region(devno, 1, "ksched");
+	ret = alloc_chrdev_region(&devno, 0, 1, "ksched");
 	if (ret) {
 		printk(KERN_ERR "ksched: failed to reserve char dev region\n");
 		return ret;
@@ -284,13 +432,13 @@ static int __init ksched_init(void)
 	}
 
 	printk(KERN_INFO "ksched: API V1 ready");
+
 	return 0;
 }
 
 static void __exit ksched_exit(void)
 {
-	dev_t devno = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
-
+	stop_waiter_threads();
 	cdev_del(&ksched_cdev);
 	unregister_chrdev_region(devno, 1);
 }

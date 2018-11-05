@@ -76,6 +76,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 	p->region = reg;
 	p->removed = false;
 	p->sched_cfg = hdr.sched_cfg;
+	BUG_ON(p->sched_cfg.guaranteed_cores < 1);
 	p->thread_count = hdr.thread_count;
 	if (eth_addr_is_multicast(&hdr.mac) || eth_addr_is_zero(&hdr.mac))
 		goto fail_free_proc;
@@ -108,7 +109,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 		th->p = p;
 		th->parked = true;
 		th->waking = false;
-		th->reaffinitize = true;
 		th->at_idx = -1;
 		th->ts_idx = -1;
 
@@ -268,6 +268,8 @@ static void control_add_client(void)
 		log_err("control: failed to create process '%d'", ucred.pid);
 		goto fail_close_fds;
 	}
+
+	sleep(1);
 
 	if (!lrpc_send(&lrpc_control_to_data, DATAPLANE_ADD_CLIENT,
 			(unsigned long) p)) {

@@ -18,8 +18,11 @@ static int commands_drain_queue(struct thread *t, struct rte_mbuf **bufs, int n)
 		uint64_t cmd;
 		unsigned long payload;
 
-		if (!lrpc_recv(&t->txcmdq, &cmd, &payload))
+		if (!lrpc_recv(&t->txcmdq, &cmd, &payload)) {
+			if (unlikely(t->parked && lrpc_empty(&t->txpktq)))
+				unpoll_thread(t);
 			break;
+		}
 
 		switch (cmd) {
 		case TXCMD_NET_COMPLETE:
@@ -70,6 +73,8 @@ bool commands_rx(void)
 		n_bufs += commands_drain_queue(ts[idx], &bufs[n_bufs],
 				IOKERNEL_CMD_BURST_SIZE - n_bufs);
 	}
+
+	flush_wake_requests();
 
 	STAT_INC(COMMANDS_PULLED, n_bufs);
 
