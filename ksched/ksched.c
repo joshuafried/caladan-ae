@@ -29,6 +29,10 @@ static struct cdev ksched_cdev;
 #define PID_QUEUE_DEPTH 2
 #define PIDS_MASK (PID_QUEUE_DEPTH - 1)
 
+#define IOKERNEL_MAGIC ((void *)0x123)
+static bool iokernel_running;
+static cpumask_var_t managed_cores;
+
 struct ksched_percpu {
 	/* Make sure there is no false sharing for gen */
 	unsigned long pad1[8];
@@ -143,6 +147,8 @@ static pid_t run_next(void)
 	unsigned long gen;
 	pid_t pid;
 
+	int cpu = smp_processor_id();
+
 	p = this_cpu_ptr(&kp);
 
 	gen = smp_load_acquire(&p->gen);
@@ -154,7 +160,7 @@ static pid_t run_next(void)
 		return 0;
 
 	if (pid != current->pid)
-		ksched_wakeup_pid(smp_processor_id(), pid);
+		ksched_wakeup_pid(cpu, pid);
 
 	local_set(&p->signalled, 0);
 	smp_store_release(&p->running, 1);
@@ -259,13 +265,16 @@ static void ksched_ipi(void *unused)
 	}
 }
 
-static long ksched_wake(struct ksched_wake_req __user *req)
+static long ksched_wake(struct file *filp, struct ksched_wake_req __user *req)
 {
 	struct ksched_wakeup wakeup;
 	struct ksched_percpu *p;
 	cpumask_var_t mask;
 	unsigned int nr;
 	int ret, i;
+
+	if (filp->private_data != IOKERNEL_MAGIC)
+		return -EPERM;
 
 	/* validate inputs */
 	ret = copy_from_user(&nr, &req->nr, sizeof(nr));
@@ -307,6 +316,80 @@ static long ksched_wake(struct ksched_wake_req __user *req)
 }
 
 static long
+ksched_iok_init(struct file *filp, struct ksched_init_args __user *uargs)
+{
+	int cpu, i, j, ret;
+	unsigned long mask;
+	struct ksched_init_args args;
+
+	struct ksched_percpu *p;
+	struct task_struct *k;
+
+	if (filp->f_cred->uid.val != 0)
+		return -EPERM;
+
+	if (iokernel_running)
+		return -EBUSY;
+
+	if (unlikely(!alloc_cpumask_var(&managed_cores, GFP_KERNEL)))
+		return -ENOMEM;
+	cpumask_clear(managed_cores);
+
+	iokernel_running = true;
+	filp->private_data = IOKERNEL_MAGIC;
+
+	ret = copy_from_user(&args, uargs, sizeof(args));
+	if (ret)
+		return ret;
+
+	cpu = 0;
+	for (i = 0; i < args.size; i++) {
+		ret = copy_from_user(&mask, args.bitmap + i, sizeof(mask));
+		if (ret)
+			return ret;
+
+		for (j = 0; j < BITS_PER_LONG; j++, cpu++, mask >>= 1) {
+			if (!(mask & 1))
+				continue;
+
+			p = per_cpu_ptr(&kp, cpu);
+			memset(p, 0, sizeof(*p));
+			cpumask_set_cpu(cpu, managed_cores);
+			k = kthread_create_on_node(ksched_waiter_thread, NULL, cpu_to_node(cpu),
+				  "ksched/0:%d", cpu);
+			if (IS_ERR(k))
+				return PTR_ERR(k);
+			p->waiter_thread = k;
+			kthread_bind(k, cpu);
+			wake_up_process(k);
+		}
+	}
+
+	return 0;
+}
+
+static void ksched_cleanup(void)
+{
+	struct ksched_percpu *p;
+	int cpu;
+
+	if (!iokernel_running)
+		return;
+
+	for_each_cpu(cpu, managed_cores) {
+		p = per_cpu_ptr(&kp, cpu);
+		if (p->waiter_thread) {
+			kthread_stop(p->waiter_thread);
+			p->waiter_thread = NULL;
+		}
+	}
+
+	free_cpumask_var(managed_cores);
+	iokernel_running = false;
+}
+
+
+static long
 ksched_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	/* validate input */
@@ -321,7 +404,9 @@ ksched_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case KSCHED_IOC_START:
 		return deschedule();
 	case KSCHED_IOC_WAKE:
-		return ksched_wake((void __user *)arg);
+		return ksched_wake(filp, (void __user *)arg);
+	case KSCHED_IOC_INIT:
+		return ksched_iok_init(filp, (void __user *)arg);
 	default:
 		break;
 	}
@@ -329,79 +414,15 @@ ksched_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	return -ENOTTY;
 }
 
-static int start_waiter_threads(void)
-{
-	struct ksched_percpu *p;
-	struct task_struct *k;
-
-	int  cpu;
-	int ret = 0;
-	get_online_cpus();
-
-	for_each_online_cpu(cpu) {
-		p = per_cpu_ptr(&kp, cpu);
-		memset(p, 0, sizeof(*p));
-
-		// TODO: have IOKernel tell us where to run
-		if (cpu_to_node(cpu) > 0)
-			continue;
-		if (cpu == 2 || cpu == 26 || cpu % 2 == 1)
-			continue;
-
-		k = kthread_create_on_node(ksched_waiter_thread, NULL, 0, "ksched/0:%d", cpu);
-		if (!IS_ERR(k)) {
-			p->waiter_thread = k;
-			kthread_bind(k, cpu);
-			wake_up_process(k);
-		} else {
-			ret = PTR_ERR(k);
-			goto out;
-		}
-	}
-
-out:
-	put_online_cpus();
-	return ret;
-}
-
-static int stop_waiter_threads(void)
-{
-	struct ksched_percpu *p;
-	int cpu;
-	get_online_cpus();
-	for_each_online_cpu(cpu) {
-		p = per_cpu_ptr(&kp, cpu);
-		if (p->waiter_thread) {
-			kthread_stop(p->waiter_thread);
-			p->waiter_thread = NULL;
-		}
-	}
-	put_online_cpus();
-	return 0;
-}
-
-static bool iokernel_running;
-
 static int ksched_open(struct inode *inode, struct file *filp)
 {
-	if (filp->f_cred->uid.val == 0 && !iokernel_running) {
-		iokernel_running = true;
-		start_waiter_threads();
-	} else {
-		// todo filp->private_data = current->pid;
-	}
-
 	return 0;
 }
 
 static int ksched_release(struct inode *inode, struct file *filp)
 {
-	if (filp->f_cred->uid.val == 0 && iokernel_running) {
-		iokernel_running = false;
-		stop_waiter_threads();
-	} else {
-		// TODO: restart waiter thread on core
-	}
+	if (filp->private_data == IOKERNEL_MAGIC)
+		ksched_cleanup();
 	return 0;
 }
 
@@ -438,7 +459,7 @@ static int __init ksched_init(void)
 
 static void __exit ksched_exit(void)
 {
-	stop_waiter_threads();
+	ksched_cleanup();
 	cdev_del(&ksched_cdev);
 	unregister_chrdev_region(devno, 1);
 }

@@ -2,8 +2,11 @@
  * cores.c - manages assignments of cores to runtimes, the iokernel, and linux
  */
 
+#include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -14,8 +17,7 @@
 #include <iokernel/queue.h>
 
 #include "defs.h"
-#include <fcntl.h>
-#include <sys/ioctl.h>
+
 #include "../ksched/ksched.h"
 
 /*#define CORES_NOHT 1*/
@@ -24,12 +26,18 @@ static unsigned int nr_avail_cores;
 static unsigned int total_cores;
 static DEFINE_BITMAP(online_cores, NCPU);
 static DEFINE_BITMAP(avail_cores, NCPU);
+static DEFINE_BITMAP(online_cores, NCPU);
 struct core_assignments core_assign;
 unsigned int nrts = 0;
 struct thread *ts[NCPU];
 
 /* maps each cpu number to the number of its hyperthread buddy */
 static int cpu_siblings[NCPU];
+
+/* ksched interface */
+static int ksched_fd;
+static struct ksched_wake_req *wake_reqs;
+
 
 unsigned int get_nr_avail_cores(void)
 {
@@ -40,7 +48,6 @@ unsigned int get_total_cores(void)
 {
 	return total_cores;
 }
-static int KSCHED_FD;
 
 
 /**
@@ -73,15 +80,14 @@ static inline bool core_is_preempting(unsigned int core)
 	return core_history[core].next != NULL;
 }
 
-static struct ksched_wake_req *wake_reqs;
 
 static void wake_single(struct thread *th, int core, bool preempt)
 {
 	struct ksched_wakeup *w = &wake_reqs->wakeups[wake_reqs->nr++];
+	assert(wake_reqs->nr <= NCPU);
 	w->next_tid = th->tid;
 	w->cpu = core;
 	w->preempt = preempt;
-
 }
 
 void flush_wake_requests(void)
@@ -89,7 +95,7 @@ void flush_wake_requests(void)
 	if (!wake_reqs->nr)
 		return;
 
-	BUG_ON(ioctl(KSCHED_FD, KSCHED_IOC_WAKE, wake_reqs));
+	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_WAKE, wake_reqs));
 
 	wake_reqs->nr = 0;
 }
@@ -825,11 +831,40 @@ void cores_adjust_assignments(void)
 }
 
 /*
+ * Intialize ksched interface
+ */
+static int ksched_init(void)
+{
+	int ret;
+
+	ksched_fd = open("/dev/ksched", O_RDWR);
+	if (ksched_fd < 0)
+		return ksched_fd;
+
+	struct ksched_init_args args = {
+		.size = ARRAY_SIZE(online_cores),
+		.bitmap = online_cores,
+	};
+
+	ret = ioctl(ksched_fd, KSCHED_IOC_INIT, &args);
+	if (ret)
+		return ret;
+
+	wake_reqs = malloc(sizeof(struct ksched_wake_req) + NCPU * sizeof(struct ksched_wakeup));
+	if (!wake_reqs)
+		return -ENOMEM;
+
+	wake_reqs->nr = 0;
+
+	return 0;
+}
+
+/*
  * Initialize core state.
  */
 int cores_init(void)
 {
-	int i, j;
+	int i, j, ret;
 
 	/* assign first non-zero core on socket 0 to the dataplane thread */
 	for (i = 1; i < cpu_count; i++) {
@@ -866,6 +901,7 @@ int cores_init(void)
 
 	/* mark all cores as unavailable */
 	bitmap_init(avail_cores, cpu_count, false);
+	bitmap_init(online_cores, NCPU, false);
 
 	/* mark all cores as offline */
 	bitmap_init(online_cores, cpu_count, false);
@@ -891,13 +927,10 @@ int cores_init(void)
 			core_init(i);
 	}
 
-	KSCHED_FD = open("/dev/ksched", O_RDWR);
-	if (KSCHED_FD < 0) return KSCHED_FD;
+	ret = ksched_init();
+	if (ret)
+		return ret;
 
-	wake_reqs = malloc(sizeof(struct ksched_wake_req) + NCPU * sizeof(struct ksched_wakeup));
-	if (!wake_reqs)
-		return -ENOMEM;
-	wake_reqs->nr = 0;
 
 	log_info("cores: linux on core %d, control on %d, dataplane on %d",
 		 core_assign.linux_core, core_assign.ctrl_core,
