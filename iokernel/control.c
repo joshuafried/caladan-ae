@@ -269,6 +269,8 @@ static void control_add_client(void)
 		goto fail_close_fds;
 	}
 
+	// TODO: this prevents a race with ksched where a kthread parks
+	// for the first time AFTER the the iokernel sends its wakeup.
 	sleep(1);
 
 	if (!lrpc_send(&lrpc_control_to_data, DATAPLANE_ADD_CLIENT,
