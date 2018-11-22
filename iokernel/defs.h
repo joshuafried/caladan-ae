@@ -15,6 +15,8 @@
 #include "mlx.h"
 #include "ref.h"
 
+#define DIRECTPATH 1
+
 /* #define STATS 1 */
 
 /*

@@ -45,6 +45,7 @@
 
 #include "defs.h"
 
+#ifndef DIRECTPATH
 #define RX_RING_SIZE 256
 #define TX_RING_SIZE 256
 
@@ -160,6 +161,7 @@ void dpdk_print_eth_stats()
 	fprintf(stderr,"RX-error: %"PRIu64" TX-error: %"PRIu64" RX-mbuf-fail: %"PRIu64"\n",
 			stats.ierrors, stats.oerrors, stats.rx_nombuf);
 }
+#endif // DIRECTPATH
 
 /*
  * Initialize dpdk, must be done as soon as possible.
@@ -184,11 +186,13 @@ int dpdk_init()
 		return -1;
 	}
 
+#ifndef DIRECTPATH
 	/* check that there is a port to send/receive on */
 	if (!rte_eth_dev_is_valid_port(0)) {
 		log_err("dpdk: no available ports");
 		return -1;
 	}
+#endif // DIRECTPATH
 
 	if (rte_lcore_count() > 1)
 		log_warn("dpdk: too many lcores enabled, only 1 used");
@@ -196,6 +200,7 @@ int dpdk_init()
 	return 0;
 }
 
+#ifndef DIRECTPATH
 /*
  * Additional dpdk initialization that must be done after rx init.
  */
@@ -210,3 +215,4 @@ int dpdk_late_init()
 
 	return 0;
 }
+#endif // DIRECTPATH

@@ -266,6 +266,7 @@ enum {
 };
 
 struct timer_idx;
+struct verbs_queue;
 
 struct kthread {
 	/* 1st cache-line */
@@ -300,6 +301,9 @@ struct kthread {
 	unsigned int		timern;
 	struct timer_idx	*timers;
 	unsigned long		pad2[6];
+
+	struct verbs_queue *vq;
+	unsigned long pad3[7];
 
 	/* 9th cache-line, statistics counters */
 	uint64_t		stats[STAT_NR];

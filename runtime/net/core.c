@@ -12,6 +12,7 @@
 #include <asm/chksum.h>
 #include <runtime/net.h>
 
+#include "verbs.h"
 #include "defs.h"
 
 #define IP_ID_SEED	0x42345323
@@ -32,6 +33,11 @@ static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 
 #define MBUF_RESERVED (align_up(sizeof(struct mbuf), CACHE_LINE_SIZE))
 
+/* Rudimentary per-kthread verb queues */
+static DEFINE_SPINLOCK(qslock);
+static int nrvqs;
+static struct verbs_queue vqs[NCPU];
+
 
 /*
  * RX Networking Functions
@@ -44,6 +50,7 @@ static void net_rx_release_mbuf(struct mbuf *m)
 	preempt_enable();
 }
 
+#if 0
 static void net_rx_send_completion(unsigned long completion_data)
 {
 	struct kthread *k;
@@ -55,6 +62,7 @@ static void net_rx_send_completion(unsigned long completion_data)
 	}
 	putk();
 }
+#endif
 
 static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 {
@@ -83,14 +91,14 @@ static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 	m->rss_hash = hdr->rss_hash;
 
 	barrier();
-	net_rx_send_completion(hdr->completion_data);
+	verbs_rx_completion(hdr->completion_data);
 
 	m->release_data = 0;
 	m->release = net_rx_release_mbuf;
 	return m;
 
 fail_buf:
-	net_rx_send_completion(hdr->completion_data);
+	verbs_rx_completion(hdr->completion_data);
 	return NULL;
 }
 
@@ -173,7 +181,7 @@ static struct mbuf *net_rx_one(struct rx_net_hdr *hdr)
 		goto drop;
 
 	/* Did HW checksum verification pass? */
-	if (hdr->csum_type != CHECKSUM_TYPE_UNNECESSARY) {
+	if (m->csum_type != CHECKSUM_TYPE_UNNECESSARY) {
 		if (chksum_internet(iphdr, sizeof(*iphdr)))
 			goto drop;
 	}
@@ -219,7 +227,7 @@ void net_rx_softirq(struct rx_net_hdr **hdrs, unsigned int nr)
 
 	for (i = 0; i < nr; i++) {
 		if (i + RX_PREFETCH_STRIDE < nr)
-			prefetch(hdrs[i + RX_PREFETCH_STRIDE]);
+			prefetch(hdrs[i + RX_PREFETCH_STRIDE]->payload);
 		l4_reqs[l4idx] = net_rx_one(hdrs[i]);
 		if (l4_reqs[l4idx] != NULL)
 			l4idx++;
@@ -283,18 +291,15 @@ struct mbuf *net_tx_alloc_mbuf(void)
 /* drains overflow queues */
 void __noinline net_tx_drain_overflow(void)
 {
-	shmptr_t shm;
 	struct mbuf *m;
 	struct kthread *k = myk();
 
 	assert_preempt_disabled();
 
 	/* drain TX packets */
-	while (!mbufq_empty(&k->txpktq_overflow)) {
+	while (unlikely(!mbufq_empty(&k->txpktq_overflow))) {
 		m = mbufq_peak_head(&k->txpktq_overflow);
-		shm = ptr_to_shmptr(&netcfg.tx_region,
-				    mbuf_data(m), mbuf_length(m));
-		if (!lrpc_send(&k->txpktq, TXPKT_NET_XMIT, shm))
+		if (verbs_transmit_one(&k->vq_tx, m))
 			break;
 		mbufq_pop_head(&k->txpktq_overflow);
 		if (unlikely(preempt_needed()))
@@ -305,8 +310,6 @@ void __noinline net_tx_drain_overflow(void)
 static void net_tx_raw(struct mbuf *m)
 {
 	struct kthread *k;
-	shmptr_t shm;
-	struct tx_net_hdr *hdr;
 	unsigned int len = mbuf_length(m);
 
 	k = getk();
@@ -317,14 +320,9 @@ static void net_tx_raw(struct mbuf *m)
 	STAT(TX_PACKETS)++;
 	STAT(TX_BYTES) += len;
 
-	hdr = mbuf_push_hdr(m, *hdr);
-	hdr->completion_data = (unsigned long)m;
-	hdr->len = len;
-	hdr->olflags = m->txflags;
-	shm = ptr_to_shmptr(&netcfg.tx_region, hdr, len + sizeof(*hdr));
-
-	if (!lrpc_send(&k->txpktq, TXPKT_NET_XMIT, shm))
+	if (verbs_transmit_one(k->vq, m))
 		mbufq_push_tail(&k->txpktq_overflow, m);
+
 	putk();
 }
 
@@ -524,9 +522,20 @@ int str_to_netaddr(const char *str, struct netaddr *addr)
  */
 int net_init_thread(void)
 {
+	int ret;
+
 	tcache_init_perthread(net_rx_buf_tcache, &perthread_get(net_rx_buf_pt));
 	tcache_init_perthread(net_tx_buf_tcache, &perthread_get(net_tx_buf_pt));
-	return 0;
+
+	ret = verbs_init_thread();
+	if (ret)
+		return ret;
+
+	spin_lock(&qslock);
+	myk()->vq = &vqs[nrvqs++];
+	spin_unlock(&qslock);
+
+	return verbs_init_queue(myk()->vq);
 }
 
 
@@ -571,6 +580,18 @@ int net_init(void)
 		"runtime_tx_bufs", TCACHE_DEFAULT_MAG_SIZE);
 	if (!net_tx_buf_tcache)
 		return -ENOMEM;
+
+	if (!is_power_of_two(maxks)) {
+		log_err("verbs implementation requires power-of-two kthreads");
+		return -1;
+	}
+	struct verbs_queue *vqs_ptr[maxks];
+	for (int j = 0; j < maxks; j++)
+		vqs_ptr[j] = vqs + j;
+
+	ret = verbs_init(&net_tx_buf_mp, vqs_ptr, maxks);
+	if (ret)
+		return ret;
 
 	log_info("net: started network stack");
 	net_dump_config();

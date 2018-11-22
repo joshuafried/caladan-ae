@@ -39,7 +39,9 @@ static const struct init_entry iok_init_handlers[] = {
 	IOK_INITIALIZER(rx),
 	IOK_INITIALIZER(tx),
 	IOK_INITIALIZER(dp_clients),
+#ifndef DIRECTPATH
 	IOK_INITIALIZER(dpdk_late),
+#endif
 };
 
 static int run_init_handlers(const char *phase, const struct init_entry *h,
@@ -75,10 +77,12 @@ void dataplane_loop()
 	 * Check that the port is on the same NUMA node as the polling thread
 	 * for best performance.
 	 */
+#ifndef DIRECTPATH
 	if (rte_eth_dev_socket_id(dp.port) > 0
 			&& rte_eth_dev_socket_id(dp.port) != (int) rte_socket_id())
 		log_warn("main: port %u is on remote NUMA node to polling thread.\n\t"
 				"Performance will not be optimal.", dp.port);
+#endif
 
 	log_info("main: core %u running dataplane. [Ctrl+C to quit]",
 			rte_lcore_id());
@@ -87,8 +91,10 @@ void dataplane_loop()
 	for (;;) {
 		work_done = false;
 
+#ifndef DIRECTPATH
 		/* handle a burst of ingress packets */
 		work_done |= rx_burst();
+#endif
 
 		/* handle control messages */
 		if (!work_done)
@@ -105,11 +111,13 @@ void dataplane_loop()
 		/* process a batch of commands from runtimes */
 		work_done |= commands_rx();
 
+#ifndef DIRECTPATH
 		/* drain overflow completion queues */
 		work_done |= tx_drain_completions();
 
 		/* send a burst of egress packets */
 		work_done |= tx_burst();
+#endif
 
 		STAT_INC(BATCH_TOTAL, IOKERNEL_RX_BURST_SIZE);
 
