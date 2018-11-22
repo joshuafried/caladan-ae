@@ -8,6 +8,9 @@
 
 #include "defs.h"
 #include "net/defs.h"
+#include "net/verbs.h"
+
+DECLARE_PERTHREAD(struct tcache_perthread, thread_pt);
 
 struct softirq_work {
 	unsigned int recv_cnt, compl_cnt, join_cnt, timer_budget;
@@ -45,26 +48,16 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 	int budget_left;
 
 	budget_left = min(budget, SOFTIRQ_MAX_BUDGET);
-	while (budget_left--) {
+	while (budget_left) {
 		uint64_t cmd;
 		unsigned long payload;
 
 		if (!lrpc_recv(&k->rxq, &cmd, &payload))
 			break;
 
+		budget_left--;
+
 		switch (cmd) {
-		case RX_NET_RECV:
-			w->recv_reqs[recv_cnt] = shmptr_to_ptr(
-				&netcfg.rx_region,
-				(shmptr_t)payload, MBUF_DEFAULT_LEN);
-			BUG_ON(w->recv_reqs[recv_cnt] == NULL);
-			recv_cnt++;
-			break;
-
-		case RX_NET_COMPLETE:
-			w->compl_reqs[compl_cnt++] = (struct mbuf *)payload;
-			break;
-
 		case RX_JOIN:
 			w->join_reqs[join_cnt++] = (struct kthread *)payload;
 			break;
@@ -72,6 +65,16 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 		default:
 			log_err_ratelimited("net: invalid RXQ cmd '%ld'", cmd);
 		}
+	}
+
+	if (budget_left) {
+		struct verbs_work vw = {
+			.rx_cnt = &recv_cnt,
+			.compl_cnt = &compl_cnt,
+			.rx_bufs = w->recv_reqs,
+			.compl_bufs = w->compl_reqs,
+		};
+		budget_left -= verbs_gather_work(&vw, k->vq, budget_left);
 	}
 
 	w->k = k;
@@ -97,14 +100,18 @@ thread_t *softirq_run_thread(struct kthread *k, unsigned int budget)
 	assert_spin_lock_held(&k->lock);
 
 	/* check if there's any work available */
-	if (lrpc_empty(&k->rxq) && !timer_needed(k))
-		return NULL;
+	/* TODO: short-circuit when no verbs work is available */
 
 	th = thread_create_with_buf(softirq_fn, (void **)&w, sizeof(*w));
 	if (unlikely(!th))
 		return NULL;
 
 	softirq_gather_work(w, k, budget);
+	if (!w->join_cnt && !w->recv_cnt && !w->compl_cnt && !timer_needed(k)) {
+		stack_free(th->stack);
+		tcache_free(&perthread_get(thread_pt), th);
+		return NULL;
+	}
 	th->state = THREAD_STATE_RUNNABLE;
 	return th;
 }
@@ -120,10 +127,7 @@ void softirq_run(unsigned int budget)
 
 	k = getk();
 	/* check if there's any work available */
-	if (lrpc_empty(&k->rxq) && !timer_needed(k)) {
-		putk();
-		return;
-	}
+	/* TODO: short-circuit when no verbs work is available */
 
 	spin_lock(&k->lock);
 	softirq_gather_work(&w, k, budget);

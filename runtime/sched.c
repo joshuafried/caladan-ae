@@ -32,7 +32,7 @@ bool disable_watchdog;
 /* fast allocation of struct thread */
 static struct slab thread_slab;
 static struct tcache *thread_tcache;
-static DEFINE_PERTHREAD(struct tcache_perthread, thread_pt);
+DEFINE_PERTHREAD(struct tcache_perthread, thread_pt);
 
 /* used to track cycle usage in scheduler */
 static __thread uint64_t last_tsc;

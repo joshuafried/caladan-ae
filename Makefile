@@ -1,7 +1,8 @@
 DPDK_PATH = dpdk
-INC     = -I./inc -I$(DPDK_PATH)/build/include
+RDMA_CORE_PATH = rdma-core
+INC     = -I./inc -I$(DPDK_PATH)/build/include -I$(RDMA_CORE_PATH)/build/include
 CFLAGS  = -g -Wall -std=gnu11 -D_GNU_SOURCE $(INC) -mssse3
-LDFLAGS = -T base/base.ld -no-pie
+LDFLAGS = -T base/base.ld -no-pie -L $(RDMA_CORE_PATH)/build/libs
 LD	= gcc
 CC	= gcc
 AR	= ar
@@ -98,7 +99,7 @@ iokerneld-noht: $(iokernel_noht_obj) libbase.a libnet.a base/base.ld
 	 -lpthread -lnuma -ldl
 
 $(test_targets): $(test_obj) libbase.a libruntime.a libnet.a base/base.ld
-	$(LD) $(LDFLAGS) -o $@ $@.o libruntime.a libnet.a libbase.a -lpthread
+	$(LD) $(LDFLAGS) -o $@ $@.o libruntime.a libnet.a libbase.a -lpthread -libverbs
 
 # general build rules for all targets
 src = $(base_src) $(dune_src) $(net_src) $(runtime_src) $(iokernel_src) $(test_src)
