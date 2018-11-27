@@ -36,7 +36,7 @@ static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 /* Rudimentary per-kthread verb queues */
 static DEFINE_SPINLOCK(qslock);
 static int nrvqs;
-static struct verbs_queue vqs[NCPU];
+static struct verbs_queue_rx vqs[NCPU];
 
 
 /*
@@ -320,7 +320,7 @@ static void net_tx_raw(struct mbuf *m)
 	STAT(TX_PACKETS)++;
 	STAT(TX_BYTES) += len;
 
-	if (verbs_transmit_one(k->vq, m))
+	if (verbs_transmit_one(&k->vq_tx, m))
 		mbufq_push_tail(&k->txpktq_overflow, m);
 
 	putk();
@@ -532,10 +532,14 @@ int net_init_thread(void)
 		return ret;
 
 	spin_lock(&qslock);
-	myk()->vq = &vqs[nrvqs++];
+	myk()->vq_rx = &vqs[nrvqs++];
 	spin_unlock(&qslock);
 
-	return verbs_init_queue(myk()->vq);
+	ret = verbs_init_tx_queue(&myk()->vq_tx);
+	if (ret)
+		return ret;
+
+	return verbs_init_rx_queue(myk()->vq_rx);
 }
 
 
@@ -585,7 +589,7 @@ int net_init(void)
 		log_err("verbs implementation requires power-of-two kthreads");
 		return -1;
 	}
-	struct verbs_queue *vqs_ptr[maxks];
+	struct verbs_queue_rx *vqs_ptr[maxks];
 	for (int j = 0; j < maxks; j++)
 		vqs_ptr[j] = vqs + j;
 

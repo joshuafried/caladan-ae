@@ -59,7 +59,7 @@ netperf_obj = $(netperf_src:.cc=.o)
 linux_mech_bench_src = linux_mech_bench.cc
 linux_mech_bench_obj = $(linux_mech_bench_src:.cc=.o)
 
-librt_libs = $(CXXPATH)/librt++.a $(BASEPATH)/libruntime.a $(BASEPATH)/libnet.a $(BASEPATH)/libbase.a
+librt_libs = $(CXXPATH)/librt++.a $(BASEPATH)/libruntime.a $(BASEPATH)/libnet.a $(BASEPATH)/libbase.a -libverbs -lmlx5
 
 # must be first
 all: tbench callibrate stress efficiency efficiency_linux \

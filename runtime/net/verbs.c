@@ -18,8 +18,8 @@
 #include "defs.h"
 #include "verbs.h"
 
-#define RQ_NUM_DESC 256
-#define SQ_NUM_DESC 256
+#define RQ_NUM_DESC 128
+#define SQ_NUM_DESC 128
 #define PORT_NUM 1
 
 #define RX_BUF_BOOL_SZ(nrqs) \
@@ -27,6 +27,8 @@
 #define RX_BUF_RESERVED \
  (align_up(sizeof(struct rx_net_hdr), CACHE_LINE_SIZE))
 
+static struct ibv_context *context;
+static struct ibv_pd *pd;
 static struct ibv_mr *mr_tx;
 static struct ibv_mr *mr_rx;
 
@@ -59,11 +61,11 @@ static inline unsigned char *verbs_rx_alloc_buf(void)
 /*
  * verbs_queue_is_empty - check if there is a pending completion event
  */
-bool verbs_queue_is_empty(struct verbs_queue *v)
+bool verbs_queue_is_empty(struct verbs_custom_cq *cq)
 {
-	struct mlx5_cqe64 *cqes = v->mlx5cq->buf;
-	struct mlx5_cqe64 *cqe = &cqes[v->cq_idx & (v->mlx5cq->cqe_cnt - 1)];
-	uint16_t parity = v->cq_idx & v->mlx5cq->cqe_cnt;
+	struct mlx5_cqe64 *cqes = cq->dvcq.buf;
+	struct mlx5_cqe64 *cqe = &cqes[cq->cq_idx & (cq->dvcq.cqe_cnt - 1)];
+	uint16_t parity = cq->cq_idx & cq->dvcq.cqe_cnt;
 	uint8_t op_own = ACCESS_ONCE(cqe->op_own);
 	uint8_t op_owner = op_own & MLX5_CQE_OWNER_MASK;
 	uint8_t op_code = (op_own & 0xf0) >> 4;
@@ -73,12 +75,12 @@ bool verbs_queue_is_empty(struct verbs_queue *v)
 
 /*
  * verbs_refill_rxqueue - replenish RX queue with nrdesc bufs
- * @v: queue to refill
+ * @rx_wq: queue to refill
  * @nrdesc: number of buffers to fill
  *
  * returns 0 on success, errno on error
  */
-static int verbs_refill_rxqueue(struct verbs_queue *v, int nrdesc)
+static int verbs_refill_rxqueue(struct ibv_wq *rx_wq, int nrdesc)
 {
 	unsigned int i;
 	unsigned char *buf;
@@ -98,7 +100,7 @@ static int verbs_refill_rxqueue(struct verbs_queue *v, int nrdesc)
 		wr[i].wr_id = (uint64_t)buf;
 	}
 
-	return ibv_post_wq_recv(v->rx_wq, wr, &bad_wr);
+	return ibv_post_wq_recv(rx_wq, wr, &bad_wr);
 }
 
 /*
@@ -108,7 +110,7 @@ static int verbs_refill_rxqueue(struct verbs_queue *v, int nrdesc)
  *
  * returns 0 on success, errno on error
  */
-int verbs_transmit_one(struct verbs_queue *v, struct mbuf *m)
+int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 {
 	struct ibv_sge sg_entry = {
 		.addr = (uint64_t)mbuf_data(m),
@@ -131,52 +133,78 @@ int verbs_transmit_one(struct verbs_queue *v, struct mbuf *m)
 	return ibv_post_send(v->tx_qp, &wr, &bad_wr);
 }
 
-/*
- * verbs_gather_work - collect up to budget received packets and completions
- */
-int verbs_gather_work(struct verbs_work *vw, struct verbs_queue *v, unsigned int budget)
+int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned int budget)
 {
 	struct rx_net_hdr *hdr;
 	struct ibv_poll_cq_attr attr = { 0 };
-	int rx_cnt = 0, compl_cnt = 0, ret;
+	int rx_cnt = 0, ret;
 
-	if (verbs_queue_is_empty(v))
+	if (verbs_queue_is_empty(v->raw_cq))
 		return 0;
 
-	ret = ibv_start_poll(v->cq, &attr);
+	ret = ibv_start_poll(v->rx_cq, &attr);
 	if (ret == ENOENT)
 		return 0;
 	BUG_ON(ret);
 
 	while (budget--) {
-		v->cq_idx++;
-		BUG_ON(v->cq->status != IBV_WC_SUCCESS);
-		if (ibv_wc_read_opcode(v->cq) & IBV_WC_RECV) {
-			hdr = (struct rx_net_hdr *)((char *)v->cq->wr_id - sizeof(*hdr));
-			hdr->completion_data = v->cq->wr_id;
-			hdr->len = ibv_wc_read_byte_len(v->cq);
-			hdr->csum_type = (ibv_wc_read_wc_flags(v->cq) & IBV_WC_IP_CSUM_OK) ? CHECKSUM_TYPE_UNNECESSARY : CHECKSUM_TYPE_NEEDED;
-			vw->rx_bufs[rx_cnt++] = hdr;
-		} else {
-			vw->compl_bufs[compl_cnt++] = (struct mbuf *)v->cq->wr_id;
-		}
-
+		v->raw_cq->cq_idx++;
+		BUG_ON(v->rx_cq->status != IBV_WC_SUCCESS);
+		BUG_ON(!(ibv_wc_read_opcode(v->rx_cq) & IBV_WC_RECV));
+		hdr = (struct rx_net_hdr *)((char *)v->rx_cq->wr_id - sizeof(*hdr));
+		hdr->completion_data = v->rx_cq->wr_id;
+		hdr->len = ibv_wc_read_byte_len(v->rx_cq);
+		hdr->csum_type = (ibv_wc_read_wc_flags(v->rx_cq) & IBV_WC_IP_CSUM_OK) ? CHECKSUM_TYPE_UNNECESSARY : CHECKSUM_TYPE_NEEDED;
+		hdrs[rx_cnt++] = hdr;
 		if (budget) {
-			ret = ibv_next_poll(v->cq);
+			ret = ibv_next_poll(v->rx_cq);
 			if (ret == ENOENT)
 				break;
 			BUG_ON(ret);
 		}
 	}
 
-	ibv_end_poll(v->cq);
+	ibv_end_poll(v->rx_cq);
 
 	if (rx_cnt)
-		BUG_ON(verbs_refill_rxqueue(v, rx_cnt));
+		BUG_ON(verbs_refill_rxqueue(v->rx_wq, rx_cnt));
 
-	*vw->rx_cnt = rx_cnt;
-	*vw->compl_cnt = compl_cnt;
-	return rx_cnt + compl_cnt;
+	return rx_cnt;
+
+}
+
+/*
+ * verbs_gather_work - collect up to budget received packets and completions
+ */
+int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsigned int budget)
+{
+	struct ibv_poll_cq_attr attr = { 0 };
+	int compl_cnt = 0, ret;
+
+	if (verbs_queue_is_empty(v->raw_cq))
+		return 0;
+
+	ret = ibv_start_poll(v->tx_cq, &attr);
+	if (ret == ENOENT)
+		return 0;
+	BUG_ON(ret);
+
+	while (budget--) {
+		v->raw_cq->cq_idx++;
+		BUG_ON(v->tx_cq->status != IBV_WC_SUCCESS);
+		BUG_ON(ibv_wc_read_opcode(v->tx_cq) & IBV_WC_RECV);
+		mbufs[compl_cnt++] = (struct mbuf *)v->tx_cq->wr_id;
+		if (budget) {
+			ret = ibv_next_poll(v->tx_cq);
+			if (ret == ENOENT)
+				break;
+			BUG_ON(ret);
+		}
+	}
+
+	ibv_end_poll(v->tx_cq);
+
+	return compl_cnt;
 }
 
 /*
@@ -209,16 +237,14 @@ static struct mlx5dv_ctx_allocators dv_allocators = {
 /*
  * verbs_init - intialize all TX/RX queues
  */
-int verbs_init(struct mempool *tx_mp, struct verbs_queue **qs, int nrqs)
+int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx **qs, int nrqs)
 {
 	int i, fd, ret;
 	void *rx_buf;
 
 	struct ibv_device **dev_list;
 	struct ibv_device *ib_dev;
-	struct ibv_pd *pd;
 	struct ibv_qp *qp;
-	struct ibv_context *context;
 	struct ibv_rwq_ind_table *rwq_ind_table;
 	struct ibv_wq *ind_tbl[nrqs];
 	struct ibv_flow *eth_flow;
@@ -286,11 +312,11 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue **qs, int nrqs)
 	}
 
 	for (i = 0; i < nrqs; i++) {
-		struct verbs_queue *v = qs[i];
+		struct verbs_queue_rx *v = qs[i];
 
 		/* Create a CQ */
 		struct ibv_cq_init_attr_ex cq_attr = {
-			.cqe = RQ_NUM_DESC + SQ_NUM_DESC,
+			.cqe = RQ_NUM_DESC,
 			.channel = NULL,
 			.comp_vector = 0,
 			.wc_flags = IBV_WC_EX_WITH_BYTE_LEN,
@@ -300,8 +326,8 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue **qs, int nrqs)
 		struct mlx5dv_cq_init_attr dv_cq_attr = {
 			.comp_mask = 0,
 		};
-		v->cq = mlx5dv_create_cq(context, &cq_attr, &dv_cq_attr);
-		BUG_ON(!v->cq);
+		v->rx_cq = mlx5dv_create_cq(context, &cq_attr, &dv_cq_attr);
+		BUG_ON(!v->rx_cq);
 
 		/* Create the work queue for RX */
 		struct ibv_wq_init_attr wq_init_attr = {
@@ -309,7 +335,7 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue **qs, int nrqs)
 			.max_wr = RQ_NUM_DESC,
 			.max_sge = 1,
 			.pd = pd,
-			.cq = ibv_cq_ex_to_cq(v->cq),
+			.cq = ibv_cq_ex_to_cq(v->rx_cq),
 			.comp_mask = 0,
 			.create_flags = 0,
 		};
@@ -330,52 +356,16 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue **qs, int nrqs)
 		wq_attr.wq_state = IBV_WQS_RDY;
 		BUG_ON(ibv_modify_wq(v->rx_wq, &wq_attr));
 
-		/* Create a 1-sided queue pair for sending packets */
-		struct ibv_qp_init_attr_ex qp_init_attr = {
-			.send_cq = ibv_cq_ex_to_cq(v->cq),
-			.recv_cq = ibv_cq_ex_to_cq(v->cq),
-			.cap = {
-				.max_send_wr = SQ_NUM_DESC,
-				.max_recv_wr = 0,
-				.max_send_sge = 1,
-				.max_inline_data = 0, // TODO: should inline some data?
-			},
-			.qp_type = IBV_QPT_RAW_PACKET,
-			.sq_sig_all = 1,
-			.pd = pd,
-			.comp_mask = IBV_QP_INIT_ATTR_PD
-		};
-		struct mlx5dv_qp_init_attr dv_qp_attr = {
-			.comp_mask = 0,
-		};
-		v->tx_qp = mlx5dv_create_qp(context, &qp_init_attr, &dv_qp_attr);
-		BUG_ON(!v->tx_qp);
-
-		/* Turn on TX QP in 3 steps */
-		struct ibv_qp_attr qp_attr;
-		memset(&qp_attr, 0, sizeof(qp_attr));
-		qp_attr.qp_state = IBV_QPS_INIT;
-		qp_attr.port_num = 1;
-		BUG_ON(ibv_modify_qp(v->tx_qp, &qp_attr, IBV_QP_STATE | IBV_QP_PORT));
-
-		memset(&qp_attr, 0, sizeof(qp_attr));
-		qp_attr.qp_state = IBV_QPS_RTR;
-		BUG_ON(ibv_modify_qp(v->tx_qp, &qp_attr, IBV_QP_STATE));
-
-		memset(&qp_attr, 0, sizeof(qp_attr));
-		qp_attr.qp_state = IBV_QPS_RTS;
-		BUG_ON(ibv_modify_qp(v->tx_qp, &qp_attr, IBV_QP_STATE));
-
 		/* Directly expose completion queue */
-		v->mlx5cq = simple_alloc(align_up(sizeof(*v->mlx5cq), PGSIZE_4KB), 0);
+		v->raw_cq = simple_alloc(align_up(sizeof(*v->raw_cq), PGSIZE_4KB), 0);
 		struct mlx5dv_obj obj = {
 			.cq = {
-				.in = ibv_cq_ex_to_cq(v->cq),
-				.out = v->mlx5cq,
+				.in = ibv_cq_ex_to_cq(v->rx_cq),
+				.out = &v->raw_cq->dvcq,
 			},
 		};
 		BUG_ON(mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ));
-		v->cq_idx = 0;
+		v->raw_cq->cq_idx = 0;
 	}
 
 	/* Create Receive Work Queue Indirection Table */
@@ -471,7 +461,73 @@ int verbs_init_thread(void)
 	return 0;
 }
 
-int verbs_init_queue(struct verbs_queue *v)
+int verbs_init_tx_queue(struct verbs_queue_tx *v)
 {
-	return verbs_refill_rxqueue(v, RQ_NUM_DESC);
+	/* Create a CQ */
+	struct ibv_cq_init_attr_ex cq_attr = {
+		.cqe = SQ_NUM_DESC,
+		.channel = NULL,
+		.comp_vector = 0,
+		.wc_flags = 0,
+		.comp_mask = 0,
+		.flags = IBV_CREATE_CQ_ATTR_SINGLE_THREADED,
+	};
+	struct mlx5dv_cq_init_attr dv_cq_attr = {
+		.comp_mask = 0,
+	};
+	v->tx_cq = mlx5dv_create_cq(context, &cq_attr, &dv_cq_attr);
+	BUG_ON(!v->tx_cq);
+
+	/* Create a 1-sided queue pair for sending packets */
+	struct ibv_qp_init_attr_ex qp_init_attr = {
+		.send_cq = ibv_cq_ex_to_cq(v->tx_cq),
+		.recv_cq = ibv_cq_ex_to_cq(v->tx_cq),
+		.cap = {
+			.max_send_wr = SQ_NUM_DESC,
+			.max_recv_wr = 0,
+			.max_send_sge = 1,
+			.max_inline_data = 0, // TODO: should inline some data?
+		},
+		.qp_type = IBV_QPT_RAW_PACKET,
+		.sq_sig_all = 1,
+		.pd = pd,
+		.comp_mask = IBV_QP_INIT_ATTR_PD
+	};
+	struct mlx5dv_qp_init_attr dv_qp_attr = {
+		.comp_mask = 0,
+	};
+	v->tx_qp = mlx5dv_create_qp(context, &qp_init_attr, &dv_qp_attr);
+	BUG_ON(!v->tx_qp);
+
+	/* Turn on TX QP in 3 steps */
+	struct ibv_qp_attr qp_attr;
+	memset(&qp_attr, 0, sizeof(qp_attr));
+	qp_attr.qp_state = IBV_QPS_INIT;
+	qp_attr.port_num = 1;
+	BUG_ON(ibv_modify_qp(v->tx_qp, &qp_attr, IBV_QP_STATE | IBV_QP_PORT));
+
+	memset(&qp_attr, 0, sizeof(qp_attr));
+	qp_attr.qp_state = IBV_QPS_RTR;
+	BUG_ON(ibv_modify_qp(v->tx_qp, &qp_attr, IBV_QP_STATE));
+
+	memset(&qp_attr, 0, sizeof(qp_attr));
+	qp_attr.qp_state = IBV_QPS_RTS;
+	BUG_ON(ibv_modify_qp(v->tx_qp, &qp_attr, IBV_QP_STATE));
+
+	v->raw_cq = simple_alloc(align_up(sizeof(*v->raw_cq), PGSIZE_4KB), 0);
+	struct mlx5dv_obj obj = {
+		.cq = {
+			.in = ibv_cq_ex_to_cq(v->tx_cq),
+			.out = &v->raw_cq->dvcq,
+		},
+	};
+	BUG_ON(mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ));
+	v->raw_cq->cq_idx = 0;
+
+	return 0;
+}
+
+int verbs_init_rx_queue(struct verbs_queue_rx *v)
+{
+	return verbs_refill_rxqueue(v->rx_wq, RQ_NUM_DESC);
 }

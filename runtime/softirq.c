@@ -68,13 +68,13 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 	}
 
 	if (budget_left) {
-		struct verbs_work vw = {
-			.rx_cnt = &recv_cnt,
-			.compl_cnt = &compl_cnt,
-			.rx_bufs = w->recv_reqs,
-			.compl_bufs = w->compl_reqs,
-		};
-		budget_left -= verbs_gather_work(&vw, k->vq, budget_left);
+		compl_cnt = verbs_gather_completions(w->compl_reqs, &k->vq_tx, budget_left);
+		budget_left -= compl_cnt;
+	}
+
+	if (budget_left) {
+		recv_cnt = verbs_gather_rx(w->recv_reqs, k->vq_rx, budget_left);
+		budget_left -= recv_cnt;
 	}
 
 	w->k = k;
@@ -100,7 +100,9 @@ thread_t *softirq_run_thread(struct kthread *k, unsigned int budget)
 	assert_spin_lock_held(&k->lock);
 
 	/* check if there's any work available */
-	if (lrpc_empty(&k->rxq) && !timer_needed(k) && verbs_queue_is_empty(k->vq))
+	if (lrpc_empty(&k->rxq) && !timer_needed(k) &&
+			verbs_queue_is_empty(k->vq_tx.raw_cq) &&
+			verbs_queue_is_empty(k->vq_rx->raw_cq))
 		return NULL;
 
 	th = thread_create_with_buf(softirq_fn, (void **)&w, sizeof(*w));
@@ -123,7 +125,9 @@ void softirq_run(unsigned int budget)
 
 	k = getk();
 	/* check if there's any work available */
-	if (lrpc_empty(&k->rxq) && !timer_needed(k) && verbs_queue_is_empty(k->vq)) {
+	if (lrpc_empty(&k->rxq) && !timer_needed(k) &&
+			verbs_queue_is_empty(k->vq_tx.raw_cq) &&
+			verbs_queue_is_empty(k->vq_rx->raw_cq)) {
 		putk();
 		return;
 	}
