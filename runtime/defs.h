@@ -20,6 +20,8 @@
 #include <runtime/rcu.h>
 #include <runtime/preempt.h>
 
+#include "net/verbs.h"
+
 
 /*
  * constant limits
@@ -299,8 +301,9 @@ struct kthread {
 	struct timer_idx	*timers;
 	unsigned long		pad2[6];
 
-	struct verbs_queue *vq;
-	unsigned long pad3[7];
+	struct verbs_queue_rx *vq_rx;
+	struct verbs_queue_tx vq_tx;
+	unsigned long		pad3[4];
 
 	/* 9th cache-line, statistics counters */
 	uint64_t		stats[STAT_NR];
