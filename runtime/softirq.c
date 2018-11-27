@@ -100,18 +100,14 @@ thread_t *softirq_run_thread(struct kthread *k, unsigned int budget)
 	assert_spin_lock_held(&k->lock);
 
 	/* check if there's any work available */
-	/* TODO: short-circuit when no verbs work is available */
+	if (lrpc_empty(&k->rxq) && !timer_needed(k) && verbs_queue_is_empty(k->vq))
+		return NULL;
 
 	th = thread_create_with_buf(softirq_fn, (void **)&w, sizeof(*w));
 	if (unlikely(!th))
 		return NULL;
 
 	softirq_gather_work(w, k, budget);
-	if (!w->join_cnt && !w->recv_cnt && !w->compl_cnt && !timer_needed(k)) {
-		stack_free(th->stack);
-		tcache_free(&perthread_get(thread_pt), th);
-		return NULL;
-	}
 	th->state = THREAD_STATE_RUNNABLE;
 	return th;
 }
@@ -127,7 +123,10 @@ void softirq_run(unsigned int budget)
 
 	k = getk();
 	/* check if there's any work available */
-	/* TODO: short-circuit when no verbs work is available */
+	if (lrpc_empty(&k->rxq) && !timer_needed(k) && verbs_queue_is_empty(k->vq)) {
+		putk();
+		return;
+	}
 
 	spin_lock(&k->lock);
 	softirq_gather_work(&w, k, budget);
