@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <infiniband/mlx5dv.h>
 #include <infiniband/verbs.h>
 
 struct mempool;
@@ -13,6 +14,10 @@ struct verbs_queue {
 	struct ibv_wq *rx_wq; /* single RX work queue */
 	struct ibv_qp *tx_qp; /* QP with a single TX queue */
 	struct ibv_cq_ex *cq; /* Completion Queue shared by rx_wq and tx_qp */
+
+	/* Support for directly exposed queues */
+	struct mlx5dv_cq *mlx5cq;
+	uint32_t cq_idx;
 };
 
 struct verbs_work {
@@ -25,6 +30,7 @@ struct verbs_work {
 void verbs_rx_completion(unsigned long completion_data);
 int verbs_transmit_one(struct verbs_queue *v, struct mbuf *m);
 int verbs_gather_work(struct verbs_work *w, struct verbs_queue *v, unsigned int budget);
+bool verbs_queue_is_empty(struct verbs_queue *v);
 
 /* Initialization functions */
 int verbs_init(struct mempool *mp, struct verbs_queue **qs, int nrqs);

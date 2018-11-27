@@ -9,6 +9,7 @@ fn main() {
     println!("cargo:rustc-link-lib=static=net");
     println!("cargo:rustc-link-lib=static=runtime");
     println!("cargo:rustc-link-lib=ibverbs");
+    println!("cargo:rustc-link-lib=mlx5");
     println!("cargo:rustc-flags=-L ../.. -L ../../rdma-core/build/lib");
 
     // The bindgen::Builder is the main entry point
