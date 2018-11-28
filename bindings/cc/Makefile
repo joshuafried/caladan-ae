@@ -1,6 +1,7 @@
 INC     = -I../../inc -I./
 CXXFLAGS  = -g -Wall -std=gnu++11 -D_GNU_SOURCE $(INC) -mssse3
-LDFLAGS = -T../../base/base.ld
+RDMA_CORE = $(dir $(realpath $(firstword $(MAKEFILE_LIST))))/../../rdma-core
+LDFLAGS = -T../../base/base.ld -L $(RDMA_CORE)/build/lib -Wl,-rpath $(RDMA_CORE)/build/lib
 LD	= g++
 CC	= g++
 AR	= ar
@@ -30,7 +31,7 @@ librt++.a: $(rt_obj)
 
 test: $(test_obj) librt++.a ../../libruntime.a ../../libnet.a ../../libbase.a
 	$(LD) $(LDFLAGS) -o $@ $(test_obj) librt++.a ../../libruntime.a \
-	../../libnet.a ../../libbase.a -lpthread
+	../../libnet.a ../../libbase.a -lpthread -libverbs -lmlx5
 
 # general build rules for all targets
 src = $(rt_src) $(test_src)

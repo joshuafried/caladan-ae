@@ -1,8 +1,8 @@
 DPDK_PATH = dpdk
-RDMA_CORE_PATH = rdma-core
+RDMA_CORE_PATH = $(dir $(realpath $(firstword $(MAKEFILE_LIST))))/rdma-core
 INC     = -I./inc -I$(DPDK_PATH)/build/include -I$(RDMA_CORE_PATH)/build/include
 CFLAGS  = -g -Wall -std=gnu11 -D_GNU_SOURCE $(INC) -mssse3
-LDFLAGS = -T base/base.ld -no-pie -L $(RDMA_CORE_PATH)/build/libs
+LDFLAGS = -T base/base.ld -no-pie -L $(RDMA_CORE_PATH)/build/lib -Wl,-rpath=$(RDMA_CORE_PATH)/build/lib/
 LD	= gcc
 CC	= gcc
 AR	= ar

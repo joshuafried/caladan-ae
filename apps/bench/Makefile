@@ -4,7 +4,8 @@ BASEPATH = ../..
 CXXPATH = ../../bindings/cc
 INC     = -I../../inc -I../../bindings/cc -I./
 CXXFLAGS  = -g -Wall -std=gnu++11 -D_GNU_SOURCE $(INC) -mssse3
-LDFLAGS = -T../../base/base.ld -no-pie
+RDMA_CORE = $(dir $(realpath $(firstword $(MAKEFILE_LIST))))/../../rdma-core
+LDFLAGS = -T../../base/base.ld -no-pie -L $(RDMA_CORE)/build/lib -Wl,-rpath $(RDMA_CORE)/build/lib
 ARACHNE ?= /home/friedj/memcached-arachne/arachne-all/Arachne
 
 LD	= g++
