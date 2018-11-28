@@ -70,7 +70,7 @@ bool verbs_queue_is_empty(struct verbs_custom_cq *cq)
 	uint8_t op_owner = op_own & MLX5_CQE_OWNER_MASK;
 	uint8_t op_code = (op_own & 0xf0) >> 4;
 
-	return op_owner != (!!(parity)) || op_code == MLX5_CQE_INVALID;
+	return op_owner != !!parity || op_code == MLX5_CQE_INVALID;
 }
 
 /*
@@ -136,11 +136,14 @@ int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned int budget)
 {
 	struct rx_net_hdr *hdr;
-	struct ibv_poll_cq_attr attr = { 0 };
-	int rx_cnt = 0, ret;
+	int rx_cnt = 0;
 
 	if (verbs_queue_is_empty(v->raw_cq))
 		return 0;
+
+#if 0
+	int ret;
+	struct ibv_poll_cq_attr attr = { 0 };
 
 	ret = ibv_start_poll(v->rx_cq, &attr);
 	if (ret == ENOENT)
@@ -166,6 +169,24 @@ int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned
 
 	ibv_end_poll(v->rx_cq);
 
+#else
+	struct ibv_wc wc[budget];
+	int msgs;
+
+	msgs = ibv_poll_cq(ibv_cq_ex_to_cq(v->rx_cq), budget, wc);
+	BUG_ON(msgs < 0);
+	for (int i = 0; i < msgs; i++) {
+		v->raw_cq->cq_idx++;
+		BUG_ON(wc[i].status != IBV_WC_SUCCESS);
+		BUG_ON(!(wc[i].opcode & IBV_WC_RECV));
+		hdr = (struct rx_net_hdr *)((char *)wc[i].wr_id - sizeof(*hdr));
+		hdr->completion_data = wc[i].wr_id;
+		hdr->len = wc[i].byte_len;
+		hdr->csum_type = (wc[i].wc_flags & IBV_WC_IP_CSUM_OK) ? CHECKSUM_TYPE_UNNECESSARY : CHECKSUM_TYPE_NEEDED;
+		hdrs[rx_cnt++] = hdr;
+	}
+#endif
+
 	if (rx_cnt)
 		BUG_ON(verbs_refill_rxqueue(v->rx_wq, rx_cnt));
 
@@ -178,11 +199,14 @@ int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned
  */
 int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsigned int budget)
 {
-	struct ibv_poll_cq_attr attr = { 0 };
-	int compl_cnt = 0, ret;
+	int compl_cnt = 0;
 
 	if (verbs_queue_is_empty(v->raw_cq))
 		return 0;
+
+#if 0
+	int ret;
+	struct ibv_poll_cq_attr attr = { 0 };
 
 	ret = ibv_start_poll(v->tx_cq, &attr);
 	if (ret == ENOENT)
@@ -203,6 +227,20 @@ int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsi
 	}
 
 	ibv_end_poll(v->tx_cq);
+#else
+	struct ibv_wc wc[budget];
+	int msgs;
+
+	msgs = ibv_poll_cq(ibv_cq_ex_to_cq(v->tx_cq), budget, wc);
+	BUG_ON(msgs < 0);
+	for (int i = 0; i < msgs; i++) {
+		v->raw_cq->cq_idx++;
+		BUG_ON(wc[i].status != IBV_WC_SUCCESS);
+		BUG_ON(wc[i].opcode & IBV_WC_RECV);
+		mbufs[compl_cnt++] = (struct mbuf *)wc[i].wr_id;
+	}
+
+#endif
 
 	return compl_cnt;
 }
@@ -258,18 +296,29 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx **qs, int nrqs)
 		return -1;
 	}
 
-	ib_dev = dev_list[0];
+	i = 0;
+	while ((ib_dev = dev_list[i])) {
+		if (strncmp(ibv_get_device_name(ib_dev), "mlx5", 4) == 0)
+			break;
+		i++;
+	}
+
 	if (!ib_dev) {
 		log_err("verbs_init: IB device not found");
 		return -1;
 	}
 
-	context = ibv_open_device(ib_dev);
+	setenv("MLX5_SINGLE_THREADED", "1", true);
+	struct mlx5dv_context_attr attr;
+	memset(&attr, 0, sizeof(attr));
+	context = mlx5dv_open_device(ib_dev, &attr);
 	if (!context) {
 		log_err("verbs_init: Couldn't get context for %s",
 			ibv_get_device_name(ib_dev));
 		return -1;
 	}
+
+	ibv_free_device_list(dev_list);
 
 	ret = mlx5dv_set_context_attr(context,
 		  MLX5DV_CTX_ATTR_BUF_ALLOCATORS, &dv_allocators);
@@ -301,7 +350,7 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx **qs, int nrqs)
 		return ret;
 
 	verbs_buf_tcache = mempool_create_tcache(&verbs_buf_mp,
-		"verbs_rx_bufs", 64);
+		"verbs_rx_bufs", TCACHE_DEFAULT_MAG_SIZE);
 	if (!verbs_buf_tcache)
 		return -ENOMEM;
 
@@ -320,7 +369,7 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx **qs, int nrqs)
 			.channel = NULL,
 			.comp_vector = 0,
 			.wc_flags = IBV_WC_EX_WITH_BYTE_LEN,
-			.comp_mask = 0,
+			.comp_mask = IBV_CQ_INIT_ATTR_MASK_FLAGS,
 			.flags = IBV_CREATE_CQ_ATTR_SINGLE_THREADED,
 		};
 		struct mlx5dv_cq_init_attr dv_cq_attr = {
@@ -469,7 +518,7 @@ int verbs_init_tx_queue(struct verbs_queue_tx *v)
 		.channel = NULL,
 		.comp_vector = 0,
 		.wc_flags = 0,
-		.comp_mask = 0,
+		.comp_mask = IBV_CQ_INIT_ATTR_MASK_FLAGS,
 		.flags = IBV_CREATE_CQ_ATTR_SINGLE_THREADED,
 	};
 	struct mlx5dv_cq_init_attr dv_cq_attr = {
