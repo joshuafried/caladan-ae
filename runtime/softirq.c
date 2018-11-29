@@ -45,7 +45,7 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 				unsigned int budget)
 {
 	unsigned int recv_cnt = 0, compl_cnt = 0, join_cnt = 0;
-	int budget_left;
+	int j, budget_left;
 
 	budget_left = min(budget, SOFTIRQ_MAX_BUDGET);
 	while (budget_left) {
@@ -72,16 +72,40 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 		budget_left -= compl_cnt;
 	}
 
-	if (budget_left) {
-		recv_cnt = verbs_gather_rx(w->recv_reqs, k->vq_rx, budget_left);
-		budget_left -= recv_cnt;
+	for (j = 0; budget_left && j < k->nr_vq_rx; j++) {
+		int idx = (j + k->pos_vq_rx) % k->nr_vq_rx;
+		if (j + 2 < k->nr_vq_rx)
+			prefetch(k->vq_rx[(idx + 2) % k->nr_vq_rx]->raw_cq);
+		int rcv = verbs_gather_rx(w->recv_reqs + recv_cnt, k->vq_rx[idx], budget_left);
+		recv_cnt += rcv;
+		budget_left -= rcv;
 	}
+
+	k->pos_vq_rx += j;
 
 	w->k = k;
 	w->recv_cnt = recv_cnt;
 	w->compl_cnt = compl_cnt;
 	w->join_cnt = join_cnt;
 	w->timer_budget = budget_left;
+}
+
+static bool verbs_work_exists(struct kthread *k)
+{
+	int j = 0;
+
+	if (!verbs_queue_is_empty(k->vq_tx.raw_cq))
+		return true;
+
+	for (j = 0; j < k->nr_vq_rx; j++) {
+		int pos = (j + k->pos_vq_rx) % k->nr_vq_rx;
+		if (j + 4 < k->nr_vq_rx)
+			prefetch(k->vq_rx[(pos + 4) % k->nr_vq_rx]->raw_cq);
+		if (!verbs_queue_is_empty(k->vq_rx[pos]->raw_cq))
+			return true;
+	}
+
+	return false;
 }
 
 /**
@@ -100,9 +124,7 @@ thread_t *softirq_run_thread(struct kthread *k, unsigned int budget)
 	assert_spin_lock_held(&k->lock);
 
 	/* check if there's any work available */
-	if (lrpc_empty(&k->rxq) && !timer_needed(k) &&
-			verbs_queue_is_empty(k->vq_tx.raw_cq) &&
-			verbs_queue_is_empty(k->vq_rx->raw_cq))
+	if (lrpc_empty(&k->rxq) && !timer_needed(k) && !verbs_work_exists(k))
 		return NULL;
 
 	th = thread_create_with_buf(softirq_fn, (void **)&w, sizeof(*w));
@@ -125,9 +147,7 @@ void softirq_run(unsigned int budget)
 
 	k = getk();
 	/* check if there's any work available */
-	if (lrpc_empty(&k->rxq) && !timer_needed(k) &&
-			verbs_queue_is_empty(k->vq_tx.raw_cq) &&
-			verbs_queue_is_empty(k->vq_rx->raw_cq)) {
+	if (lrpc_empty(&k->rxq) && !timer_needed(k) && !verbs_work_exists(k)) {
 		putk();
 		return;
 	}
