@@ -64,6 +64,7 @@ static struct kthread *allock(void)
 	k->park_efd = eventfd(0, 0);
 	BUG_ON(k->park_efd < 0);
 	k->detached = true;
+
 	return k;
 }
 
@@ -81,6 +82,7 @@ int kthread_init_thread(void)
 		return -ENOMEM;
 
 	spin_lock_np(&klock);
+	mykthread->kthread_idx = allksn;
 	allks[allksn++] = mykthread;
 	assert(allksn <= maxks);
 	spin_unlock_np(&klock);
@@ -285,7 +287,3 @@ void kthread_wait_to_attach(void)
 	atomic_inc(&runningks);
 }
 
-int kthread_init(void)
-{
-	return 0;
-}

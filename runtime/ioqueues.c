@@ -30,9 +30,6 @@
 #define EGRESS_POOL_SIZE(nks) \
 	(PACKET_QUEUE_MCOUNT * MBUF_DEFAULT_LEN * max(16, (nks)) * 16UL)
 
-DEFINE_SPINLOCK(qlock);
-unsigned int nrqs = 0;
-
 struct iokernel_control iok;
 
 static int generate_random_mac(struct eth_addr *mac)
@@ -306,12 +303,10 @@ int ioqueues_init_thread(void)
 	pid_t tid = gettid();
 	struct shm_region *r = &netcfg.tx_region;
 
-	spin_lock(&qlock);
-	assert(nrqs < iok.thread_count);
-	struct thread_spec *ts = &iok.threads[nrqs++];
+	assert(myk()->kthread_idx < iok.thread_count);
+	struct thread_spec *ts = &iok.threads[myk()->kthread_idx];
 	ts->tid = tid;
 	ts->park_efd = myk()->park_efd;
-	spin_unlock(&qlock);
 
 	ret = shm_init_lrpc_in(r, &ts->rxq, &myk()->rxq);
 	BUG_ON(ret);
@@ -336,8 +331,6 @@ int ioqueues_init_thread(void)
 int ioqueues_init(unsigned int threads)
 {
 	int ret;
-
-	spin_lock_init(&qlock);
 
 	ret = ioqueues_shm_setup(threads);
 	if (ret) {

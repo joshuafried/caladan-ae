@@ -119,6 +119,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 		th->waking = false;
 		th->at_idx = -1;
 		th->ts_idx = -1;
+		th->kthread_idx = i;
 
 		/* initialize pointer to queue pointers in shared memory */
 		th->q_ptrs = (struct q_ptrs *) shmptr_to_ptr(&reg, s->q_ptrs,

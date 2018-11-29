@@ -34,7 +34,6 @@ static const struct init_entry global_init_handlers[] = {
 	GLOBAL_INITIALIZER(sched),
 	GLOBAL_INITIALIZER(preempt),
 	GLOBAL_INITIALIZER(smalloc),
-	GLOBAL_INITIALIZER(kthread),
 
 	/* network stack */
 	GLOBAL_INITIALIZER(net),
