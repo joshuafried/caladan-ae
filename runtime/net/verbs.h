@@ -12,8 +12,6 @@
 #include <infiniband/mlx5dv.h>
 #include <infiniband/verbs.h>
 
-#define VERB_QUEUES_PER_CORE 4
-
 struct verbs_custom_cq {
 	struct mlx5dv_cq dvcq;
 	uint32_t cq_idx;

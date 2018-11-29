@@ -34,7 +34,10 @@ static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 #define MBUF_RESERVED (align_up(sizeof(struct mbuf), CACHE_LINE_SIZE))
 
 /* Rudimentary per-kthread verb queues */
-static struct verbs_queue_rx vqs[NCPU * VERB_QUEUES_PER_CORE];
+static struct verbs_queue_rx vqs[NCPU];
+
+#define POW_TWO_ROUND_UP(x) \
+ ((x) == 1UL ? 1UL : 1UL << (64 - __builtin_clzl((x) - 1)))
 
 
 /*
@@ -530,14 +533,23 @@ int net_init_thread(void)
 	if (ret)
 		return ret;
 
-	for (j = 0; j < VERB_QUEUES_PER_CORE; j++) {
-		k->vq_rx[j] = &vqs[k->kthread_idx * VERB_QUEUES_PER_CORE + j];
+	k->nr_vq_rx = POW_TWO_ROUND_UP(maxks) / maxks;
+
+	for (j = 0; j < k->nr_vq_rx; j++) {
+		k->vq_rx[j] = &vqs[k->kthread_idx * k->nr_vq_rx + j];
 		ret = verbs_init_rx_queue(k->vq_rx[j]);
 		if (ret)
 			return ret;
 	}
 
-	k->nr_vq_rx = VERB_QUEUES_PER_CORE;
+	if (k->kthread_idx < POW_TWO_ROUND_UP(maxks) % maxks) {
+		k->vq_rx[j] = &vqs[k->kthread_idx + k->nr_vq_rx * maxks];
+		ret = verbs_init_rx_queue(k->vq_rx[j]);
+		if (ret)
+			return ret;
+		k->nr_vq_rx++;
+	}
+
 	k->pos_vq_rx = 0;
 
 	ret = verbs_init_tx_queue(&k->vq_tx);
@@ -590,15 +602,12 @@ int net_init(void)
 	if (!net_tx_buf_tcache)
 		return -ENOMEM;
 
-	if (!is_power_of_two(maxks)) {
-		log_err("verbs implementation requires power-of-two kthreads");
-		return -1;
-	}
-	struct verbs_queue_rx *vqs_ptr[maxks * VERB_QUEUES_PER_CORE];
-	for (int j = 0; j < maxks * VERB_QUEUES_PER_CORE; j++)
+	struct verbs_queue_rx *vqs_ptr[POW_TWO_ROUND_UP(maxks)];
+	for (int j = 0; j < POW_TWO_ROUND_UP(maxks); j++)
 		vqs_ptr[j] = vqs + j;
 
-	ret = verbs_init(&net_tx_buf_mp, vqs_ptr, maxks * VERB_QUEUES_PER_CORE);
+	log_info("Creating %lu rx queues", POW_TWO_ROUND_UP(maxks));
+	ret = verbs_init(&net_tx_buf_mp, vqs_ptr, POW_TWO_ROUND_UP(maxks));
 	if (ret)
 		return ret;
 
