@@ -286,7 +286,7 @@ struct kthread {
 	unsigned int		rcu_gen;
 	unsigned int		curr_cpu;
 	uint64_t		park_us;
-	unsigned long		pad1[1];
+	unsigned long		kthread_idx;
 
 	/* 3rd cache-line */
 	struct lrpc_chan_out	txpktq;
@@ -355,6 +355,7 @@ extern unsigned int spinks;
 extern unsigned int guaranteedks;
 extern unsigned int nrks;
 extern struct kthread *ks[NCPU];
+extern struct kthread *allks[NCPU];
 
 extern void kthread_detach(struct kthread *r);
 extern void kthread_park(bool voluntary);
@@ -497,7 +498,6 @@ extern int ioqueues_init_thread(void);
 extern int stack_init_thread(void);
 extern int timer_init_thread(void);
 extern int sched_init_thread(void);
-extern int stat_init_thread(void);
 extern int net_init_thread(void);
 extern int smalloc_init_thread(void);
 
@@ -510,7 +510,6 @@ extern int net_init(void);
 extern int arp_init(void);
 extern int trans_init(void);
 extern int smalloc_init(void);
-extern int kthread_init(void);
 
 /* late initialization */
 extern int ioqueues_register_iokernel(void);

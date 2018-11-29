@@ -37,9 +37,7 @@ static struct tcache *net_tx_buf_tcache;
 static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 
 /* Rudimentary per-kthread verb queues */
-static DEFINE_SPINLOCK(qslock);
-static int nrvqs;
-static struct verbs_queue_rx vqs[NCPU];
+static struct verbs_queue_rx vqs[NCPU * VERB_QUEUES_PER_CORE];
 
 
 /* drains overflow queues */
@@ -553,7 +551,8 @@ int str_to_netaddr(const char *str, struct netaddr *addr)
  */
 int net_init_thread(void)
 {
-	int ret;
+	int j, ret;
+	struct kthread *k = myk();
 
 	tcache_init_perthread(net_mbuf_tcache, &perthread_get(net_mbuf_pt));
 	tcache_init_perthread(net_rx_buf_tcache, &perthread_get(net_rx_buf_pt));
@@ -563,21 +562,19 @@ int net_init_thread(void)
 	if (ret)
 		return ret;
 
-	spin_lock(&qslock);
-	for (int j = 0; j < VERB_QUEUES_PER_CORE; j++)
-		myk()->vq_rx[j] = &vqs[nrvqs++];
+	for (j = 0; j < VERB_QUEUES_PER_CORE; j++) {
+		k->vq_rx[j] = &vqs[k->kthread_idx * VERB_QUEUES_PER_CORE + j];
+		ret = verbs_init_rx_queue(k->vq_rx[j]);
+		if (ret)
+			return ret;
+	}
 
-	spin_unlock(&qslock);
-	myk()->nr_vq_rx = VERB_QUEUES_PER_CORE;
-	myk()->pos_vq_rx = 0;
+	k->nr_vq_rx = VERB_QUEUES_PER_CORE;
+	k->pos_vq_rx = 0;
 
-	ret = verbs_init_tx_queue(&myk()->vq_tx);
+	ret = verbs_init_tx_queue(&k->vq_tx);
 	if (ret)
 		return ret;
-
-	for (int j = 0; j < VERB_QUEUES_PER_CORE; j++)
-		if (verbs_init_rx_queue(myk()->vq_rx[j]))
-			return -1;
 
 	return 0;
 }

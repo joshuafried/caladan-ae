@@ -56,6 +56,7 @@ struct thread {
 	unsigned int		ts_idx;
 	/* the proc->active_threads index (if active) */
 	unsigned int		at_idx;
+	unsigned int		kthread_idx;
 	/* list link for when idle */
 	struct list_node	idle_link;
 

@@ -34,8 +34,12 @@ unsigned int spinks;
 unsigned int guaranteedks = 1;
 /* the number of executing kthreads */
 static atomic_t runningks;
-/* an array of all the kthreads (for work-stealing) */
+/* an array of all the attached kthreads (for work-stealing) */
 struct kthread *ks[NCPU];
+/* an array of all the created kthreads */
+struct kthread *allks[NCPU];
+/* total number of created kthreads */
+static unsigned int createdks;
 /* kernel thread-local data */
 __thread struct kthread *mykthread;
 /* Map of cpu to kthread */
@@ -61,6 +65,13 @@ static struct kthread *allock(void)
 	k->park_efd = eventfd(0, 0);
 	BUG_ON(k->park_efd < 0);
 	k->detached = true;
+
+	spin_lock(&klock);
+	k->kthread_idx = createdks;
+	assert(createdks < maxks);
+	allks[createdks++] = k;
+	spin_unlock(&klock);
+
 	return k;
 }
 
@@ -269,7 +280,3 @@ void kthread_wait_to_attach(void)
 	atomic_inc(&runningks);
 }
 
-int kthread_init(void)
-{
-	return 0;
-}

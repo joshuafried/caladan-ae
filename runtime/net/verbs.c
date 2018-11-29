@@ -82,14 +82,15 @@ bool verbs_queue_is_empty(struct verbs_custom_cq *cq)
  */
 static int verbs_refill_rxqueue(struct ibv_wq *rx_wq, int nrdesc)
 {
-	unsigned int i;
+	unsigned int i, ret;
 	unsigned char *buf;
 	struct ibv_sge sg_entry[nrdesc];
 	struct ibv_recv_wr *bad_wr, wr[nrdesc];
 
 	for (i = 0; i < nrdesc; i++) {
 		buf = verbs_rx_alloc_buf();
-		BUG_ON(!buf);
+		if (!buf)
+			return -ENOMEM;
 		sg_entry[i].addr = (uint64_t)buf;
 		sg_entry[i].length = MBUF_DEFAULT_LEN - RX_BUF_RESERVED;
 		sg_entry[i].lkey = mr_rx->lkey;
@@ -100,7 +101,12 @@ static int verbs_refill_rxqueue(struct ibv_wq *rx_wq, int nrdesc)
 		wr[i].wr_id = (uint64_t)buf;
 	}
 
-	return ibv_post_wq_recv(rx_wq, wr, &bad_wr);
+	ret = ibv_post_wq_recv(rx_wq, wr, &bad_wr);
+	if (ret)
+		return -ret;
+
+	return 0;
+
 }
 
 /*
