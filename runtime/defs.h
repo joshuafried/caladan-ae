@@ -301,8 +301,10 @@ struct kthread {
 	struct timer_idx	*timers;
 	unsigned long		pad2[6];
 
-	struct verbs_queue_rx *vq_rx;
 	struct verbs_queue_tx vq_tx;
+	struct verbs_queue_rx *vq_rx[NCPU];
+	unsigned int nr_vq_rx;
+	unsigned int pos_vq_rx;
 	unsigned long		pad3[4];
 
 	/* 9th cache-line, statistics counters */

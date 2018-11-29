@@ -18,7 +18,7 @@
 #include "defs.h"
 #include "verbs.h"
 
-#define RQ_NUM_DESC 128
+#define RQ_NUM_DESC (max(8, 128 / VERB_QUEUES_PER_CORE))
 #define SQ_NUM_DESC 128
 #define PORT_NUM 1
 

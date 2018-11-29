@@ -564,14 +564,22 @@ int net_init_thread(void)
 		return ret;
 
 	spin_lock(&qslock);
-	myk()->vq_rx = &vqs[nrvqs++];
+	for (int j = 0; j < VERB_QUEUES_PER_CORE; j++)
+		myk()->vq_rx[j] = &vqs[nrvqs++];
+
 	spin_unlock(&qslock);
+	myk()->nr_vq_rx = VERB_QUEUES_PER_CORE;
+	myk()->pos_vq_rx = 0;
 
 	ret = verbs_init_tx_queue(&myk()->vq_tx);
 	if (ret)
 		return ret;
 
-	return verbs_init_rx_queue(myk()->vq_rx);
+	for (int j = 0; j < VERB_QUEUES_PER_CORE; j++)
+		if (verbs_init_rx_queue(myk()->vq_rx[j]))
+			return -1;
+
+	return 0;
 }
 
 
@@ -631,11 +639,11 @@ int net_init(void)
 		log_err("verbs implementation requires power-of-two kthreads");
 		return -1;
 	}
-	struct verbs_queue_rx *vqs_ptr[maxks];
-	for (int j = 0; j < maxks; j++)
+	struct verbs_queue_rx *vqs_ptr[maxks * VERB_QUEUES_PER_CORE];
+	for (int j = 0; j < maxks * VERB_QUEUES_PER_CORE; j++)
 		vqs_ptr[j] = vqs + j;
 
-	ret = verbs_init(&net_tx_buf_mp, vqs_ptr, maxks);
+	ret = verbs_init(&net_tx_buf_mp, vqs_ptr, maxks * VERB_QUEUES_PER_CORE);
 	if (ret)
 		return ret;
 
