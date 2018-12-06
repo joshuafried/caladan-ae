@@ -324,6 +324,12 @@ done:
 	STAT(SCHED_CYCLES) += end_tsc - start_tsc;
 	last_tsc = end_tsc;
 
+	if (!th->stack) {
+		th->stack = stack_alloc();
+		BUG_ON(!th->stack);
+		th->tf.rsp = stack_init_to_rsp(th->stack, thread_exit);
+	}
+
 	jmp_thread(th);
 }
 
@@ -528,9 +534,46 @@ void thread_yield(void)
 	jmp_runtime(thread_finish_yield, 0);
 }
 
-static __always_inline thread_t *__thread_create(void)
+/**
+ * thread_create - creates a new thread
+ * @fn: a function pointer to the starting method of the thread
+ * @arg: an argument passed to @fn
+ *
+ * Returns 0 if successful, otherwise -ENOMEM if out of memory.
+ */
+thread_t *thread_create(thread_fn_t fn, void *arg)
 {
-	struct thread *th;
+	thread_t *th;
+
+	preempt_disable();
+	th = tcache_alloc(&perthread_get(thread_pt));
+	preempt_enable();
+	if (unlikely(!th))
+		return NULL;
+
+	th->stack = NULL;
+	th->state = THREAD_STATE_SLEEPING;
+	th->main_thread = false;
+
+	th->tf.rdi = (uint64_t)arg;
+	th->tf.rbp = (uint64_t)0; /* just in case base pointers are enabled */
+	th->tf.rip = (uint64_t)fn;
+	return th;
+}
+
+/**
+ * thread_create_with_buf - creates a new thread with space for a buffer on the
+ * stack
+ * @fn: a function pointer to the starting method of the thread
+ * @buf: a pointer to the stack allocated buffer (passed as arg too)
+ * @buf_len: the size of the stack allocated buffer
+ *
+ * Returns 0 if successful, otherwise -ENOMEM if out of memory.
+ */
+thread_t *thread_create_with_buf(thread_fn_t fn, void **buf, size_t buf_len)
+{
+	void *ptr;
+	thread_t *th;
 	struct stack *s;
 
 	preempt_disable();
@@ -551,45 +594,6 @@ static __always_inline thread_t *__thread_create(void)
 	th->stack = s;
 	th->state = THREAD_STATE_SLEEPING;
 	th->main_thread = false;
-
-	return th;
-}
-
-/**
- * thread_create - creates a new thread
- * @fn: a function pointer to the starting method of the thread
- * @arg: an argument passed to @fn
- *
- * Returns 0 if successful, otherwise -ENOMEM if out of memory.
- */
-thread_t *thread_create(thread_fn_t fn, void *arg)
-{
-	thread_t *th = __thread_create();
-	if (unlikely(!th))
-		return NULL;
-
-	th->tf.rsp = stack_init_to_rsp(th->stack, thread_exit);
-	th->tf.rdi = (uint64_t)arg;
-	th->tf.rbp = (uint64_t)0; /* just in case base pointers are enabled */
-	th->tf.rip = (uint64_t)fn;
-	return th;
-}
-
-/**
- * thread_create_with_buf - creates a new thread with space for a buffer on the
- * stack
- * @fn: a function pointer to the starting method of the thread
- * @buf: a pointer to the stack allocated buffer (passed as arg too)
- * @buf_len: the size of the stack allocated buffer
- *
- * Returns 0 if successful, otherwise -ENOMEM if out of memory.
- */
-thread_t *thread_create_with_buf(thread_fn_t fn, void **buf, size_t buf_len)
-{
-	void *ptr;
-	thread_t *th = __thread_create();
-	if (unlikely(!th))
-		return NULL;
 
 	th->tf.rsp = stack_init_to_rsp_with_buf(th->stack, &ptr,
 						buf_len, thread_exit);
