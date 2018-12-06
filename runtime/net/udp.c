@@ -508,14 +508,11 @@ struct udpspawner {
 	udpspawn_fn_t		fn;
 };
 
-/* handles ingress packets with parallel threads */
-static void udp_par_recv(struct trans_entry *e, struct mbuf *m)
+static void udp_par_recv_uthread(struct mbuf *m, udpspawn_fn_t fn)
 {
-	udpspawner_t *s = container_of(e, udpspawner_t, e);
 	const struct ip_hdr *iphdr;
 	const struct udp_hdr *udphdr;
-	struct udp_spawn_data *d;
-	thread_t *th;
+	struct udp_spawn_data d;
 
 	iphdr = mbuf_network_hdr(m, *iphdr);
 	udphdr = mbuf_pull_hdr_or_null(m, *udphdr);
@@ -524,19 +521,29 @@ static void udp_par_recv(struct trans_entry *e, struct mbuf *m)
 		return;
 	}
 
-	th = thread_create_with_buf((thread_fn_t)s->fn,
-				    (void **)&d, sizeof(*d));
+	d.buf = mbuf_data(m);
+	d.len = mbuf_length(m);
+	d.laddr.ip = ntoh32(iphdr->daddr);
+	d.raddr.ip = ntoh32(iphdr->saddr);
+	d.laddr.port = ntoh16(udphdr->dst_port);
+	d.raddr.port = ntoh16(udphdr->src_port);
+	d.release_data = m;
+
+	fn(&d);
+}
+
+/* handles ingress packets with parallel threads */
+static void udp_par_recv(struct trans_entry *e, struct mbuf *m)
+{
+	udpspawner_t *s = container_of(e, udpspawner_t, e);
+	thread_t *th = thread_create((thread_fn_t)udp_par_recv_uthread, m);
 	if (unlikely(!th)) {
 		mbuf_drop(m);
 		return;
 	}
 
-	d->buf = mbuf_data(m);
-	d->len = mbuf_length(m);
-	d->laddr = e->laddr;
-	d->raddr.ip = ntoh32(iphdr->saddr);
-	d->raddr.port = ntoh16(udphdr->src_port);
-	d->release_data = m;
+	th->tf.rsi = (uint64_t)s->fn;
+
 	thread_ready(th);
 }
 
