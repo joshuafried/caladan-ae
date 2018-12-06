@@ -53,9 +53,10 @@ __jmp_thread:
 
 	/* restore ip and stack */
 	movq    RSP(%rdi), %rsp
-	movq    RIP(%rdi), %rsi
+	movq    RIP(%rdi), %rcx
 
-	/* set first argument (in case new thread) */
+	/* set arguments (in case new thread) */
+	movq    RSI(%rdi), %rsi /* ARG1 */
 	movq    RDI(%rdi), %rdi /* ARG0 */
 
 	/* re-enable preemption */
@@ -63,16 +64,16 @@ __jmp_thread:
 	jz	1f
 
 	/* jump into trap frame */
-	jmpq    *%rsi
+	jmpq    *%rcx
 	nop
 
 1:	/* cold-path, save RIP and park the kthread */
-	pushq	%rsi
+	pushq	%rcx
 	pushq	%rdi
 	call	preempt
 	popq	%rdi
-	popq	%rsi
-	jmpq	*%rsi
+	popq	%rcx
+	jmpq	*%rcx
 
 /**
  * __jmp_runtime - saves the current trap frame and jumps to a function in the
