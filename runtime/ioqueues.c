@@ -109,6 +109,11 @@ static int ioqueues_shm_setup(void)
 		iok.bundles[i].timer_specs = iok_shm_alloc(sizeof(*s), 0, (void **)&s);
 		s->timern = ptr_to_shmptr(r, &bv->timern, sizeof(bv->timern));
 		s->next_deadline_tsc = ptr_to_shmptr(r, &bv->next_deadline_tsc, sizeof(bv->next_deadline_tsc));
+
+		struct hardware_queue_spec *hs;
+		iok.bundles[i].hwq_count = 1;
+		/* allocate for two, in case storage is enabled */
+		iok.bundles[i].hwq_specs = iok_shm_alloc(sizeof(*hs) * 2, 0, NULL);
 	}
 
 	return 0;
@@ -135,6 +140,7 @@ int ioqueues_register_iokernel(void)
 	hdr->magic = CONTROL_HDR_MAGIC;
 	hdr->thread_count = maxks;
 	hdr->bundle_count = nr_bundles;
+	hdr->spdk_shm_id = iok.spdk_shm_id;
 
 	hdr->sched_cfg.priority = SCHED_PRIORITY_NORMAL;
 	hdr->sched_cfg.max_cores = maxks;

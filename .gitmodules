@@ -1,3 +1,6 @@
 [submodule "rdma-core"]
 	path = rdma-core
 	url = https://github.com/linux-rdma/rdma-core.git
+[submodule "spdk"]
+	path = spdk
+	url = https://github.com/spdk/spdk

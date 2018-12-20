@@ -20,6 +20,7 @@
 #include <runtime/rcu.h>
 #include <runtime/preempt.h>
 
+#include "storage.h"
 #include "net/drivers/common.h"
 
 
@@ -82,6 +83,7 @@ struct io_bundle {
 	struct timer_idx		*timers;
 
 	/* storage queue */
+	struct storage_queue sq;
 
 } __aligned(CACHE_LINE_SIZE);
 
@@ -272,6 +274,8 @@ struct iokernel_control {
 	/* threads + other queues register themselves here */
 	struct thread_spec *threads;
 	struct bundle_spec *bundles;
+
+	unsigned int spdk_shm_id;
 };
 
 extern struct iokernel_control iok;
@@ -582,6 +586,7 @@ extern int smalloc_init(void);
 extern int kthread_init(void);
 extern int ethdev_init(void);
 extern int timer_init(void);
+extern int storage_init(void);
 
 /* late initialization */
 extern int ioqueues_register_iokernel(void);

@@ -44,6 +44,10 @@ static const struct init_entry global_init_handlers[] = {
 
 	GLOBAL_INITIALIZER(kthread),
 	GLOBAL_INITIALIZER(timer),
+
+	/* storage */
+	GLOBAL_INITIALIZER(storage),
+
 };
 
 #define THREAD_INITIALIZER(name) \

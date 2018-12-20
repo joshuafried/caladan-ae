@@ -1,0 +1,63 @@
+diff --git a/include/spdk/nvme.h b/include/spdk/nvme.h
+index 0252cfb5e..6a43eba86 100644
+--- a/include/spdk/nvme.h
++++ b/include/spdk/nvme.h
+@@ -761,6 +761,11 @@ void spdk_nvme_ctrlr_register_aer_callback(struct spdk_nvme_ctrlr *ctrlr,
+  */
+ struct spdk_nvme_qpair;
+ 
++void nvme_get_qp_info(struct spdk_nvme_qpair *qpair,
++		struct spdk_nvme_cpl **cpl_out,
++		uint32_t **cq_head_out,
++		uint32_t *num_entries_out);
++
+ /**
+  * Signature for the callback function invoked when a timeout is detected on a
+  * request.
+diff --git a/lib/nvme/nvme_pcie.c b/lib/nvme/nvme_pcie.c
+index 22699cfa1..6f4419d50 100644
+--- a/lib/nvme/nvme_pcie.c
++++ b/lib/nvme/nvme_pcie.c
+@@ -180,6 +180,8 @@ struct nvme_pcie_qpair {
+ 
+ 	bool is_enabled;
+ 
++	uint32_t cq_head_nowrap;
++
+ 	/*
+ 	 * Base qpair structure.
+ 	 * This is located after the hot data in this structure so that the important parts of
+@@ -946,6 +948,7 @@ nvme_pcie_qpair_reset(struct spdk_nvme_qpair *qpair)
+ 	struct nvme_pcie_qpair *pqpair = nvme_pcie_qpair(qpair);
+ 
+ 	pqpair->sq_tail = pqpair->cq_head = 0;
++	pqpair->cq_head_nowrap = pqpair->num_entries;
+ 
+ 	/*
+ 	 * First time through the completion queue, HW will set phase
+@@ -2100,6 +2103,7 @@ nvme_pcie_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
+ 			pqpair->cq_head = 0;
+ 			pqpair->phase = !pqpair->phase;
+ 		}
++		pqpair->cq_head_nowrap++;
+ 
+ 		tr = &pqpair->tr[cpl->cid];
+ 		pqpair->sq_head = cpl->sqhd;
+@@ -2143,3 +2147,17 @@ nvme_pcie_qpair_process_completions(struct spdk_nvme_qpair *qpair, uint32_t max_
+ 
+ 	return num_completions;
+ }
++
++void
++nvme_get_qp_info(struct spdk_nvme_qpair *qpair,
++	struct spdk_nvme_cpl **cpl_out,
++	uint32_t **cq_head_out,
++	uint32_t *num_entries_out)
++{
++	struct nvme_pcie_qpair	*pqpair = nvme_pcie_qpair(qpair);
++
++	*cpl_out = pqpair->cpl;
++	*cq_head_out = &pqpair->cq_head_nowrap;
++	*num_entries_out = pqpair->num_entries;
++
++}

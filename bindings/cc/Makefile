@@ -1,4 +1,8 @@
 INC     = -I../../inc -I./
+ifneq ($(SPDK),)
+SPDK_PATH = ../../spdk
+INC += -I$(SPDK_PATH)/include
+endif
 CXXFLAGS  = -g -Wall -std=gnu++11 -D_GNU_SOURCE $(INC) -mssse3
 RDMA_CORE = $(dir $(realpath $(firstword $(MAKEFILE_LIST))))/../../rdma-core
 LDFLAGS = -T../../base/base.ld -L $(RDMA_CORE)/build/lib -Wl,-rpath $(RDMA_CORE)/build/lib
@@ -14,6 +18,23 @@ CXXFLAGS += -DNDEBUG -O3
 endif
 
 RDMA_CORE_LIBS = -libverbs -lmlx5 -lmlx4
+
+ifneq ($(SPDK),)
+SPDK_LIBS= -L$(SPDK_PATH)/build/lib -L$(SPDK_PATH)/dpdk/build/lib
+SPDK_LIBS += -lspdk_nvme
+SPDK_LIBS += -lspdk_util
+SPDK_LIBS += -lspdk_env_dpdk
+SPDK_LIBS += -lspdk_log
+SPDK_LIBS += -lspdk_sock
+SPDK_LIBS += -ldpdk
+SPDK_LIBS += -lpthread
+SPDK_LIBS += -lrt
+SPDK_LIBS += -luuid
+SPDK_LIBS += -lcrypto
+SPDK_LIBS += -lnuma
+SPDK_LIBS += -ldl
+endif
+
 
 # handy for debugging
 print-%  : ; @echo $* = $($*)
@@ -33,7 +54,7 @@ librt++.a: $(rt_obj)
 
 test: $(test_obj) librt++.a ../../libruntime.a ../../libnet.a ../../libbase.a
 	$(LD) $(LDFLAGS) -o $@ $(test_obj) librt++.a ../../libruntime.a \
-	../../libnet.a ../../libbase.a -lpthread $(RDMA_CORE_LIBS)
+	../../libnet.a ../../libbase.a -lpthread $(RDMA_CORE_LIBS) $(SPDK_LIBS)
 
 # general build rules for all targets
 src = $(rt_src) $(test_src)

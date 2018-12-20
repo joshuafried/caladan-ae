@@ -26,7 +26,7 @@ struct q_ptrs {
 enum {
 	HWQ_MLX5 = 0,
 	HWQ_MLX4,
-	HWQ_NVME,
+	HWQ_SPDK_NVME,
 	NR_HWQ,
 };
 
@@ -83,6 +83,7 @@ struct sched_spec {
 /* the main control header */
 struct control_hdr {
 	unsigned int		magic;
+	int			spdk_shm_id;
 	struct sched_spec	sched_cfg;
 	unsigned int		thread_count;
 	unsigned int		bundle_count;

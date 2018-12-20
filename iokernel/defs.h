@@ -69,7 +69,7 @@ struct timer {
 	uint64_t *next_deadline_tsc;
 };
 
-#define MAX_HWQ 1
+#define MAX_HWQ 2
 #define MAX_TIMER 1
 
 struct bundle {
@@ -111,6 +111,8 @@ struct proc {
 
 	/* Unique identifier -- never recycled across runtimes*/
 	uintptr_t		uniqid;
+
+	struct shm_region spdk_reg;
 };
 
 extern void proc_release(struct ref *r);

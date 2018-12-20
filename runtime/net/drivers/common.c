@@ -40,8 +40,9 @@ int ethdev_init(void)
 
 		/* publish specs for iokernel */
 		bs = &iok.bundles[i];
-		bs->hwq_count = 1;
-		bs->hwq_specs = iok_shm_alloc(sizeof(*hs), 0, (void **)&hs);
+		hs = shmptr_to_ptr(&iok.shared_region, bs->hwq_specs, sizeof(*hs));
+		BUG_ON(!hs);
+
 		hs->descriptor_size = (1 << b->rxq->descriptor_log_size);
 		hs->nr_descriptors = b->rxq->nr_descriptors;
 		hs->descriptor_table = ptr_to_shmptr(&iok.shared_region, b->rxq->descriptor_table, hs->descriptor_size * hs->nr_descriptors);

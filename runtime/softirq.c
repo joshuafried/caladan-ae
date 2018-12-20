@@ -11,16 +11,20 @@
 #include "net/defs.h"
 
 struct softirq_work {
-	unsigned int recv_cnt, join_cnt, timeout_cnt;
+	unsigned int total_cnt, recv_cnt, join_cnt, timeout_cnt, storage_cnt;
 	struct rx_net_hdr *recv_reqs[SOFTIRQ_MAX_BUDGET];
 	struct kthread *join_reqs[SOFTIRQ_MAX_BUDGET];
 	struct timer_entry *timeouts[SOFTIRQ_MAX_BUDGET];
+	struct thread *storage_threads[SOFTIRQ_MAX_BUDGET];
 };
 
 static void softirq_fn(void *arg)
 {
 	struct softirq_work *w = arg;
 	int i;
+
+	for (i = 0; i < w->storage_cnt; i++)
+		thread_ready(w->storage_threads[i]);
 
 	/* deliver new RX packets to the runtime */
 	net_rx_softirq(w->recv_reqs, w->recv_cnt);
@@ -36,31 +40,41 @@ static void softirq_fn(void *arg)
 
 static unsigned int poll_bundle(struct softirq_work *w, struct io_bundle *b, unsigned int budget)
 {
-	unsigned int recv_cnt, timeout_cnt;
+	unsigned int recv_cnt, timeout_cnt, storage_cnt, total;
 
 	assert_preempt_disabled();
 
 	BUG_ON(budget > SOFTIRQ_MAX_BUDGET - w->recv_cnt);
 	BUG_ON(budget > SOFTIRQ_MAX_BUDGET - w->timeout_cnt);
+	BUG_ON(budget > SOFTIRQ_MAX_BUDGET - w->storage_cnt);
 
 	if (unlikely(!budget))
 		return 0;
 
-	if (unlikely(!rx_pending(b->rxq) && !timer_needed(b)))
+	if (unlikely(!rx_pending(b->rxq) && !timer_needed(b) && !storage_queue_has_work(&b->sq)))
 		return 0;
 
 	if (unlikely(!spin_try_lock(&b->lock)))
 		return 0;
 
+	storage_cnt = storage_proc_completions(b, budget, w->storage_threads);
+	budget -= storage_cnt;
+
 	recv_cnt = netcfg.ops.rx_batch(b->rxq, w->recv_reqs + w->recv_cnt, budget);
-	timeout_cnt = timer_gather(b, budget - recv_cnt, w->timeouts + w->timeout_cnt);
+	budget -= recv_cnt;
+
+	timeout_cnt = timer_gather(b, budget, w->timeouts + w->timeout_cnt);
 
 	spin_unlock(&b->lock);
 
+	w->storage_cnt += storage_cnt;
 	w->timeout_cnt += timeout_cnt;
 	w->recv_cnt += recv_cnt;
 
-	return recv_cnt + timeout_cnt;
+	total = storage_cnt + timeout_cnt + recv_cnt;
+	w->total_cnt += total;
+
+	return total;
 }
 
 static unsigned int poll_lrpc(struct softirq_work *w, struct kthread *k,
@@ -83,6 +97,7 @@ static unsigned int poll_lrpc(struct softirq_work *w, struct kthread *k,
 		w->join_reqs[join_cnt++] = allks[payload - 1];
 	}
 	w->join_cnt = join_cnt;
+	w->total_cnt += join_cnt;
 	return join_cnt;
 }
 
@@ -120,7 +135,7 @@ static __thread struct softirq_work *next_irq_w;
 
 static inline void softirq_work_init(struct softirq_work *w)
 {
-	w->recv_cnt = w->join_cnt = w->timeout_cnt = 0;
+	w->total_cnt = w->recv_cnt = w->join_cnt = w->timeout_cnt = w->storage_cnt = 0;
 }
 
 /**
@@ -149,7 +164,7 @@ thread_t *softirq_run_local(unsigned int budget)
 	poll_lrpc(next_irq_w, k, budget);
 	softirq_gather_bundles(next_irq_w, k, budget);
 
-	if (!next_irq_w->recv_cnt & !next_irq_w->join_cnt & !next_irq_w->timeout_cnt)
+	if (!next_irq_w->total_cnt)
 		return NULL;
 
 	th = next_irq;
@@ -175,7 +190,7 @@ thread_t *softirq_steal_lrpc(struct kthread *k, unsigned int budget)
 
 	poll_lrpc(next_irq_w, k, budget);
 
-	if (!next_irq_w->join_cnt)
+	if (!next_irq_w->total_cnt)
 		return NULL;
 
 	th = next_irq;
@@ -198,7 +213,7 @@ thread_t *softirq_steal_bundle(struct kthread *k, unsigned int budget)
 
 	softirq_gather_bundles(next_irq_w, k, budget);
 
-	if (!next_irq_w->recv_cnt & !next_irq_w->timeout_cnt)
+	if (!next_irq_w->total_cnt)
 		return NULL;
 
 	th = next_irq;
@@ -226,6 +241,6 @@ void softirq_run(unsigned int budget)
 	softirq_gather_bundles(&w, k, budget);
 	putk();
 
-	if (w.recv_cnt || w.join_cnt || w.timeout_cnt)
+	if (w.total_cnt)
 		softirq_fn(&w);
 }

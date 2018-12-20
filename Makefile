@@ -1,5 +1,9 @@
 RDMA_CORE_PATH = $(dir $(realpath $(firstword $(MAKEFILE_LIST))))/rdma-core
 INC     = -I./inc -I$(RDMA_CORE_PATH)/build/include
+ifneq ($(SPDK),)
+SPDK_PATH = spdk
+INC += -I$(SPDK_PATH)/include
+endif
 CFLAGS  = -g -Wall -std=gnu11 -D_GNU_SOURCE $(INC) -mssse3
 LDFLAGS = -T base/base.ld -no-pie -L $(RDMA_CORE_PATH)/build/lib -Wl,-rpath=$(RDMA_CORE_PATH)/build/lib/
 LD	= gcc
@@ -48,6 +52,22 @@ test_src = $(wildcard tests/*.c)
 test_obj = $(test_src:.c=.o)
 test_targets = $(basename $(test_src))
 
+ifneq ($(SPDK),)
+SPDK_LIBS= -L$(SPDK_PATH)/build/lib -L$(SPDK_PATH)/dpdk/build/lib
+SPDK_LIBS += -lspdk_nvme
+SPDK_LIBS += -lspdk_util
+SPDK_LIBS += -lspdk_env_dpdk
+SPDK_LIBS += -lspdk_log
+SPDK_LIBS += -lspdk_sock
+SPDK_LIBS += -ldpdk
+SPDK_LIBS += -lpthread
+SPDK_LIBS += -lrt
+SPDK_LIBS += -luuid
+SPDK_LIBS += -lcrypto
+SPDK_LIBS += -lnuma
+SPDK_LIBS += -ldl
+endif
+
 # must be first
 all: libbase.a libnet.a libruntime.a iokerneld iokerneld-noht $(test_targets)
 
@@ -69,7 +89,7 @@ iokerneld-noht: $(iokernel_noht_obj) libbase.a libnet.a base/base.ld
 	 -lpthread -lnuma -ldl
 
 $(test_targets): $(test_obj) libbase.a libruntime.a libnet.a base/base.ld
-	$(LD) $(LDFLAGS) -o $@ $@.o libruntime.a libnet.a libbase.a -lpthread $(RDMA_CORE_LIBS)
+	$(LD) $(LDFLAGS) -o $@ $@.o libruntime.a libnet.a libbase.a -lpthread $(RDMA_CORE_LIBS) $(SPDK_LIBS)
 
 # general build rules for all targets
 src = $(base_src) $(net_src) $(runtime_src) $(iokernel_src) $(test_src)
