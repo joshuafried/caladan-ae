@@ -111,8 +111,18 @@ struct proc {
 	size_t nr_overflows;
 	unsigned long *overflow_queue;
 
+	unsigned int mlxq_count;
+	struct {
+		void *buf;
+		uint32_t *cq_idx;
+		uint32_t cqe_cnt;
+		uint32_t last_idx;
+		bool last_pending;
+	} mlxqs[NCPU];
+
 	/* table of physical addresses for shared memory */
 	physaddr_t		page_paddrs[];
+
 };
 
 extern void proc_release(struct ref *r);

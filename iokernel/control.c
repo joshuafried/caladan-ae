@@ -40,6 +40,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 	size_t nr_pages;
 	struct proc *p;
 	struct thread_spec *threads;
+	struct mlxq_spec *mlxqs;
 	void *shbuf;
 	int i, ret;
 
@@ -55,7 +56,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 	if (hdr.magic != CONTROL_HDR_MAGIC)
 		goto fail_unmap;
 	if (hdr.thread_count > NCPU || hdr.thread_count == 0 ||
-			hdr.thread_count != n_fds)
+			hdr.thread_count != n_fds || hdr.mlxq_count > NCPU)
 		goto fail_unmap;
 
 	if (hdr.sched_cfg.guaranteed_cores + nr_guaranteed > get_total_cores()) {
@@ -74,8 +75,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 	threads = malloc(sizeof(*threads) * hdr.thread_count);
 	if (!threads)
 		goto fail_free_just_proc;
-	memcpy(threads, ((struct control_hdr *)shbuf)->threads,
-	       sizeof(*threads) * hdr.thread_count);
 
 	p->pid = pid;
 	ref_init(&p->ref);
@@ -91,6 +90,9 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 	p->mac = hdr.mac;
 	p->pending_timer = false;
 	p->uniqid = rdtsc();
+
+	memcpy(threads, shmptr_to_ptr(&reg, hdr.thread_specs, sizeof(*threads) * hdr.thread_count),
+	       sizeof(*threads) * hdr.thread_count);
 
 	/* initialize the threads */
 	for (i = 0; i < hdr.thread_count; i++) {
@@ -129,6 +131,24 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 	}
 
 	free(threads);
+
+	mlxqs = malloc(sizeof(*mlxqs) * hdr.mlxq_count);
+	if (!mlxqs)
+		goto fail_free_just_proc;
+
+	memcpy(mlxqs, shmptr_to_ptr(&reg, hdr.mlxq_specs, sizeof(*mlxqs) * hdr.mlxq_count),
+	       sizeof(*mlxqs) * hdr.mlxq_count);
+
+	for (i = 0; i < hdr.mlxq_count; i++) {
+		p->mlxqs[i].buf = shmptr_to_ptr(&reg, mlxqs[i].cq_buf, 0);
+		p->mlxqs[i].cqe_cnt = mlxqs[i].cqe_cnt;
+		p->mlxqs[i].cq_idx = shmptr_to_ptr(&reg, mlxqs[i].cq_idx, 0);
+		p->mlxqs[i].last_idx = 0;
+		p->mlxqs[i].last_pending = false;
+	}
+	free(mlxqs);
+	p->mlxq_count = hdr.mlxq_count;
+
 
 	/* initialize the table of physical page addresses */
 	ret = mem_lookup_page_phys_addrs(p->region.base, p->region.len, PGSIZE_2MB,

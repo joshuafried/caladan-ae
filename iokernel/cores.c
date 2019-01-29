@@ -781,7 +781,17 @@ static bool cores_is_proc_congested(struct proc *p)
 			congested = true;
 			continue;
 		}
+	}
 
+	/* Check direct path queues */
+	for (i = 0; i < p->mlxq_count; i++) {
+		uint32_t cur_tail = ACCESS_ONCE(*p->mlxqs[i].cq_idx);
+		bool pending = !cq_is_empty(p->mlxqs[i].buf, p->mlxqs[i].cqe_cnt, cur_tail);
+		if (cur_tail == p->mlxqs[i].last_idx && pending && p->mlxqs[i].last_pending) {
+			congested = true;
+		}
+		p->mlxqs[i].last_idx = cur_tail;
+		p->mlxqs[i].last_pending = pending;
 	}
 
 	if (p->pending_timer && microtime() >= p->deadline_us)
