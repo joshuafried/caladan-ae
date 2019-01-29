@@ -58,6 +58,7 @@ static size_t calculate_shm_space(unsigned int thread_count)
 	// Header + queue_spec information
 	ret += sizeof(struct control_hdr);
 	ret += sizeof(struct thread_spec) * thread_count;
+	ret += sizeof(struct mlxq_spec) * NCPU;
 	ret = align_up(ret, CACHE_LINE_SIZE);
 
 	// RX queues (wb is not included)
@@ -88,6 +89,11 @@ static size_t calculate_shm_space(unsigned int thread_count)
 			MBUF_DEFAULT_LEN);
 	BUILD_ASSERT(PGSIZE_2MB % MBUF_DEFAULT_LEN == 0);
 	ret += EGRESS_POOL_SIZE(thread_count);
+	ret = align_up(ret, PGSIZE_2MB);
+
+	// SHM for verbs queues
+	// TODO: fixme
+	ret += verbs_shm_space_needed(0, 0);
 	ret = align_up(ret, PGSIZE_2MB);
 
 	return ret;
@@ -158,7 +164,7 @@ static int ioqueues_shm_setup(unsigned int threads)
 	/* set up queues in shared memory */
 	iok.thread_count = threads;
 	ptr = r->base;
-	ptr += sizeof(struct control_hdr) + sizeof(struct thread_spec) * threads;
+	ptr += sizeof(struct control_hdr) + sizeof(struct thread_spec) * threads + sizeof(struct mlxq_spec) * NCPU;
 	ptr = (char *)align_up((uintptr_t)ptr, CACHE_LINE_SIZE);
 
 	for (i = 0; i < threads; i++) {
@@ -171,11 +177,15 @@ static int ioqueues_shm_setup(unsigned int threads)
 	}
 
 	ptr = (char *)align_up((uintptr_t)ptr, PGSIZE_2MB);
+	ptr_to_shmptr(r, ptr, iok.tx_len);
 	iok.tx_buf = ptr;
 	iok.tx_len = EGRESS_POOL_SIZE(threads);
+	ptr += align_up(iok.tx_len, PGSIZE_2MB);
 
-	ptr_to_shmptr(r, ptr, iok.tx_len);
-	ptr += iok.tx_len;
+	ptr_to_shmptr(r, ptr, iok.verbs_mem_len);
+	iok.verbs_mem = ptr;
+	iok.verbs_mem_len = verbs_shm_space_needed(0, 0); // FIXME
+	ptr += align_up(iok.verbs_mem_len, PGSIZE_2MB);
 
 	iok.next_free = ptr_to_shmptr(r, ptr, 0);
 
@@ -245,8 +255,14 @@ int ioqueues_register_iokernel(void)
 	hdr->sched_cfg.congestion_latency_us = 0;
 	hdr->sched_cfg.scaleout_latency_us = 0;
 
-	memcpy(hdr->threads, iok.threads,
-			sizeof(struct thread_spec) * iok.thread_count);
+	struct thread_spec *threads = (struct thread_spec *)((unsigned char *)r->base + sizeof(*hdr));
+	hdr->thread_specs = ptr_to_shmptr(&netcfg.tx_region, threads, sizeof(*threads) * iok.thread_count);
+	memcpy(threads, iok.threads, sizeof(*threads) * iok.thread_count);
+
+	struct mlxq_spec *qs = (struct mlxq_spec *)((unsigned char *)threads + sizeof(*threads) * iok.thread_count);
+	hdr->mlxq_specs = ptr_to_shmptr(&netcfg.tx_region, qs, sizeof(*qs) * iok.mlxq_count);
+	memcpy(qs, iok.qspec, sizeof(*qs) * iok.mlxq_count);
+	hdr->mlxq_count = iok.mlxq_count;
 
 	/* register with iokernel */
 	BUILD_ASSERT(strlen(CONTROL_SOCK_PATH) <= sizeof(addr.sun_path) - 1);

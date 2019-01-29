@@ -8,6 +8,7 @@
 
 #include <base/limits.h>
 #include <iokernel/shm.h>
+#include <iokernel/verbs.h>
 #include <net/ethernet.h>
 
 /* The abstract namespace path for the control socket. */
@@ -54,5 +55,7 @@ struct control_hdr {
 	unsigned long		egress_buf_count;
 	struct eth_addr		mac;
 	struct sched_spec	sched_cfg;
-	struct thread_spec	threads[];
+	unsigned int		mlxq_count;
+	shmptr_t		thread_specs;
+	shmptr_t		mlxq_specs;
 };

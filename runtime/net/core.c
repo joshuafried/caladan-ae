@@ -565,21 +565,17 @@ int net_init_thread(void)
 	if (ret)
 		return ret;
 
-	k->nr_vq_rx = POW_TWO_ROUND_UP(maxks) / maxks;
+	k->nr_vq_rx = 0;
 
-	for (j = 0; j < k->nr_vq_rx; j++) {
-		k->vq_rx[j] = &vqs[k->kthread_idx * k->nr_vq_rx + j];
-		ret = verbs_init_rx_queue(k->vq_rx[j]);
-		if (ret)
-			return ret;
-	}
-
-	if (k->kthread_idx < POW_TWO_ROUND_UP(maxks) % maxks) {
-		k->vq_rx[j] = &vqs[k->kthread_idx + k->nr_vq_rx * maxks];
-		ret = verbs_init_rx_queue(k->vq_rx[j]);
-		if (ret)
-			return ret;
-		k->nr_vq_rx++;
+	/* attach all RX queues to kthread 0 */
+	if (!k->kthread_idx) {
+		k->nr_vq_rx =  POW_TWO_ROUND_UP(maxks);
+		for (j = 0; j < k->nr_vq_rx; j++) {
+			k->vq_rx[j] = &vqs[j];
+			ret = verbs_init_rx_queue(k->vq_rx[j]);
+			if (ret)
+				return ret;
+		}
 	}
 
 	k->pos_vq_rx = 0;

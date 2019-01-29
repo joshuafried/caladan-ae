@@ -123,6 +123,19 @@ static bool steal_work(struct kthread *l, struct kthread *r)
 		return false;
 	}
 
+	/* Should we take some of the RX queues? */
+	if (r->nr_vq_rx > l->nr_vq_rx + 1) {
+		int to_steal = (r->nr_vq_rx - l->nr_vq_rx) / 2;
+		for (i = 0; i < to_steal; i++)
+			l->vq_rx[l->nr_vq_rx++] = r->vq_rx[--r->nr_vq_rx];
+
+		th = softirq_run_thread(l, RUNTIME_SOFTIRQ_BUDGET);
+		if (th) {
+			STAT(SOFTIRQS_LOCAL)++;
+			goto done;
+		}
+	}
+
 	/* try to steal directly from the runqueue */
 	avail = load_acquire(&r->rq_head) - r->rq_tail;
 	if (avail) {
@@ -161,6 +174,8 @@ done:
 		l->q_ptrs->rq_head++;
 		STAT(THREADS_STOLEN)++;
 	} else if (r->parked) {
+		while (r->nr_vq_rx)
+			l->vq_rx[l->nr_vq_rx++] = r->vq_rx[--r->nr_vq_rx];
 		kthread_detach(r);
 
 		/*
@@ -316,6 +331,7 @@ void join_kthread(struct kthread *k)
 {
 	thread_t *waketh;
 	struct list_head tmp;
+	int i;
 
 	//log_info_ratelimited("join_kthread() %p", k);
 
@@ -330,6 +346,13 @@ void join_kthread(struct kthread *k)
 		spin_unlock_np(&k->lock);
 		return;
 	}
+
+	struct kthread *l = getk();
+	spin_lock(&l->lock);
+	while (k->nr_vq_rx)
+		l->vq_rx[l->nr_vq_rx++] = k->vq_rx[--k->nr_vq_rx];
+	spin_unlock(&l->lock);
+	putk();
 
 	/* drain the runqueue */
 	for (; k->rq_tail < k->rq_head; k->rq_tail++) {

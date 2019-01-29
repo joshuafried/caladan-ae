@@ -221,8 +221,12 @@ struct iokernel_control {
 	shmptr_t next_free;
 	unsigned int thread_count;
 	struct thread_spec threads[NCPU];
+	unsigned int mlxq_count;
+	struct mlxq_spec qspec[NCPU];
 	void *tx_buf;
 	size_t tx_len;
+	void *verbs_mem;
+	size_t verbs_mem_len;
 };
 
 extern struct iokernel_control iok;
@@ -305,7 +309,7 @@ struct kthread {
 	struct verbs_queue_rx *vq_rx[NCPU];
 	unsigned int nr_vq_rx;
 	unsigned int pos_vq_rx;
-	unsigned long		pad3[4];
+	unsigned long		pad3[3];
 
 	/* 9th cache-line, statistics counters */
 	uint64_t		stats[STAT_NR];

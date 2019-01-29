@@ -130,10 +130,15 @@ void kthread_detach(struct kthread *r)
 	assert(r != k);
 	assert(r->parked == true);
 	assert(r->detached == false);
+	assert(r->nr_vq_rx == 0);
 
 	/* make sure the park rxcmd was processed */
 	lrpc_poll_send_tail(&r->txcmdq);
 	if (unlikely(lrpc_get_cached_length(&r->txcmdq) > 0))
+		return;
+
+	/* this kthread may have pending completions */
+	if (r->vq_tx.pending_completions)
 		return;
 
 	/* one last check, an RX cmd could have squeaked in */
