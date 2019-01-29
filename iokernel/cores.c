@@ -22,9 +22,11 @@
 
 /*#define CORES_NOHT 1*/
 
-static unsigned int nr_avail_cores = 0;
-static DEFINE_BITMAP(avail_cores, NCPU);
+static unsigned int nr_avail_cores;
+static unsigned int total_cores;
 static DEFINE_BITMAP(online_cores, NCPU);
+
+DEFINE_BITMAP(avail_cores, NCPU);
 struct core_assignments core_assign;
 unsigned int nrts = 0;
 struct thread *ts[NCPU];
@@ -37,9 +39,14 @@ static int ksched_fd;
 static struct ksched_wake_req *wake_reqs;
 
 
-unsigned int get_available_cores(void)
+unsigned int get_nr_avail_cores(void)
 {
 	return nr_avail_cores;
+}
+
+unsigned int get_total_cores(void)
+{
+	return total_cores;
 }
 
 /**
@@ -179,6 +186,7 @@ static inline void core_init(unsigned int core)
 	bitmap_set(avail_cores, core);
 	bitmap_set(online_cores, core);
 	nr_avail_cores++;
+	total_cores++;
 	core_history[core].current = NULL;
 	core_history[core].prev = NULL;
 	core_history[core].next = NULL;
@@ -705,7 +713,7 @@ void cores_init_proc(struct proc *p)
 		/* init core to 0 - this will result in incorrect cache locality
 		 * decisions at first but saves us from always checking if this thread
 		 * has run yet */
-		p->threads[i].core = 0;
+		p->threads[i].core = bitmap_find_next_set(online_cores, NCPU, 0);
 		list_add_tail(&p->idle_threads, &p->threads[i].idle_link);
 	}
 
@@ -903,6 +911,10 @@ int cores_init(void)
 	/* mark all cores as unavailable */
 	bitmap_init(avail_cores, cpu_count, false);
 	bitmap_init(online_cores, NCPU, false);
+
+	/* mark all cores as offline */
+	bitmap_init(online_cores, cpu_count, false);
+
 
 	/* find cores on socket 0 that are not already in use */
 	for (i = 0; i < cpu_count; i++) {

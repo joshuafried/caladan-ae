@@ -80,9 +80,9 @@ static void tcp_rx_append_text(tcpconn_t *c, struct mbuf *m)
 	}
 
 	/* enqueue the text */
-	c->pcb.rcv_nxt = m->seg_end;
 	assert(c->pcb.rcv_wnd >= m->seg_end - m->seg_seq);
-	c->pcb.rcv_wnd -= m->seg_end - m->seg_seq;
+	uint64_t nxt_wnd =  (uint64_t)m->seg_end | ((uint64_t)(c->pcb.rcv_wnd - (m->seg_end - m->seg_seq)) << 32);
+	store_release(&c->pcb.rcv_nxt_wnd, nxt_wnd);
 	if (c->pcb.rcv_wnd == 0)
 		c->rcv_wnd_full = true;
 	list_add_tail(&c->rxq, &m->link);
@@ -101,19 +101,27 @@ static bool tcp_rx_text(tcpconn_t *c, struct mbuf *m, bool *wake)
 
 	if (wraps_lte(m->seg_seq, c->pcb.rcv_nxt)) {
 		/* we got the next in-order segment */
+		STAT(RX_TCP_IN_ORDER)++;
 		if ((m->flags & (TCP_PUSH | TCP_FIN)) > 0)
 			*wake = true;
 		tcp_rx_append_text(c, m);
 	} else {
 		/* we got an out-of-order segment */
+		STAT(RX_TCP_OUT_OF_ORDER)++;
+		int size = 0;
 		list_for_each(&c->rxq_ooo, pos, link) {
 			if (wraps_lt(m->seg_seq, pos->seg_seq)) {
 				list_add_before(&pos->link, &m->link);
 				goto drain;
-			} else if (m->seg_seq == pos->seg_seq) {
+			} else if (wraps_lte(m->seg_end, pos->seg_end)) {
 				return false;
 			}
+			size++;
 		}
+
+		if (size >= TCP_OOO_MAX_SIZE)
+			 return false;
+
  		list_add_tail(&c->rxq_ooo, &m->link);
 	}
 
@@ -152,8 +160,9 @@ drain:
 void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 {
 	tcpconn_t *c = container_of(e, tcpconn_t, e);
-	struct list_head q;
+	struct list_head q, waiters;
 	thread_t *rx_th = NULL;
+	struct mbuf *retransmit = NULL;
 	const struct ip_hdr *iphdr;
 	const struct tcp_hdr *tcphdr;
 	uint32_t seq, ack, len, snd_nxt, hdr_len;
@@ -164,6 +173,7 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 	assert_preempt_disabled();
 
 	list_head_init(&q);
+	list_head_init(&waiters);
 	snd_nxt = load_acquire(&c->pcb.snd_nxt);
 
 	/* find header offsets */
@@ -194,8 +204,11 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 
 	spin_lock_np(&c->lock);
 
-	if (c->pcb.state == TCP_STATE_CLOSED)
+	if (c->pcb.state == TCP_STATE_CLOSED) {
+		if ((tcphdr->flags & TCP_RST) == 0)
+			send_rst(c, false, seq, ack, len);
 		goto done;
+	}
 
 	if (c->pcb.state == TCP_STATE_SYN_SENT) {
 		if ((tcphdr->flags & TCP_ACK) > 0) {
@@ -224,7 +237,7 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 			}
 			if (wraps_gt(c->pcb.snd_una, c->pcb.iss)) {
 				do_ack = true;
-				c->pcb.snd_wnd = win;
+				c->pcb.snd_wnd = win > 1 ? win - 2 : 0; // reserve 1 byte for FIN and one byte for the sequence number on an RST packet
 				c->pcb.snd_wl1 = seq;
 				c->pcb.snd_wl2 = ack;
 				tcp_conn_set_state(c, TCP_STATE_ESTABLISHED);
@@ -278,7 +291,7 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 			do_drop = true;
 			goto done;
 		}
-		c->pcb.snd_wnd = win;
+		c->pcb.snd_wnd = win > 1 ? win - 2 : 0; // reserve 1 byte for FIN and one byte for the sequence number on an RST packet
 		c->pcb.snd_wl1 = seq;
 		c->pcb.snd_wl2 = ack;
 		tcp_conn_set_state(c, TCP_STATE_ESTABLISHED);
@@ -295,33 +308,38 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 	    len == 0) {
 		c->rep_acks++;
 		if (c->rep_acks >= TCP_FAST_RETRANSMIT_THRESH) {
-			tcp_conn_get(c);
-			thread_spawn(tcp_fast_retransmit, c);
+			if (c->tx_exclusive) {
+				c->do_fast_retransmit = true;
+				c->fast_retransmit_last_ack = ack;
+			} else {
+				retransmit = tcp_tx_fast_retransmit_start(c);
+			}
 			c->rep_acks = 0;
 		}
 	}
+	bool snd_was_full = is_snd_full(c);
 	if (wraps_lte(c->pcb.snd_una, ack) &&
 	    wraps_lte(ack, snd_nxt)) {
-		bool snd_was_full = is_snd_full(c);
 		if (c->pcb.snd_una != ack)
 			c->rep_acks = 0;
 		c->pcb.snd_una = ack;
 		tcp_conn_ack(c, &q);
-		/* should we update the send window? */
-		if (wraps_lt(c->pcb.snd_wl1, seq) ||
-		    (c->pcb.snd_wl1 == seq &&
-		     wraps_lte(c->pcb.snd_wl2, ack))) {
-			c->pcb.snd_wnd = win;
-			c->pcb.snd_wl1 = seq;
-			c->pcb.snd_wl2 = ack;
-			c->rep_acks = 0;
-		}
-		if (snd_was_full && !is_snd_full(c))
-			waitq_release(&c->tx_wq);
 	} else if (wraps_gt(ack, snd_nxt)) {
 		do_ack = true;
 		goto done;
 	}
+	/* should we update the send window? */
+	if (wraps_lt(c->pcb.snd_wl1, seq) ||
+	    (c->pcb.snd_wl1 == seq &&
+	     wraps_lte(c->pcb.snd_wl2, ack))) {
+		c->pcb.snd_wnd = win > 1 ? win - 2 : 0; // reserve 1 byte for FIN and one byte for the sequence number on an RST packet
+		c->pcb.snd_wl1 = seq;
+		c->pcb.snd_wl2 = ack;
+		c->rep_acks = 0;
+	}
+	if (snd_was_full && !is_snd_full(c))
+		waitq_release_start(&c->tx_wq, &waiters);
+
 	if (c->pcb.state == TCP_STATE_FIN_WAIT1 &&
 	    c->pcb.snd_una == snd_nxt) {
 		tcp_conn_set_state(c, TCP_STATE_FIN_WAIT2);
@@ -347,7 +365,15 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 		m->seg_seq = seq;
 		m->seg_end = seq + len;
 		m->flags = tcphdr->flags;
+
+#ifdef TCP_RX_STATS
+		uint64_t before_tsc = rdtsc();
 		do_drop = !tcp_rx_text(c, m, &wake);
+		STAT(RX_TCP_TEXT_CYCLES) += rdtsc() - before_tsc;
+#else
+		do_drop = !tcp_rx_text(c, m, &wake);
+#endif
+
 		if (wake) {
 			assert(!list_empty(&c->rxq));
 			assert(do_drop == false);
@@ -357,6 +383,7 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 			c->ack_delayed = true;
 			c->ack_ts = microtime();
 		}
+		do_ack |= !list_empty(&c->rxq_ooo);
 	}
 
 	/* step 8 - FIN */
@@ -375,13 +402,16 @@ void tcp_rx_conn(struct trans_entry *e, struct mbuf *m)
 	}
 
 done:
+	tcp_timer_update(c);
 	tcp_debug_ingress_pkt(c, m);
 	spin_unlock_np(&c->lock);
 
 	/* deferred work (delayed until after the lock was dropped) */
+	waitq_release_finish(&waiters);
 	if (rx_th)
 		waitq_signal_finish(rx_th);
 	mbuf_list_free(&q);
+	tcp_tx_fast_retransmit_finish(c, retransmit);
 	if (do_ack)
 		tcp_tx_ack(c);
 	if (do_drop)
@@ -452,4 +482,33 @@ tcpconn_t *tcp_rx_listener(struct netaddr laddr, struct mbuf *m)
 	spin_unlock_np(&c->lock);
 
 	return c;
+}
+
+void tcp_rx_closed(struct mbuf *m)
+{
+	struct netaddr l, r;
+	uint32_t len;
+	const struct ip_hdr *iphdr;
+	const struct tcp_hdr *tcphdr;
+
+	iphdr = mbuf_network_hdr(m, *iphdr);
+	tcphdr = mbuf_pull_hdr_or_null(m, *tcphdr);
+	if (!tcphdr)
+		return;
+
+	if ((tcphdr->flags & TCP_RST) > 0)
+		return;
+
+	l.ip = ntoh32(iphdr->daddr);
+	l.port = ntoh16(tcphdr->dport);
+
+	r.ip = ntoh32(iphdr->saddr);
+	r.port = ntoh16(tcphdr->sport);
+
+	if ((tcphdr->flags & TCP_ACK) > 0) {
+		tcp_tx_raw_rst(l, r, ntoh32(tcphdr->ack));
+	} else {
+		len = ntoh16(iphdr->len) - sizeof(*iphdr) - tcphdr->off * 4;
+		tcp_tx_raw_rst_ack(l, r, 0, ntoh32(tcphdr->seq) + len);
+	}
 }

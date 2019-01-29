@@ -88,6 +88,7 @@ struct proc {
 	DEFINE_BITMAP(available_threads, NCPU);
 	struct list_head	idle_threads;
 	unsigned int		inflight_preempts;
+	unsigned int		next_thread_rr; // for spraying join requests/overflow completions
 
 	/* network data */
 	struct eth_addr		mac;
@@ -99,6 +100,10 @@ struct proc {
 
 	/* Unique identifier -- never recycled across runtimes*/
 	uintptr_t		uniqid;
+#ifdef MLX
+	uint32_t lkey;
+	void *mr;
+#endif
 
 	/* Overfloq queue for completion data */
 	size_t max_overflows;
@@ -238,6 +243,7 @@ enum {
 	RX_UNICAST_FAIL,
 	RX_BROADCAST_FAIL,
 	RX_UNHANDLED,
+	RX_JOIN_FAIL,
 
 	TX_COMPLETION_OVERFLOW,
 	TX_COMPLETION_FAIL,
@@ -312,5 +318,6 @@ extern bool cores_park_kthread(struct thread *t, bool force);
 extern struct thread *cores_add_core(struct proc *p);
 extern void cores_adjust_assignments();
 extern void proc_set_overloaded(struct proc *p);
-extern unsigned int get_available_cores(void);
 extern void flush_wake_requests(void);
+extern unsigned int get_nr_avail_cores(void);
+extern unsigned int get_total_cores(void);

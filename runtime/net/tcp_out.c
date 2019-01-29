@@ -22,8 +22,9 @@ static struct tcp_hdr *
 tcp_push_tcphdr(struct mbuf *m, tcpconn_t *c, uint8_t flags, uint16_t l4len)
 {
 	struct tcp_hdr *tcphdr;
-	tcp_seq ack = c->tx_last_ack = load_acquire(&c->pcb.rcv_nxt);
-	uint16_t win = c->tx_last_win = load_acquire(&c->pcb.rcv_wnd);
+	uint64_t rcv_nxt_wnd = load_acquire(&c->pcb.rcv_nxt_wnd);
+	tcp_seq ack = c->tx_last_ack = (uint32_t)rcv_nxt_wnd;
+	uint16_t win = c->tx_last_win = rcv_nxt_wnd >> 32;
 
 	/* write the tcp header */
 	tcphdr = mbuf_push_hdr(m, *tcphdr);
@@ -274,13 +275,10 @@ ssize_t tcp_tx_send(tcpconn_t *c, const void *buf, size_t len, bool push)
 	return ret;
 }
 
-static void tcp_tx_retransmit_one(tcpconn_t *c, struct mbuf *m)
+static int tcp_tx_retransmit_one(tcpconn_t *c, struct mbuf *m)
 {
 	int ret;
 	uint16_t l4len;
-	bool copied = false;
-
-	assert_spin_lock_held(&c->lock);
 
 	l4len = m->seg_end - m->seg_seq;
 	if (m->flags & (TCP_SYN | TCP_FIN))
@@ -295,7 +293,7 @@ static void tcp_tx_retransmit_one(tcpconn_t *c, struct mbuf *m)
 	if (unlikely(atomic_read(&m->ref) != 1)) {
 		struct mbuf *newm = net_tx_alloc_mbuf();
 		if (unlikely(!newm))
-			return;
+			return -ENOMEM;
 		memcpy(mbuf_put(newm, l4len),
 		       mbuf_transport_offset(m) + sizeof(struct tcp_hdr),
 		       l4len);
@@ -304,7 +302,6 @@ static void tcp_tx_retransmit_one(tcpconn_t *c, struct mbuf *m)
 		newm->seg_end = m->seg_end;
 		newm->txflags = OLFLAG_TCP_CHKSUM;
 		m = newm;
-		copied = true;
 	} else {
 		/* strip headers and reset ref count */
 		mbuf_reset(m, m->transport_off + sizeof(struct tcp_hdr));
@@ -312,10 +309,13 @@ static void tcp_tx_retransmit_one(tcpconn_t *c, struct mbuf *m)
 	}
 
 	/* handle a partially acknowledged packet */
-	assert(wraps_gt(m->seg_end, c->pcb.snd_una));
-	if (wraps_lt(m->seg_seq, c->pcb.snd_una)) {
-		mbuf_pull(m, c->pcb.snd_una - m->seg_seq);
-		m->seg_seq = c->pcb.snd_una;
+	uint32_t una = load_acquire(&c->pcb.snd_una);
+	if (unlikely(wraps_lte(m->seg_end, una))) {
+		mbuf_free(m);
+		return 0;
+	} else if (unlikely(wraps_lt(m->seg_seq, una))) {
+		mbuf_pull(m, una - m->seg_seq);
+		m->seg_seq = una;
 	}
 
 	/* push the TCP header back on (now with fresher ack) */
@@ -324,21 +324,16 @@ static void tcp_tx_retransmit_one(tcpconn_t *c, struct mbuf *m)
 	/* transmit the packet */
 	tcp_debug_egress_pkt(c, m);
 	ret = net_tx_ip(m, IPPROTO_TCP, c->e.raddr.ip);
-	if (unlikely(ret)) {
-		if (!copied) {
-			/* pretend the packet was sent */
-			atomic_write(&m->ref, 1);
-		} else {
-			mbuf_free(m);
-		}
-	}
+	if (unlikely(ret))
+		mbuf_free(m);
+	return ret;
 }
 
 /**
  * tcp_tx_fast_retransmit - resend the first pending egress packet
  * @c: the TCP connection in which to send retransmissions
  */
-void tcp_tx_fast_retransmit(tcpconn_t *c)
+struct mbuf *tcp_tx_fast_retransmit_start(tcpconn_t *c)
 {
 	struct mbuf *m;
 
@@ -347,7 +342,17 @@ void tcp_tx_fast_retransmit(tcpconn_t *c)
 	m = list_top(&c->txq, struct mbuf, link);
 	if (m) {
 		m->timestamp = microtime();
+		atomic_inc(&m->ref);
+	}
+
+	return m;
+}
+
+void tcp_tx_fast_retransmit_finish(tcpconn_t *c, struct mbuf *m)
+{
+	if (m) {
 		tcp_tx_retransmit_one(c, m);
+		mbuf_free(m);
 	}
 }
 
@@ -360,13 +365,25 @@ void tcp_tx_retransmit(tcpconn_t *c)
 	struct mbuf *m;
 	uint64_t now = microtime();
 
-	assert_spin_lock_held(&c->lock);
+	assert(spin_lock_held(&c->lock) || c->tx_exclusive);
 
+	int ret;
+
+	int count = 0;
 	list_for_each(&c->txq, m, link) {
 		/* check if the timeout expired */
 		if (now - m->timestamp < TCP_RETRANSMIT_TIMEOUT)
 			break;
+
+		if (wraps_gte(load_acquire(&c->pcb.snd_una), m->seg_end))
+			continue;
+
 		m->timestamp = now;
-		tcp_tx_retransmit_one(c, m);
+		ret = tcp_tx_retransmit_one(c, m);
+		if (ret)
+			break;
+
+		if (++count >= TCP_RETRANSMIT_BATCH)
+			break;
 	}
 }

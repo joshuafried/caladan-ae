@@ -62,7 +62,7 @@ bool rx_send_to_runtime(struct proc *p, uint32_t hash, uint64_t cmd,
 	if (likely(p->active_thread_count > 0)) {
 		/* load balance between active threads */
 		th = p->active_threads[hash % p->active_thread_count];
-	} else if (p->sched_cfg.guaranteed_cores > 0 || get_available_cores() > 0) {
+	} else if (p->sched_cfg.guaranteed_cores > 0 || get_nr_avail_cores() > 0) {
 		th = cores_add_core(p);
 		if (unlikely(!th))
 			return false;
@@ -206,8 +206,8 @@ static struct rte_mempool *rx_pktmbuf_pool_create_in_shm(const char *name,
 	struct rte_pktmbuf_pool_private mbp_priv;
 	struct rte_mempool *mp;
 	int ret;
+	size_t pg_size, pg_shift, min_chunk_size, align, len;
 	void *shbuf;
-	size_t total_elt_sz, pg_size, pg_shift, len;
 
 	/* create rte_mempool */
 	if (RTE_ALIGN(priv_size, RTE_MBUF_PRIV_ALIGN) != priv_size) {
@@ -232,10 +232,9 @@ static struct rte_mempool *rx_pktmbuf_pool_create_in_shm(const char *name,
 	rte_pktmbuf_pool_init(mp, &mbp_priv);
 
 	/* check necessary size and map shared memory */
-	total_elt_sz = mp->header_size + mp->elt_size + mp->trailer_size;
 	pg_size = PGSIZE_2MB;
 	pg_shift = rte_bsf32(pg_size);
-	len = rte_mempool_xmem_size(n, total_elt_sz, pg_shift, mp->flags);
+	len = rte_mempool_ops_calc_mem_size(mp, n, pg_shift, &min_chunk_size, &align);
 	if (len > INGRESS_MBUF_SHM_SIZE) {
 		log_err("rx: shared memory is too small for number of mbufs");
 		goto fail_free_mempool;

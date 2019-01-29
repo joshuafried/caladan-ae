@@ -21,6 +21,28 @@ static LIST_HEAD(tcp_conns);
 
 static void tcp_retransmit(void *arg);
 
+void tcp_timer_update(tcpconn_t *c)
+{
+	uint64_t next_timeout = -1L;
+	struct mbuf *m;
+	assert_spin_lock_held(&c->lock);
+
+	if (unlikely(c->pcb.state == TCP_STATE_TIME_WAIT))
+		next_timeout = c->time_wait_ts + TCP_TIME_WAIT_TIMEOUT;
+
+	if (c->ack_delayed)
+		next_timeout = min(next_timeout, c->ack_ts + TCP_ACK_TIMEOUT);
+
+	m = list_top(&c->txq, struct mbuf, link);
+	if (m)
+		next_timeout = min(next_timeout, m->timestamp + TCP_RETRANSMIT_TIMEOUT);
+
+	if (!list_empty(&c->rxq_ooo))
+		next_timeout = min(next_timeout, microtime() + TCP_OOQ_ACK_TIMEOUT);
+
+	store_release(&c->next_timeout, next_timeout);
+}
+
 /* check for timeouts in a TCP connection */
 static void tcp_handle_timeouts(tcpconn_t *c, uint64_t now)
 {
@@ -47,13 +69,18 @@ static void tcp_handle_timeouts(tcpconn_t *c, uint64_t now)
 	}
 	if (!list_empty(&c->txq)) {
 		struct mbuf *m = list_top(&c->txq, struct mbuf, link);
-		if (m && now - m->timestamp >= TCP_RETRANSMIT_TIMEOUT) {
+		if (now - m->timestamp >= TCP_RETRANSMIT_TIMEOUT) {
 			log_debug("tcp: %p retransmission timeout", c);
 			/* It is safe to take a reference, since state != closed */
 			tcp_conn_get(c);
 			do_retransmit = true;
 		}
 	}
+
+	do_ack |= !list_empty(&c->rxq_ooo);
+
+	tcp_timer_update(c);
+
 	spin_unlock_np(&c->lock);
 
 	if (do_ack)
@@ -72,8 +99,10 @@ static void tcp_worker(void *arg)
 		now = microtime();
 
 		spin_lock_np(&tcp_lock);
-		list_for_each(&tcp_conns, c, global_link)
-			tcp_handle_timeouts(c, now);
+		list_for_each(&tcp_conns, c, global_link) {
+			if (load_acquire(&c->next_timeout) <= now)
+				tcp_handle_timeouts(c, now);
+		}
 		spin_unlock_np(&tcp_lock);
 
 		timer_sleep(10 * ONE_MS);
@@ -132,6 +161,7 @@ void tcp_conn_set_state(tcpconn_t *c, int new_state)
 
 	tcp_debug_state_change(c, c->pcb.state, new_state);
 	c->pcb.state = new_state;
+	tcp_timer_update(c);
 }
 
 /* handles network errors for TCP sockets */
@@ -189,8 +219,10 @@ tcpconn_t *tcp_conn_alloc(void)
 	c->tx_last_win = 0;
 	c->tx_pending = NULL;
 	list_head_init(&c->txq);
+	c->do_fast_retransmit = false;
 
 	/* timeouts */
+	c->next_timeout = -1L;
 	c->ack_delayed = false;
 	c->rcv_wnd_full = false;
 	c->ack_ts = 0;
@@ -233,9 +265,16 @@ int tcp_conn_attach(tcpconn_t *c, struct netaddr laddr, struct netaddr raddr)
 	if (ret)
 		return ret;
 
+	static bool worker_running;
+	bool start_worker = false;
 	spin_lock_np(&tcp_lock);
+	if (unlikely(!worker_running))
+		worker_running = start_worker = true;
 	list_add_tail(&tcp_conns, &c->global_link);
 	spin_unlock_np(&tcp_lock);
+
+	if (start_worker)
+		BUG_ON(thread_spawn(tcp_worker, NULL));
 
 	return 0;
 }
@@ -597,16 +636,17 @@ static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 
 static void tcp_read_finish(tcpconn_t *c, struct mbuf *m)
 {
-	thread_t *th;
+	struct list_head waiters;
 
 	if (!m)
 		return;
 
+	list_head_init(&waiters);
 	spin_lock_np(&c->lock);
 	c->rx_exclusive = false;
-	th = waitq_signal(&c->rx_wq, &c->lock);
+	waitq_release_start(&c->rx_wq, &waiters);
 	spin_unlock_np(&c->lock);
-	waitq_signal_finish(th);
+	waitq_release_finish(&waiters);
 }
 
 /**
@@ -775,9 +815,12 @@ static int tcp_write_wait(tcpconn_t *c, size_t *winlen)
 static void tcp_write_finish(tcpconn_t *c)
 {
 	struct list_head q;
+	struct list_head waiters;
+	struct mbuf *retransmit = NULL;
 
 	assert(c->tx_exclusive == true);
 	list_head_init(&q);
+	list_head_init(&waiters);
 
 	spin_lock_np(&c->lock);
 	c->tx_exclusive = false;
@@ -792,10 +835,18 @@ static void tcp_write_finish(tcpconn_t *c)
 			list_add_tail(&q, &c->tx_pending->link);
 			c->tx_pending = NULL;
 		}
+	} else if (c->do_fast_retransmit) {
+		c->do_fast_retransmit = false;
+		if (c->fast_retransmit_last_ack == c->pcb.snd_una)
+			retransmit = tcp_tx_fast_retransmit_start(c);
 	}
-	waitq_release(&c->tx_wq);
+
+	tcp_timer_update(c);
+	waitq_release_start(&c->tx_wq, &waiters);
 	spin_unlock_np(&c->lock);
 
+	tcp_tx_fast_retransmit_finish(c, retransmit);
+	waitq_release_finish(&waiters);
 	mbuf_list_free(&q);
 }
 
@@ -875,28 +926,18 @@ static void tcp_retransmit(void *arg)
 	while (c->tx_exclusive && c->pcb.state != TCP_STATE_CLOSED)
 		waitq_wait(&c->tx_wq, &c->lock);
 
-	if (c->pcb.state != TCP_STATE_CLOSED)
+	if (c->pcb.state != TCP_STATE_CLOSED) {
+		c->tx_exclusive = true;
+		spin_unlock_np(&c->lock);
 		tcp_tx_retransmit(c);
+		tcp_write_finish(c);
+	} else {
+		spin_unlock_np(&c->lock);
+	}
 
-	spin_unlock_np(&c->lock);
 	tcp_conn_put(c);
 }
 
-/* resend just one pending egress packet */
-void tcp_fast_retransmit(void *arg)
-{
-	tcpconn_t *c = (tcpconn_t *)arg;
-
-	spin_lock_np(&c->lock);
-	while (c->tx_exclusive && c->pcb.state != TCP_STATE_CLOSED)
-		waitq_wait(&c->tx_wq, &c->lock);
-
-	if (c->pcb.state != TCP_STATE_CLOSED)
-		tcp_tx_fast_retransmit(c);
-
-	spin_unlock_np(&c->lock);
-	tcp_conn_put(c);
-}
 
 /**
  * tcp_conn_fail - closes a TCP both sides of a connection with an error
@@ -1034,8 +1075,12 @@ void tcp_abort(tcpconn_t *c)
 
 	l = c->e.laddr;
 	r = c->e.raddr;
-	snd_nxt = c->pcb.snd_nxt;
 	tcp_conn_fail(c, ECONNABORTED);
+
+	while (c->tx_exclusive)
+		waitq_wait(&c->tx_wq, &c->lock);
+
+	snd_nxt = c->pcb.snd_nxt;
 	spin_unlock_np(&c->lock);
 
 	for (i = 0; i < 10; i++) {
@@ -1044,7 +1089,7 @@ void tcp_abort(tcpconn_t *c)
 		timer_sleep(10);
 	}
 
-	WARN();
+	log_warn("tcp: failed to transmit TCP_RST");
 
 }
 
@@ -1078,5 +1123,5 @@ void tcp_close(tcpconn_t *c)
  */
 int tcp_init_late(void)
 {
-	return thread_spawn(tcp_worker, NULL);
+	return 0;
 }

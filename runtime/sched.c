@@ -277,11 +277,16 @@ again:
 		goto done;
 
 	/* finally try to steal from every kthread */
-	for (i = 0; i < last_nrks; i++) {
-		if (ks[i] == l)
-			continue;
-		if (steal_work(l, ks[i]))
+	for (i = 0; i < last_nrks; i++)
+		if (ks[i] != l && steal_work(l, ks[i]))
 			goto done;
+
+	/* check for RCU reclamation */
+	if (unlikely(load_acquire(&rcu_gen) != l->rcu_gen)) {
+		spin_unlock(&l->lock);
+		__rcu_recurrent(l);
+		spin_lock(&l->lock);
+		goto again;
 	}
 
 	/* keep trying to find work until the polling timeout expires */
@@ -293,8 +298,7 @@ again:
 	/* did not find anything to run, park this kthread */
 	STAT(SCHED_CYCLES) += rdtsc() - start_tsc;
 	/* we may have got a preempt signal before voluntarily yielding */
-	clear_preempt_needed();
-	kthread_park(true);
+	kthread_park(!preempt_needed());
 	start_tsc = rdtsc();
 
 	goto again;

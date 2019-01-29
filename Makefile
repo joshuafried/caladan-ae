@@ -7,7 +7,7 @@ LD	= gcc
 CC	= gcc
 AR	= ar
 SPARSE	= sparse
-MLX=$(shell lspci | grep Mellanox || echo "")
+MLX=$(shell lspci | grep 'ConnectX-3' || echo "")
 
 CHECKFLAGS = -D__CHECKER__ -Waddress-space
 
@@ -16,6 +16,10 @@ CFLAGS += -DDEBUG -DCCAN_LIST_DEBUG -rdynamic -O0 -ggdb
 LDFLAGS += -rdynamic
 else
 CFLAGS += -DNDEBUG -O3
+endif
+
+ifneq ($(TCP_RX_STATS),)
+CFLAGS += -DTCP_RX_STATS
 endif
 
 ifneq ($(MLX),)
@@ -69,10 +73,7 @@ DPDK_LIBS += -lrte_mempool_stack
 DPDK_LIBS += -lrte_ring
 # additional libs for running with Mellanox NICs
 ifneq ($(MLX),)
-DPDK_LIBS += -Wl,-whole-archive -lrte_pmd_mlx4 -Wl,-no-whole-archive
-DPDK_LIBS += -Wl,-whole-archive -libverbs -Wl,-no-whole-archive
-DPDK_LIBS += -Wl,-whole-archive -lmlx4 -Wl,-no-whole-archive
-DPDK_LIBS += -Wl,-whole-archive -lrte_kvargs -Wl,-no-whole-archive
+DPDK_LIBS += -lrte_pmd_mlx4 -libverbs -lmlx4
 endif
 
 # must be first

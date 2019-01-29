@@ -21,11 +21,6 @@
 /* important global state */
 struct net_cfg netcfg __aligned(CACHE_LINE_SIZE);
 
-/* mbuf allocation */
-static struct slab net_mbuf_slab;
-static struct tcache *net_mbuf_tcache;
-static DEFINE_PERTHREAD(struct tcache_perthread, net_mbuf_pt);
-
 /* RX buffer allocation */
 static struct slab net_rx_buf_slab;
 static struct tcache *net_rx_buf_tcache;
@@ -42,6 +37,7 @@ static struct verbs_queue_rx vqs[NCPU];
 #define POW_TWO_ROUND_UP(x) \
  ((x) == 1UL ? 1UL : 1UL << (64 - __builtin_clzl((x) - 1)))
 
+#define MBUF_RESERVED (align_up(sizeof(struct mbuf), CACHE_LINE_SIZE))
 
 /* drains overflow queues */
 void __noinline __net_recurrent(void)
@@ -86,8 +82,7 @@ void __noinline __net_recurrent(void)
 static void net_rx_release_mbuf(struct mbuf *m)
 {
 	preempt_disable();
-	tcache_free(&perthread_get(net_rx_buf_pt), m->head);
-	tcache_free(&perthread_get(net_mbuf_pt), m);
+	tcache_free(&perthread_get(net_rx_buf_pt), m);
 	preempt_enable();
 }
 
@@ -111,25 +106,21 @@ static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 	void *buf;
 
 	preempt_disable();
-	/* allocate the mbuf struct */
-	m = tcache_alloc(&perthread_get(net_mbuf_pt));
+	/* allocate the buffer to store the payload */
+	m = tcache_alloc(&perthread_get(net_rx_buf_pt));
 	if (unlikely(!m)) {
-		preempt_enable();
-		goto fail_mbuf;
-	}
-
-	/* allocate a buffer to store the payload */
-	buf = tcache_alloc(&perthread_get(net_rx_buf_pt));
-	if (unlikely(!buf)) {
 		preempt_enable();
 		goto fail_buf;
 	}
+
 	preempt_enable();
+
+	buf = (unsigned char *)m + MBUF_RESERVED;
 
 	/* copy the payload and release the buffer back to the iokernel */
 	memcpy(buf, hdr->payload, hdr->len);
 
-	mbuf_init(m, buf, hdr->len, 0);
+	mbuf_init(m, buf, MBUF_DEFAULT_LEN - MBUF_RESERVED, 0);
 	m->len = hdr->len;
 	m->csum_type = hdr->csum_type;
 	m->csum = hdr->csum;
@@ -143,10 +134,6 @@ static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 	return m;
 
 fail_buf:
-	preempt_disable();
-	tcache_free(&perthread_get(net_mbuf_pt), m);
-	preempt_enable();
-fail_mbuf:
 	verbs_rx_completion(hdr->completion_data);
 	return NULL;
 }
@@ -302,8 +289,7 @@ void net_rx_softirq(struct rx_net_hdr **hdrs, unsigned int nr)
 void net_tx_release_mbuf(struct mbuf *m)
 {
 	preempt_disable();
-	tcache_free(&perthread_get(net_tx_buf_pt), m->head);
-	tcache_free(&perthread_get(net_mbuf_pt), m);
+	tcache_free(&perthread_get(net_tx_buf_pt), m);
 	preempt_enable();
 }
 
@@ -318,21 +304,18 @@ struct mbuf *net_tx_alloc_mbuf(void)
 	unsigned char *buf;
 
 	preempt_disable();
-	m = tcache_alloc(&perthread_get(net_mbuf_pt));
+	m = tcache_alloc(&perthread_get(net_tx_buf_pt));
 	if (unlikely(!m)) {
 		preempt_enable();
+		log_warn_ratelimited("net: out of tx buffers");
 		return NULL;
 	}
 
-	buf = tcache_alloc(&perthread_get(net_tx_buf_pt));
-	if (unlikely(!buf)) {
-		tcache_free(&perthread_get(net_mbuf_pt), m);
-		preempt_enable();
-		return NULL;
-	}
 	preempt_enable();
 
-	mbuf_init(m, buf, MBUF_DEFAULT_LEN, MBUF_DEFAULT_HEADROOM);
+	buf = (unsigned char *)m + MBUF_RESERVED;
+
+	mbuf_init(m, buf, MBUF_DEFAULT_LEN - MBUF_RESERVED, MBUF_DEFAULT_HEADROOM);
 	m->csum_type = CHECKSUM_TYPE_NEEDED;
 	m->txflags = 0;
 	m->release_data = 0;
@@ -557,7 +540,6 @@ int net_init_thread(void)
 	int j, ret;
 	struct kthread *k = myk();
 
-	tcache_init_perthread(net_mbuf_tcache, &perthread_get(net_mbuf_pt));
 	tcache_init_perthread(net_rx_buf_tcache, &perthread_get(net_rx_buf_pt));
 	tcache_init_perthread(net_tx_buf_tcache, &perthread_get(net_tx_buf_pt));
 
@@ -610,18 +592,8 @@ int net_init(void)
 {
 	int ret;
 
-	ret = slab_create(&net_mbuf_slab, "runtime_mbufs",
-			  sizeof(struct mbuf), 0);
-	if (ret)
-		return ret;
-
-	net_mbuf_tcache = slab_create_tcache(&net_mbuf_slab,
-					     TCACHE_DEFAULT_MAG_SIZE);
-	if (!net_mbuf_tcache)
-		return -ENOMEM;
-
 	ret = slab_create(&net_rx_buf_slab, "runtime_rx_bufs",
-			  2048, 0);
+			  MBUF_DEFAULT_LEN, SLAB_FLAG_LGPAGE);
 	if (ret)
 		return ret;
 
