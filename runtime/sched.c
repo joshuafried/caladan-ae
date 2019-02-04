@@ -335,7 +335,6 @@ void join_kthread(struct kthread *k)
 {
 	thread_t *waketh;
 	struct list_head tmp;
-	int i;
 
 	//log_info_ratelimited("join_kthread() %p", k);
 
@@ -668,6 +667,7 @@ void thread_exit(void)
  */
 void sched_start(void)
 {
+	fflush(stdout);
 	last_tsc = rdtsc();
 	jmp_runtime_nosave((runtime_fn_t)schedule_start, 0);
 }

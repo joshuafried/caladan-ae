@@ -34,9 +34,28 @@
 #define RUNTIME_RQ_SIZE		32
 #define RUNTIME_SOFTIRQ_BUDGET	16
 #define RUNTIME_MAX_TIMERS	4096
-#define RUNTIME_SCHED_POLL_ITERS	4
+#define RUNTIME_SCHED_POLL_ITERS	2
 #define RUNTIME_SCHED_MIN_POLL_US	2
 #define RUNTIME_WATCHDOG_US	50
+
+
+/* Network parameters */
+#define RQ_NUM_DESC 64
+#define SQ_NUM_DESC 128
+#define SQ_CQ_BATCH_F 64
+#define EGRESS_POOL_SIZE(nks) \
+	(PACKET_QUEUE_MCOUNT * MBUF_DEFAULT_LEN * max(16, (nks)) * 64UL)
+#define RX_BUF_BOOL_SZ(nrqs) \
+ (align_up(nrqs * RQ_NUM_DESC * 2UL * MBUF_DEFAULT_LEN, PGSIZE_2MB))
+#define POW_TWO_ROUND_UP(x) \
+ ((x) <= 1UL ? 1UL : 1UL << (64 - __builtin_clzl((x) - 1)))
+#define NRRXQS(maxks, guaranteedks) (POW_TWO_ROUND_UP(maxks))
+
+// #define MLX5_TCP_RSS 1
+extern struct verbs_queue_rx vqs[NCPU];
+extern unsigned int nrvqs;
+
+
 
 /*
  * Trap frame support
@@ -308,14 +327,14 @@ struct kthread {
 	struct timer_idx	*timers;
 	unsigned long		pad2[6];
 
-	struct verbs_queue_tx vq_tx;
-	struct verbs_queue_rx *vq_rx[NCPU];
+	struct verbs_queue_tx vq_tx __aligned(CACHE_LINE_SIZE);
 	unsigned int nr_vq_rx;
 	unsigned int pos_vq_rx;
+	struct verbs_queue_rx *vq_rx[NCPU];
 	unsigned long		pad3[3];
 
 	/* 9th cache-line, statistics counters */
-	uint64_t		stats[STAT_NR];
+	uint64_t		stats[STAT_NR] __aligned(CACHE_LINE_SIZE);
 };
 
 /* compile-time verification of cache-line alignment */

@@ -86,6 +86,7 @@ void dataplane_loop()
 
 	log_info("main: core %u running dataplane. [Ctrl+C to quit]",
 			rte_lcore_id());
+	fflush(stdout);
 
 	/* run until quit or killed */
 	for (;;) {
