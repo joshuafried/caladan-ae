@@ -67,15 +67,12 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 		}
 	}
 
-	if (budget_left) {
-		compl_cnt = verbs_gather_completions(w->compl_reqs, &k->vq_tx, budget_left);
-		budget_left -= compl_cnt;
-	}
+	// TODO: fix me
+	w->compl_cnt = verbs_gather_completions(w->compl_reqs, &k->vq_tx, SOFTIRQ_MAX_BUDGET);
 
+	budget_left = SOFTIRQ_MAX_BUDGET / 2;
 	for (j = 0; budget_left && j < k->nr_vq_rx; j++) {
 		int idx = (j + k->pos_vq_rx) % k->nr_vq_rx;
-		if (j + 2 < k->nr_vq_rx)
-			prefetch(k->vq_rx[(idx + 2) % k->nr_vq_rx]->raw_cq);
 		int rcv = verbs_gather_rx(w->recv_reqs + recv_cnt, k->vq_rx[idx], budget_left);
 		recv_cnt += rcv;
 		budget_left -= rcv;
@@ -85,7 +82,6 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 
 	w->k = k;
 	w->recv_cnt = recv_cnt;
-	w->compl_cnt = compl_cnt;
 	w->join_cnt = join_cnt;
 	w->timer_budget = budget_left;
 }
@@ -94,14 +90,12 @@ static bool verbs_work_exists(struct kthread *k)
 {
 	int j = 0;
 
-	if (!verbs_queue_is_empty(k->vq_tx.raw_cq))
+	if (verbs_has_tx_completions(&k->vq_tx))
 		return true;
 
 	for (j = 0; j < k->nr_vq_rx; j++) {
 		int pos = (j + k->pos_vq_rx) % k->nr_vq_rx;
-		if (j + 4 < k->nr_vq_rx)
-			prefetch(k->vq_rx[(pos + 4) % k->nr_vq_rx]->raw_cq);
-		if (!verbs_queue_is_empty(k->vq_rx[pos]->raw_cq))
+		if (verbs_has_rx_packets(k->vq_rx[pos]))
 			return true;
 	}
 

@@ -27,8 +27,6 @@
 #define PACKET_QUEUE_MCOUNT	4096
 #define COMMAND_QUEUE_MCOUNT	4096
 /* the egress buffer pool must be large enough to fill all the TXQs entirely */
-#define EGRESS_POOL_SIZE(nks) \
-	(PACKET_QUEUE_MCOUNT * MBUF_DEFAULT_LEN * max(16, (nks)) * 16UL)
 
 struct iokernel_control iok;
 
@@ -176,15 +174,15 @@ static int ioqueues_shm_setup(unsigned int threads)
 		queue_pointers_alloc(r, tspec, &ptr);
 	}
 
+	iok.tx_len = EGRESS_POOL_SIZE(threads);
 	ptr = (char *)align_up((uintptr_t)ptr, PGSIZE_2MB);
 	ptr_to_shmptr(r, ptr, iok.tx_len);
 	iok.tx_buf = ptr;
-	iok.tx_len = EGRESS_POOL_SIZE(threads);
 	ptr += align_up(iok.tx_len, PGSIZE_2MB);
 
+	iok.verbs_mem_len = verbs_shm_space_needed(0, 0); // FIXME
 	ptr_to_shmptr(r, ptr, iok.verbs_mem_len);
 	iok.verbs_mem = ptr;
-	iok.verbs_mem_len = verbs_shm_space_needed(0, 0); // FIXME
 	ptr += align_up(iok.verbs_mem_len, PGSIZE_2MB);
 
 	iok.next_free = ptr_to_shmptr(r, ptr, 0);

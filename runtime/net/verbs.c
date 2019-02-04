@@ -12,18 +12,18 @@
 
 #include <base/log.h>
 #include <base/mempool.h>
-#include <net/mbuf.h>
 #include <base/slab.h>
+#include <net/mbuf.h>
+
+#include <util/mmio.h>
+#include <util/udma_barrier.h>
 
 #include "defs.h"
 #include "verbs.h"
 
-#define RQ_NUM_DESC 128
-#define SQ_NUM_DESC 128
 #define PORT_NUM 1 // TODO: make this dynamic
 
-#define RX_BUF_BOOL_SZ(nrqs) \
- (align_up(nrqs * RQ_NUM_DESC * 8 * MBUF_DEFAULT_LEN, PGSIZE_2MB))
+#define BUF_SZ MBUF_DEFAULT_LEN
 #define RX_BUF_RESERVED \
  (align_up(sizeof(struct rx_net_hdr), CACHE_LINE_SIZE))
 
@@ -38,10 +38,9 @@ static DEFINE_PERTHREAD(struct tcache_perthread, verbs_buf_pt);
 
 void verbs_rx_completion(unsigned long completion_data)
 {
-	unsigned char *buf;
+	char *buf = (char *)completion_data - RX_BUF_RESERVED;
 
 	preempt_disable();
-	buf = (unsigned char *)completion_data - RX_BUF_RESERVED;
 	tcache_free(&perthread_get(verbs_buf_pt), buf);
 	preempt_enable();
 }
@@ -50,7 +49,7 @@ static inline unsigned char *verbs_rx_alloc_buf(void)
 {
 	unsigned char *buf;
 
-	assert(!preempt_enabled());
+	assert_preempt_disabled();
 	buf = tcache_alloc(&perthread_get(verbs_buf_pt));
 	if (unlikely(!buf))
 		return NULL;
@@ -58,52 +57,39 @@ static inline unsigned char *verbs_rx_alloc_buf(void)
 	return buf + RX_BUF_RESERVED;
 }
 
-/*
- * verbs_queue_is_empty - check if there is a pending completion event
- */
-bool verbs_queue_is_empty(struct verbs_custom_cq *cq)
-{
-	struct mlx5_cqe64 *cqes = cq->dvcq.buf;
-	struct mlx5_cqe64 *cqe = &cqes[cq->cq_idx & (cq->dvcq.cqe_cnt - 1)];
-	uint16_t parity = cq->cq_idx & cq->dvcq.cqe_cnt;
-	uint8_t op_own = ACCESS_ONCE(cqe->op_own);
-	uint8_t op_owner = op_own & MLX5_CQE_OWNER_MASK;
-	uint8_t op_code = (op_own & 0xf0) >> 4;
-
-	return op_owner != !!parity || op_code == MLX5_CQE_INVALID;
-}
 
 /*
  * verbs_refill_rxqueue - replenish RX queue with nrdesc bufs
- * @rx_wq: queue to refill
+ * @vq: queue to refill
  * @nrdesc: number of buffers to fill
  *
+ * WARNING: nrdesc must not exceed the number of free slots in the RXq
  * returns 0 on success, errno on error
  */
-static int verbs_refill_rxqueue(struct ibv_wq *rx_wq, int nrdesc)
+static int verbs_refill_rxqueue(struct verbs_queue_rx *vq, int nrdesc)
 {
-	unsigned int i, ret;
+	unsigned int i;
+	uint32_t index;
 	unsigned char *buf;
-	struct ibv_sge sg_entry[nrdesc];
-	struct ibv_recv_wr *bad_wr, wr[nrdesc];
+	struct mlx5_wqe_data_seg *seg;
+
+	struct mlx5dv_rwq *wq = &vq->rx_wq_dv;
+
+	assert(nrdesc + vq->wq_head > *vq->cq_head + wq->wqe_cnt);
 
 	for (i = 0; i < nrdesc; i++) {
 		buf = verbs_rx_alloc_buf();
-		if (!buf)
+		if (unlikely(!buf))
 			return -ENOMEM;
-		sg_entry[i].addr = (uint64_t)buf;
-		sg_entry[i].length = MBUF_DEFAULT_LEN - RX_BUF_RESERVED;
-		sg_entry[i].lkey = mr_rx->lkey;
 
-		wr[i].num_sge = 1;
-		wr[i].sg_list = &sg_entry[i];
-		wr[i].next = (i < nrdesc - 1) ? &wr[i+1] : NULL;
-		wr[i].wr_id = (uint64_t)buf;
+		index = vq->wq_head++ & (wq->wqe_cnt - 1);
+		seg = wq->buf + index * wq->stride;
+		seg->addr = htobe64((unsigned long)buf);
+		vq->buffers[index] = buf;
 	}
 
-	ret = ibv_post_wq_recv(rx_wq, wr, &bad_wr);
-	if (ret)
-		return -ret;
+	udma_to_device_barrier();
+	wq->dbrec[0] = htobe32(vq->wq_head & 0xffff);
 
 	return 0;
 
@@ -118,54 +104,112 @@ static int verbs_refill_rxqueue(struct ibv_wq *rx_wq, int nrdesc)
  */
 int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 {
-	struct ibv_sge sg_entry = {
-		.addr = (uint64_t)mbuf_data(m),
-		.length = mbuf_length(m),
-		.lkey = mr_tx->lkey,
-	};
+	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
 
-	struct ibv_send_wr *bad_wr, wr = {
-		.num_sge = 1,
-		.sg_list = &sg_entry,
-		.next = NULL,
-		.wr_id = (uint64_t)m,
-		.send_flags = 0,
-		.opcode = IBV_WR_SEND,
-	};
+	if (unlikely(atomic_read(&v->pending_completions) >= v->tx_qp_dv.sq.wqe_cnt)) {
+		log_warn_ratelimited("txq full");
+		return 1;
+	}
 
-	if (m->txflags & OLFLAG_IP_CHKSUM)
-		wr.send_flags |= IBV_SEND_IP_CSUM;
+	void *segment = v->tx_qp_dv.sq.buf + idx * v->tx_qp_dv.sq.stride;
+	struct mlx5_wqe_ctrl_seg *ctrl = segment;
+	struct mlx5_wqe_eth_seg *eseg = segment + sizeof(*ctrl);
+	struct mlx5_wqe_data_seg *dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
 
-	v->pending_completions++;
-	return ibv_post_send(v->tx_qp, &wr, &bad_wr);
+	int size = (sizeof(*ctrl) / 16) +
+	           (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
+	           sizeof(struct mlx5_wqe_data_seg) / 16;
+
+	/* set ctrl segment */
+	*(uint32_t *)(segment + 8) = 0;
+	ctrl->imm = 0;
+	ctrl->fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
+	ctrl->opmod_idx_opcode = htobe32(((v->sq_head & 0xffff) << 8) |
+					       MLX5_OPCODE_SEND);
+	ctrl->qpn_ds = htobe32(size | (v->tx_qp->qp_num << 8));
+
+	/* set eseg */
+	memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
+	eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
+
+	/* set dpseg */
+	dpseg->byte_count = htobe32(mbuf_length(m));
+	dpseg->lkey = htobe32(mr_tx->lkey);
+	dpseg->addr = htobe64((uint64_t)mbuf_data(m));
+
+	/* record buffer */
+	store_release(&v->buffers[v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1)], m);
+	v->sq_head++;
+
+	/* write doorbell record */
+	udma_to_device_barrier();
+	v->tx_qp_dv.dbrec[MLX5_SND_DBR] = htobe32(v->sq_head & 0xffff);
+
+	/* ring bf doorbell */
+	mmio_wc_start();
+	mmio_write64_be(v->tx_qp_dv.bf.reg, *(__be64 *)ctrl);
+	mmio_flush_writes();
+
+	atomic_inc(&v->pending_completions);
+
+	return 0;
+
+}
+
+static inline int mlx5_csum_ok(struct mlx5_cqe64 *cqe)
+{
+	return ((cqe->hds_ip_ext & (MLX5_CQE_L4_OK | MLX5_CQE_L3_OK)) ==
+		 (MLX5_CQE_L4_OK | MLX5_CQE_L3_OK)) &
+		(((cqe->l4_hdr_type_etc >> 2) & 0x3) == MLX5_CQE_L3_HDR_TYPE_IPV4);
+}
+
+static inline int mlx5_get_cqe_opcode(struct mlx5_cqe64 *cqe)
+{
+	return (cqe->op_own & 0xf0) >> 4;
+}
+
+static inline int mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
+{
+	return (cqe->op_own & 0xc) >> 2;
 }
 
 int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned int budget)
 {
+	char *buf;
+	uint16_t wqe_idx;
+	uint32_t head = *v->cq_head;
+	int rx_cnt;
+
+	struct mlx5dv_rwq *wq = &v->rx_wq_dv;
+	struct mlx5dv_cq *cq = &v->rx_cq_dv;
+
+	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
 	struct rx_net_hdr *hdr;
-	int rx_cnt = 0;
 
-	if (verbs_queue_is_empty(v->raw_cq))
-		return 0;
+	for (rx_cnt = 0; rx_cnt < budget; rx_cnt++, head++) {
+		cqe = &cqes[head & (cq->cqe_cnt - 1)];
+		if (!cqe_ready(cqe, cq->cqe_cnt, head))
+			break;
 
-	struct ibv_wc wc[budget];
-	int msgs;
+		BUG_ON(mlx5_get_cqe_opcode(cqe) != MLX5_CQE_RESP_SEND);
+		BUG_ON(mlx5_get_cqe_format(cqe) == 0x3); // not compressed
 
-	msgs = ibv_poll_cq(ibv_cq_ex_to_cq(v->rx_cq), budget, wc);
-	BUG_ON(msgs < 0);
-	for (int i = 0; i < msgs; i++) {
-		v->raw_cq->cq_idx++;
-		BUG_ON(wc[i].status != IBV_WC_SUCCESS);
-		BUG_ON(!(wc[i].opcode & IBV_WC_RECV));
-		hdr = (struct rx_net_hdr *)((char *)wc[i].wr_id - sizeof(*hdr));
-		hdr->completion_data = wc[i].wr_id;
-		hdr->len = wc[i].byte_len;
-		hdr->csum_type = (wc[i].wc_flags & IBV_WC_IP_CSUM_OK) ? CHECKSUM_TYPE_UNNECESSARY : CHECKSUM_TYPE_NEEDED;
-		hdrs[rx_cnt++] = hdr;
+		wqe_idx = be16toh(cqe->wqe_counter) & (wq->wqe_cnt - 1);
+		buf = v->buffers[wqe_idx];
+		hdr = (struct rx_net_hdr *)(buf - sizeof(*hdr));
+		hdr->completion_data = (unsigned long)buf;
+		hdr->len = be32toh(cqe->byte_cnt);
+		hdr->csum_type = mlx5_csum_ok(cqe);
+		hdrs[rx_cnt] = hdr;
 	}
 
-	if (rx_cnt)
-		BUG_ON(verbs_refill_rxqueue(v->rx_wq, rx_cnt));
+	*v->cq_head = head;
+
+	if (likely(rx_cnt)) {
+		udma_to_device_barrier();
+		cq->dbrec[0] = htobe32(head & 0xffffff);
+		BUG_ON(verbs_refill_rxqueue(v, rx_cnt));
+	}
 
 	return rx_cnt;
 
@@ -176,36 +220,46 @@ int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned
  */
 int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsigned int budget)
 {
-	int compl_cnt = 0;
+	struct mlx5dv_cq *cq = &v->tx_cq_dv;
+	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
 
-	if (verbs_queue_is_empty(v->raw_cq))
-		return 0;
+	unsigned int compl_cnt;
+	uint32_t head = *v->cq_head;
+	uint16_t wqe_idx;
 
-	struct ibv_wc wc[budget];
-	int msgs;
+	for (compl_cnt = 0; compl_cnt < budget; compl_cnt++, head++) {
+		cqe = &cqes[head & (cq->cqe_cnt - 1)];
 
-	msgs = ibv_poll_cq(ibv_cq_ex_to_cq(v->tx_cq), budget, wc);
-	BUG_ON(msgs < 0);
-	for (int i = 0; i < msgs; i++) {
-		v->raw_cq->cq_idx++;
-		BUG_ON(wc[i].status != IBV_WC_SUCCESS);
-		BUG_ON(wc[i].opcode & IBV_WC_RECV);
-		mbufs[compl_cnt++] = (struct mbuf *)wc[i].wr_id;
+		if (!cqe_ready(cqe, cq->cqe_cnt, head))
+			break;
+
+		BUG_ON(mlx5_get_cqe_opcode(cqe) != MLX5_CQE_REQ);
+		BUG_ON(mlx5_get_cqe_format(cqe) == 0x3);
+
+		wqe_idx = be16toh(cqe->wqe_counter) & (v->tx_qp_dv.sq.wqe_cnt - 1);
+		mbufs[compl_cnt] = load_acquire(&v->buffers[wqe_idx]);
 	}
 
-	v->pending_completions -= compl_cnt;
+	if (likely(compl_cnt)) {
+		udma_to_device_barrier();
+		cq->dbrec[0] = htobe32(head & 0xffffff);
+	}
+
+	*v->cq_head = head;
+
+	atomic_sub_and_fetch(&v->pending_completions, compl_cnt);
+
 	return compl_cnt;
 }
 
 size_t verbs_shm_space_needed(size_t rx_qs, size_t tx_qs)
 {
 	// TODO: precisely calculate
-	return 4 * PGSIZE_2MB;
+	return 12 * PGSIZE_2MB;
 }
 
 /*
  * simple_alloc - simple memory allocator for internal MLX5 structures
- * TODO: replace me with SHM implementation.
  */
 static void *simple_alloc(size_t size, void *priv_data)
 {
@@ -220,7 +274,7 @@ static void *simple_alloc(size_t size, void *priv_data)
 		goto out;
 
 	p = (unsigned char *)iok.verbs_mem + nxt;
-	nxt += size;
+	nxt += align_up(size, PGSIZE_4KB);
 
 out:
 	spin_unlock(&alloc_lock);
@@ -236,7 +290,9 @@ static struct mlx5dv_ctx_allocators dv_allocators = {
 
 static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 {
-	int ret;
+	int i, ret;
+
+	memset(v, 0, sizeof(*v));
 
 	/* Create a CQ */
 	struct ibv_cq_init_attr_ex cq_attr = {
@@ -261,8 +317,8 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 		.max_sge = 1,
 		.pd = pd,
 		.cq = ibv_cq_ex_to_cq(v->rx_cq),
-		.comp_mask = 0,
-		.create_flags = 0,
+		.comp_mask = IBV_WQ_INIT_ATTR_FLAGS,
+		.create_flags = IBV_WQ_FLAGS_DELAY_DROP,
 	};
 	struct mlx5dv_wq_init_attr dv_wq_attr = {
 		.comp_mask = 0,
@@ -283,26 +339,46 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 	if (ret)
 		return -ret;
 
-	/* Directly expose completion queue */
-	v->raw_cq = simple_alloc(align_up(sizeof(*v->raw_cq), PGSIZE_4KB), 0);
-	if (!v->raw_cq)
-		return -ENOMEM;
+	/* expose direct verbs objects */
 	struct mlx5dv_obj obj = {
 		.cq = {
 			.in = ibv_cq_ex_to_cq(v->rx_cq),
-			.out = &v->raw_cq->dvcq,
+			.out = &v->rx_cq_dv,
+		},
+		.rwq = {
+			.in = v->rx_wq,
+			.out = &v->rx_wq_dv,
 		},
 	};
-	ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ);
+	ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ | MLX5DV_OBJ_RWQ);
 	if (ret)
 		return -ret;
-	v->raw_cq->cq_idx = 0;
 
+	/* allocate list of posted buffers */
+	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->rx_wq_dv.wqe_cnt * sizeof(void *));
+	if (!v->buffers)
+		return -ENOMEM;
+
+	/* allocate a shared memory head pointer */
+	v->cq_head = simple_alloc(CACHE_LINE_SIZE, 0);
+	if (!v->cq_head)
+		return -ENOMEM;
+	*v->cq_head = 0;
+
+	/* send queue spec to iokernel */
 	struct mlxq_spec *qs = &iok.qspec[iok.mlxq_count++];
 	BUG_ON(iok.mlxq_count > NCPU);
-	qs->cq_buf = ptr_to_shmptr(&netcfg.tx_region, v->raw_cq->dvcq.buf, RQ_NUM_DESC * sizeof(struct mlx5_cqe64));
-	qs->cq_idx = ptr_to_shmptr(&netcfg.tx_region, &v->raw_cq->cq_idx, sizeof(v->raw_cq->cq_idx));
-	qs->cqe_cnt =  v->raw_cq->dvcq.cqe_cnt;
+	qs->cq_buf = ptr_to_shmptr(&netcfg.tx_region, v->rx_cq_dv.buf,  v->rx_cq_dv.cqe_cnt * sizeof(struct mlx5_cqe64));
+	qs->cq_idx = ptr_to_shmptr(&netcfg.tx_region, v->cq_head, sizeof(*v->cq_head));
+	qs->cqe_cnt = v->rx_cq_dv.cqe_cnt;
+
+	/* set byte_count and lkey for all descriptors once */
+	struct mlx5dv_rwq *wq = &v->rx_wq_dv;
+	for (i = 0; i < wq->wqe_cnt; i++) {
+		struct mlx5_wqe_data_seg *seg = wq->buf + i * wq->stride;
+		seg->byte_count =  htobe32(BUF_SZ - RX_BUF_RESERVED);
+		seg->lkey = htobe32(mr_rx->lkey);
+	}
 
 	return 0;
 }
@@ -310,7 +386,7 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 /*
  * verbs_init - intialize all TX/RX queues
  */
-int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx **qs, int nrqs)
+int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 {
 	int i, fd, ret;
 	void *rx_buf;
@@ -343,7 +419,6 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx **qs, int nrqs)
 		return -1;
 	}
 
-	setenv("MLX5_SINGLE_THREADED", "1", true);
 	struct mlx5dv_context_attr attr;
 	memset(&attr, 0, sizeof(attr));
 	context = mlx5dv_open_device(ib_dev, &attr);
@@ -380,7 +455,7 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx **qs, int nrqs)
 		return -ENOMEM;
 
 	ret = mempool_create(&verbs_buf_mp, rx_buf, RX_BUF_BOOL_SZ(nrqs),
-			     PGSIZE_2MB, MBUF_DEFAULT_LEN);
+			     PGSIZE_2MB, BUF_SZ);
 	if (ret)
 		return ret;
 
@@ -396,7 +471,7 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx **qs, int nrqs)
 	}
 
 	for (i = 0; i < nrqs; i++) {
-		struct verbs_queue_rx *v = qs[i];
+		struct verbs_queue_rx *v = &qs[i];
 		ret = verbs_create_rx_queue(v);
 		if (ret)
 			return ret;
@@ -427,7 +502,11 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx **qs, int nrqs)
 		.rx_hash_function = IBV_RX_HASH_FUNC_TOEPLITZ,
 		.rx_hash_key_len = 40,
 		.rx_hash_key = (void *)&key[0],
+#ifdef MLX5_TCP_RSS
+		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_TCP | IBV_RX_HASH_DST_PORT_TCP,
+#else
 		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_UDP | IBV_RX_HASH_DST_PORT_UDP,
+#endif
 	};
 	struct ibv_qp_init_attr_ex qp_ex_attr = {
 		.qp_type = IBV_QPT_RAW_PACKET,
@@ -506,6 +585,8 @@ int verbs_init_tx_queue(struct verbs_queue_tx *v)
 {
 	int ret;
 
+	memset(v, 0, sizeof(*v));
+
 	/* Create a CQ */
 	struct ibv_cq_init_attr_ex cq_attr = {
 		.cqe = SQ_NUM_DESC,
@@ -565,27 +646,36 @@ int verbs_init_tx_queue(struct verbs_queue_tx *v)
 	if (ret)
 		return -ret;
 
-	v->raw_cq = simple_alloc(align_up(sizeof(*v->raw_cq), PGSIZE_4KB), 0);
-	if (!v->raw_cq)
-		return -ENOMEM;
-
 	struct mlx5dv_obj obj = {
 		.cq = {
 			.in = ibv_cq_ex_to_cq(v->tx_cq),
-			.out = &v->raw_cq->dvcq,
+			.out = &v->tx_cq_dv,
+		},
+		.qp = {
+			.in = v->tx_qp,
+			.out = &v->tx_qp_dv,
 		},
 	};
-	ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ);
-	if (!ret)
+	ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ | MLX5DV_OBJ_QP);
+	if (ret)
 		return -ret;
 
-	v->raw_cq->cq_idx = 0;
-	v->pending_completions = 0;
+	/* allocate list of posted buffers */
+	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
+	if (!v->buffers)
+		return -ENOMEM;
+
+	/* allocate a shared memory head pointer */
+	v->cq_head = simple_alloc(CACHE_LINE_SIZE, 0);
+	if (!v->cq_head)
+		return -ENOMEM;
+	*v->cq_head = 0;
+	atomic_write(&v->pending_completions, 0);
 
 	return 0;
 }
 
 int verbs_init_rx_queue(struct verbs_queue_rx *v)
 {
-	return verbs_refill_rxqueue(v->rx_wq, RQ_NUM_DESC);
+	return verbs_refill_rxqueue(v, RQ_NUM_DESC);
 }

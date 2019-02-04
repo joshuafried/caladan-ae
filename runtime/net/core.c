@@ -34,10 +34,10 @@ static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 #define MBUF_RESERVED (align_up(sizeof(struct mbuf), CACHE_LINE_SIZE))
 
 /* Rudimentary per-kthread verb queues */
-static struct verbs_queue_rx vqs[NCPU];
+struct verbs_queue_rx vqs[NCPU];
+unsigned int nrvqs;
 
-#define POW_TWO_ROUND_UP(x) \
- ((x) == 1UL ? 1UL : 1UL << (64 - __builtin_clzl((x) - 1)))
+#define MBUF_RESERVED (align_up(sizeof(struct mbuf), CACHE_LINE_SIZE))
 
 
 /*
@@ -51,34 +51,21 @@ static void net_rx_release_mbuf(struct mbuf *m)
 	preempt_enable();
 }
 
-#if 0
-static void net_rx_send_completion(unsigned long completion_data)
-{
-	struct kthread *k;
-
-	k = getk();
-	if (unlikely(!lrpc_send(&k->txcmdq, TXCMD_NET_COMPLETE,
-				completion_data))) {
-		WARN();
-	}
-	putk();
-}
-#endif
-
 static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 {
 	struct mbuf *m;
 	void *buf;
 
-	preempt_disable();
 	/* allocate the buffer to store the payload */
+	preempt_disable();
 	m = tcache_alloc(&perthread_get(net_rx_buf_pt));
-	if (unlikely(!m)) {
-		preempt_enable();
-		goto fail_buf;
-	}
-
 	preempt_enable();
+
+	if (unlikely(!m)) {
+		log_warn_ratelimited("rx: out of mbufs!");
+		verbs_rx_completion(hdr->completion_data);
+		return NULL;
+	}
 
 	buf = (unsigned char *)m + MBUF_RESERVED;
 
@@ -91,16 +78,10 @@ static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 	m->csum = hdr->csum;
 	m->rss_hash = hdr->rss_hash;
 
-	barrier();
 	verbs_rx_completion(hdr->completion_data);
 
-	m->release_data = 0;
 	m->release = net_rx_release_mbuf;
 	return m;
-
-fail_buf:
-	verbs_rx_completion(hdr->completion_data);
-	return NULL;
 }
 
 static inline bool ip_hdr_supported(const struct ip_hdr *iphdr)
@@ -193,7 +174,7 @@ static struct mbuf *net_rx_one(struct rx_net_hdr *hdr)
 	len = ntoh16(iphdr->len) - sizeof(*iphdr);
 	if (unlikely(mbuf_length(m) < len))
 		goto drop;
-	if (len < mbuf_length(m))
+	if (unlikely(len < mbuf_length(m)))
 		mbuf_trim(m, mbuf_length(m) - len);
 
 	switch(iphdr->proto) {
@@ -270,13 +251,11 @@ struct mbuf *net_tx_alloc_mbuf(void)
 
 	preempt_disable();
 	m = tcache_alloc(&perthread_get(net_tx_buf_pt));
+	preempt_enable();
 	if (unlikely(!m)) {
-		preempt_enable();
 		log_warn_ratelimited("net: out of tx buffers");
 		return NULL;
 	}
-
-	preempt_enable();
 
 	buf = (unsigned char *)m + MBUF_RESERVED;
 
@@ -321,7 +300,7 @@ static void net_tx_raw(struct mbuf *m)
 	STAT(TX_PACKETS)++;
 	STAT(TX_BYTES) += len;
 
-	if (verbs_transmit_one(&k->vq_tx, m))
+	if (unlikely(verbs_transmit_one(&k->vq_tx, m)))
 		mbufq_push_tail(&k->txpktq_overflow, m);
 
 	putk();
@@ -537,7 +516,7 @@ int net_init_thread(void)
 
 	/* attach all RX queues to kthread 0 */
 	if (!k->kthread_idx) {
-		k->nr_vq_rx =  POW_TWO_ROUND_UP(maxks);
+		k->nr_vq_rx = nrvqs;
 		for (j = 0; j < k->nr_vq_rx; j++) {
 			k->vq_rx[j] = &vqs[j];
 			ret = verbs_init_rx_queue(k->vq_rx[j]);
@@ -598,12 +577,9 @@ int net_init(void)
 	if (!net_tx_buf_tcache)
 		return -ENOMEM;
 
-	struct verbs_queue_rx *vqs_ptr[POW_TWO_ROUND_UP(maxks)];
-	for (int j = 0; j < POW_TWO_ROUND_UP(maxks); j++)
-		vqs_ptr[j] = vqs + j;
-
-	log_info("Creating %lu rx queues", POW_TWO_ROUND_UP(maxks));
-	ret = verbs_init(&net_tx_buf_mp, vqs_ptr, POW_TWO_ROUND_UP(maxks));
+	nrvqs = NRRXQS(maxks, guaranteedks);
+	log_info("Creating %u rx queues", nrvqs);
+	ret = verbs_init(&net_tx_buf_mp, vqs, nrvqs);
 	if (ret)
 		return ret;
 
