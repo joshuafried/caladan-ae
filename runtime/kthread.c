@@ -138,7 +138,7 @@ void kthread_detach(struct kthread *r)
 		return;
 
 	/* this kthread may have pending completions */
-	if (atomic_read(&r->vq_tx.pending_completions))
+	if (nr_inflight_tx(&r->vq_tx) > 0)
 		return;
 
 	/* one last check, an RX cmd could have squeaked in */

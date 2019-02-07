@@ -106,7 +106,7 @@ int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 {
 	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
 
-	if (unlikely(atomic_read(&v->pending_completions) >= v->tx_qp_dv.sq.wqe_cnt)) {
+	if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
 		log_warn_ratelimited("txq full");
 		return 1;
 	}
@@ -150,8 +150,6 @@ int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 	mmio_write64_be(v->tx_qp_dv.bf.reg, *(__be64 *)ctrl);
 	mmio_flush_writes();
 
-	atomic_inc(&v->pending_completions);
-
 	return 0;
 
 }
@@ -176,6 +174,7 @@ static inline int mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
 int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned int budget)
 {
 	char *buf;
+	uint8_t opcode;
 	uint16_t wqe_idx;
 	uint32_t head = *v->cq_head;
 	int rx_cnt;
@@ -188,11 +187,14 @@ int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned
 
 	for (rx_cnt = 0; rx_cnt < budget; rx_cnt++, head++) {
 		cqe = &cqes[head & (cq->cqe_cnt - 1)];
-		if (!cqe_ready(cqe, cq->cqe_cnt, head))
+		opcode = cqe_status(cqe, cq->cqe_cnt, head);
+
+		if (opcode == MLX5_CQE_INVALID)
 			break;
 
-		BUG_ON(mlx5_get_cqe_opcode(cqe) != MLX5_CQE_RESP_SEND);
-		BUG_ON(mlx5_get_cqe_format(cqe) == 0x3); // not compressed
+		BUG_ON(opcode != MLX5_CQE_RESP_SEND);
+
+		assert(mlx5_get_cqe_format(cqe) != 0x3); // not compressed
 
 		wqe_idx = be16toh(cqe->wqe_counter) & (wq->wqe_cnt - 1);
 		buf = v->buffers[wqe_idx];
@@ -224,17 +226,20 @@ int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsi
 	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
 
 	unsigned int compl_cnt;
+	uint8_t opcode;
 	uint32_t head = *v->cq_head;
 	uint16_t wqe_idx;
 
 	for (compl_cnt = 0; compl_cnt < budget; compl_cnt++, head++) {
 		cqe = &cqes[head & (cq->cqe_cnt - 1)];
+		opcode = cqe_status(cqe, cq->cqe_cnt, head);
 
-		if (!cqe_ready(cqe, cq->cqe_cnt, head))
+		if (opcode == MLX5_CQE_INVALID)
 			break;
 
-		BUG_ON(mlx5_get_cqe_opcode(cqe) != MLX5_CQE_REQ);
-		BUG_ON(mlx5_get_cqe_format(cqe) == 0x3);
+		BUG_ON(opcode != MLX5_CQE_REQ);
+
+		assert(mlx5_get_cqe_format(cqe) != 0x3);
 
 		wqe_idx = be16toh(cqe->wqe_counter) & (v->tx_qp_dv.sq.wqe_cnt - 1);
 		mbufs[compl_cnt] = load_acquire(&v->buffers[wqe_idx]);
@@ -246,8 +251,6 @@ int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsi
 	}
 
 	*v->cq_head = head;
-
-	atomic_sub_and_fetch(&v->pending_completions, compl_cnt);
 
 	return compl_cnt;
 }
@@ -670,7 +673,6 @@ int verbs_init_tx_queue(struct verbs_queue_tx *v)
 	if (!v->cq_head)
 		return -ENOMEM;
 	*v->cq_head = 0;
-	atomic_write(&v->pending_completions, 0);
 
 	return 0;
 }
