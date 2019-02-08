@@ -124,7 +124,7 @@ static bool steal_work(struct kthread *l, struct kthread *r)
 	}
 
 	/* Should we take some of the RX queues? */
-	if (r->nr_vq_rx > l->nr_vq_rx + 1) {
+	if (unlikely(r->nr_vq_rx > l->nr_vq_rx + 1)) {
 		int to_steal = (r->nr_vq_rx - l->nr_vq_rx) / 2;
 		for (i = 0; i < to_steal; i++)
 			l->vq_rx[l->nr_vq_rx++] = r->vq_rx[--r->nr_vq_rx];
@@ -277,9 +277,11 @@ again:
 		goto done;
 
 	/* finally try to steal from every kthread */
-	for (i = 0; i < last_nrks; i++)
-		if (ks[i] != l && steal_work(l, ks[i]))
+	for (i = 0; i < last_nrks; i++) {
+		int pos = (i + l->kthread_idx) % last_nrks;
+		if (ks[pos] != l && steal_work(l, ks[pos]))
 			goto done;
+	}
 
 	/* check for RCU reclamation */
 	if (unlikely(load_acquire(&rcu_gen) != l->rcu_gen)) {
@@ -716,7 +718,7 @@ int sched_init(void)
 		return ret;
 
 	thread_tcache = slab_create_tcache(&thread_slab,
-					   TCACHE_DEFAULT_MAG_SIZE);
+					   THREAD_TC_MAG);
 	if (!thread_tcache) {
 		slab_destroy(&thread_slab);
 		return -ENOMEM;

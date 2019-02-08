@@ -9,7 +9,6 @@
 #include <base/list.h>
 #include <base/atomic.h>
 
-#define TCACHE_MAX_MAG_SIZE	64
 #define TCACHE_DEFAULT_MAG_SIZE	8
 
 struct tcache;
@@ -60,7 +59,7 @@ static inline void *tcache_alloc(struct tcache_perthread *ltc)
 {
 	void *item = (void *)ltc->loaded;
 
-	if (ltc->rounds == 0)
+	if (unlikely(ltc->rounds == 0))
 		return __tcache_alloc(ltc);
 
 	ltc->rounds--;
@@ -77,7 +76,7 @@ static inline void tcache_free(struct tcache_perthread *ltc, void *item)
 {
 	struct tcache_hdr *hdr = (struct tcache_hdr *)item;
 
-	if (ltc->rounds >= ltc->capacity)
+	if (unlikely(ltc->rounds >= ltc->capacity))
 		return __tcache_free(ltc, item);
 
 	ltc->rounds++;

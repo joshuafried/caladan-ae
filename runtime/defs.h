@@ -51,11 +51,16 @@
  ((x) <= 1UL ? 1UL : 1UL << (64 - __builtin_clzl((x) - 1)))
 #define NRRXQS(maxks, guaranteedks) (POW_TWO_ROUND_UP(maxks))
 
+#define NET_RX_BUF_SLAB_TC_MAG (TCACHE_DEFAULT_MAG_SIZE)
+#define NET_TX_BUF_TC_MAG (TCACHE_DEFAULT_MAG_SIZE)
+#define VERBS_RX_BUF_TC_MAG (TCACHE_DEFAULT_MAG_SIZE)
+
 // #define MLX5_TCP_RSS 1
 extern struct verbs_queue_rx vqs[NCPU];
 extern unsigned int nrvqs;
 
-
+#define STACK_TC_MAG TCACHE_DEFAULT_MAG_SIZE
+#define THREAD_TC_MAG TCACHE_DEFAULT_MAG_SIZE
 
 /*
  * Trap frame support
