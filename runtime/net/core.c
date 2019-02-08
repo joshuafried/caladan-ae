@@ -563,7 +563,7 @@ int net_init(void)
 		return ret;
 
 	net_rx_buf_tcache = slab_create_tcache(&net_rx_buf_slab,
-					       TCACHE_DEFAULT_MAG_SIZE);
+					       NET_RX_BUF_SLAB_TC_MAG);
 	if (!net_rx_buf_tcache)
 		return -ENOMEM;
 
@@ -573,7 +573,7 @@ int net_init(void)
 		return ret;
 
 	net_tx_buf_tcache = mempool_create_tcache(&net_tx_buf_mp,
-		"runtime_tx_bufs", TCACHE_DEFAULT_MAG_SIZE);
+		"runtime_tx_bufs", NET_TX_BUF_TC_MAG);
 	if (!net_tx_buf_tcache)
 		return -ENOMEM;
 

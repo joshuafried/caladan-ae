@@ -463,7 +463,7 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 		return ret;
 
 	verbs_buf_tcache = mempool_create_tcache(&verbs_buf_mp,
-		"verbs_rx_bufs", TCACHE_DEFAULT_MAG_SIZE);
+		"verbs_rx_bufs", VERBS_RX_BUF_TC_MAG);
 	if (!verbs_buf_tcache)
 		return -ENOMEM;
 

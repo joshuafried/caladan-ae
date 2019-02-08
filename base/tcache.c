@@ -23,7 +23,7 @@ static LIST_HEAD(tcache_list);
 
 static struct tcache_hdr *tcache_alloc_mag(struct tcache *tc)
 {
-	void *items[TCACHE_MAX_MAG_SIZE];
+	void *items[tc->mag_size];
 	struct tcache_hdr *head, **pos;
 	int err, i;
 
@@ -45,7 +45,7 @@ static struct tcache_hdr *tcache_alloc_mag(struct tcache *tc)
 
 static void tcache_free_mag(struct tcache *tc, struct tcache_hdr *hdr)
 {
-	void *items[TCACHE_MAX_MAG_SIZE];
+	void *items[tc->mag_size];
 	int nr = 0;
 
 	do {
@@ -146,7 +146,6 @@ struct tcache *tcache_create(const char *name, const struct tcache_ops *ops,
 
 	/* we assume the caller is aware of the tcache size limits */
 	assert(item_size >= TCACHE_MIN_ITEM_SIZE);
-	assert(mag_size <= TCACHE_MAX_MAG_SIZE);
 
 	tc = malloc(sizeof(*tc));
 	if (!tc)

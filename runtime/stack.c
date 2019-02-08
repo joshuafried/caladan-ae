@@ -63,7 +63,7 @@ static void stack_tcache_free(struct tcache *tc, int nr, void **items)
 	for (i = 0; i < nr; i++)
 		free_stacks[free_stack_count++] = items[i];
 	BUG_ON(free_stack_count >=
-	       RUNTIME_MAX_THREADS + TCACHE_DEFAULT_MAG_SIZE);
+	       RUNTIME_MAX_THREADS + STACK_TC_MAG);
 	spin_unlock(&stack_lock);
 }
 
@@ -117,7 +117,7 @@ int stack_init_thread(void)
 int stack_init(void)
 {
 	stack_tcache = tcache_create("runtime_stacks", &stack_tcache_ops,
-				     TCACHE_DEFAULT_MAG_SIZE,
+				     STACK_TC_MAG,
 				     RUNTIME_STACK_SIZE);
 	if (!stack_tcache)
 		return -ENOMEM;

@@ -68,9 +68,9 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 	}
 
 	// TODO: fix me
-	w->compl_cnt = verbs_gather_completions(w->compl_reqs, &k->vq_tx, SOFTIRQ_MAX_BUDGET);
+	w->compl_cnt = verbs_gather_completions(w->compl_reqs, &k->vq_tx, budget_left);
 
-	budget_left = SOFTIRQ_MAX_BUDGET / 2;
+	// budget_left = SOFTIRQ_MAX_BUDGET / 2;
 	for (j = 0; budget_left && j < k->nr_vq_rx; j++) {
 		int idx = (j + k->pos_vq_rx) % k->nr_vq_rx;
 		int rcv = verbs_gather_rx(w->recv_reqs + recv_cnt, k->vq_rx[idx], budget_left);
