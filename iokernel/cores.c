@@ -14,6 +14,7 @@
 #include <base/cpu.h>
 #include <base/hash.h>
 #include <base/log.h>
+#include <base/thread.h>
 #include <iokernel/queue.h>
 
 #include "defs.h"
@@ -886,6 +887,8 @@ int cores_init(void)
 	if (i == cpu_count)
 		panic("cores: couldn't find any cores on package 0");
 	core_assign.dp_core = i;
+
+	cores_pin_thread(gettid(), core_assign.dp_core);
 
 	/* parse hyperthread information */
 	for (i = 0; i < cpu_count; i++) {

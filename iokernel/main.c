@@ -2,9 +2,6 @@
  * main.c - initialization and main dataplane loop for the iokernel
  */
 
-#include <rte_ethdev.h>
-#include <rte_lcore.h>
-
 #include <base/init.h>
 #include <base/log.h>
 #include <base/stddef.h>
@@ -35,11 +32,7 @@ static const struct init_entry iok_init_handlers[] = {
 	IOK_INITIALIZER(control),
 
 	/* data plane */
-	IOK_INITIALIZER(dpdk),
 	IOK_INITIALIZER(dp_clients),
-#ifndef DIRECTPATH
-	IOK_INITIALIZER(dpdk_late),
-#endif
 };
 
 static int run_init_handlers(const char *phase, const struct init_entry *h,
@@ -75,25 +68,13 @@ void dataplane_loop()
 	 * Check that the port is on the same NUMA node as the polling thread
 	 * for best performance.
 	 */
-#ifndef DIRECTPATH
-	if (rte_eth_dev_socket_id(dp.port) > 0
-			&& rte_eth_dev_socket_id(dp.port) != (int) rte_socket_id())
-		log_warn("main: port %u is on remote NUMA node to polling thread.\n\t"
-				"Performance will not be optimal.", dp.port);
-#endif
-
 	log_info("main: core %u running dataplane. [Ctrl+C to quit]",
-			rte_lcore_id());
+			sched_getcpu());
 	fflush(stdout);
 
 	/* run until quit or killed */
 	for (;;) {
 		work_done = false;
-
-#ifndef DIRECTPATH
-		/* handle a burst of ingress packets */
-		work_done |= rx_burst();
-#endif
 
 		/* handle control messages */
 		if (!work_done)

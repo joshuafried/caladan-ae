@@ -2,17 +2,10 @@
  * dp_clients.c - functions for registering/unregistering dataplane clients
  */
 
-#include <rte_ether.h>
-#include <rte_hash.h>
-#include <rte_jhash.h>
-#include <rte_lcore.h>
-
 #include <base/log.h>
 #include <base/lrpc.h>
 
 #include "defs.h"
-
-#define MAC_TO_PROC_ENTRIES	128
 
 static struct lrpc_chan_out lrpc_data_to_control;
 static struct lrpc_chan_in lrpc_control_to_data;
@@ -25,12 +18,6 @@ static void dp_clients_add_client(struct proc *p)
 
 	p->kill = false;
 	dp.clients[dp.nr_clients++] = p;
-
-#ifdef MLX
-	p->mr = mlx_reg_mem(dp.port, p->region.base, p->region.len, &p->lkey);
-	if (!p->mr)
-		log_err("dp clients: failed to register memory with MLX nic");
-#endif
 
 	cores_init_proc(p);
 }
@@ -63,12 +50,6 @@ static void dp_clients_remove_client(struct proc *p)
 
 	dp.clients[i] = dp.clients[dp.nr_clients - 1];
 	dp.nr_clients--;
-
-#ifdef MLX
-	mlx_dereg_mem(p->mr);
-#endif
-
-	/* TODO: free queued packets/commands? */
 
 	/* release cores assigned to this runtime */
 	p->kill = true;

@@ -7,7 +7,6 @@
 #include <base/gen.h>
 #include <base/lrpc.h>
 #include <base/mem.h>
-#undef LIST_HEAD /* hack to deal with DPDK being annoying */
 #include <base/list.h>
 #include <iokernel/control.h>
 #include <net/ethernet.h>
@@ -260,16 +259,13 @@ extern bool rx_send_to_runtime(struct proc *p, uint32_t hash, uint64_t cmd,
 
 extern int cores_init(void);
 extern int control_init(void);
-extern int dpdk_init();
 extern int dp_clients_init();
-extern int dpdk_late_init();
 
 /*
  * other dataplane functions
  */
 extern void dp_clients_rx_control_lrpcs();
 extern bool commands_rx();
-extern void dpdk_print_eth_stats();
 
 /*
  * functions for manipulating core assignments
