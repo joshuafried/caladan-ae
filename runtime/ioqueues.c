@@ -64,12 +64,6 @@ static size_t calculate_shm_space(unsigned int thread_count)
 	q = align_up(q, CACHE_LINE_SIZE);
 	ret += q * thread_count;
 
-	// TX packet queues
-	q = sizeof(struct lrpc_msg) * PACKET_QUEUE_MCOUNT;
-	q = align_up(q, CACHE_LINE_SIZE);
-	q += align_up(sizeof(uint32_t), CACHE_LINE_SIZE);
-	ret += q * thread_count;
-
 	// TX command queues
 	q = sizeof(struct lrpc_msg) * COMMAND_QUEUE_MCOUNT;
 	q = align_up(q, CACHE_LINE_SIZE);
@@ -80,13 +74,6 @@ static size_t calculate_shm_space(unsigned int thread_count)
 	q = align_up(sizeof(struct q_ptrs), CACHE_LINE_SIZE);
 	ret += q * thread_count;
 
-	ret = align_up(ret, PGSIZE_2MB);
-
-	// Egress buffers
-	BUILD_ASSERT(ETH_MAX_LEN + sizeof(struct tx_net_hdr) <=
-			MBUF_DEFAULT_LEN);
-	BUILD_ASSERT(PGSIZE_2MB % MBUF_DEFAULT_LEN == 0);
-	ret += EGRESS_POOL_SIZE(thread_count);
 	ret = align_up(ret, PGSIZE_2MB);
 
 	// SHM for verbs queues
@@ -168,17 +155,12 @@ static int ioqueues_shm_setup(unsigned int threads)
 	for (i = 0; i < threads; i++) {
 		struct thread_spec *tspec = &iok.threads[i];
 		ioqueue_alloc(r, &tspec->rxq, &ptr, PACKET_QUEUE_MCOUNT, false);
-		ioqueue_alloc(r, &tspec->txpktq, &ptr, PACKET_QUEUE_MCOUNT, true);
 		ioqueue_alloc(r, &tspec->txcmdq, &ptr, COMMAND_QUEUE_MCOUNT, true);
 
 		queue_pointers_alloc(r, tspec, &ptr);
 	}
 
-	iok.tx_len = EGRESS_POOL_SIZE(threads);
 	ptr = (char *)align_up((uintptr_t)ptr, PGSIZE_2MB);
-	ptr_to_shmptr(r, ptr, iok.tx_len);
-	iok.tx_buf = ptr;
-	ptr += align_up(iok.tx_len, PGSIZE_2MB);
 
 	iok.verbs_mem_len = verbs_shm_space_needed(0, 0); // FIXME
 	ptr_to_shmptr(r, ptr, iok.verbs_mem_len);
@@ -210,7 +192,6 @@ int ioqueues_register_iokernel(void)
 	/* initialize control header */
 	hdr = r->base;
 	hdr->magic = CONTROL_HDR_MAGIC;
-	hdr->egress_buf_count = EGRESS_POOL_SIZE(iok.thread_count) / MBUF_DEFAULT_LEN;
 	hdr->thread_count = iok.thread_count;
 	hdr->mac = netcfg.mac;
 
@@ -279,9 +260,6 @@ int ioqueues_init_thread(void)
 	ts->tid = tid;
 
 	ret = shm_init_lrpc_in(r, &ts->rxq, &myk()->rxq);
-	BUG_ON(ret);
-
-	ret = shm_init_lrpc_out(r, &ts->txpktq, &myk()->txpktq);
 	BUG_ON(ret);
 
 	ret = shm_init_lrpc_out(r, &ts->txcmdq, &myk()->txcmdq);

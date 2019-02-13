@@ -103,11 +103,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 		if (ret)
 			goto fail_free_proc;
 
-		/* attach the TX packet queue */
-		ret = shm_init_lrpc_in(&reg, &s->txpktq, &th->txpktq);
-		if (ret)
-			goto fail_free_proc;
-
 		/* attach the TX command queue */
 		ret = shm_init_lrpc_in(&reg, &s->txcmdq, &th->txcmdq);
 		if (ret)
@@ -154,12 +149,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	if (ret)
 		goto fail_free_just_proc;
 
-	p->max_overflows = hdr.egress_buf_count;
-	p->nr_overflows = 0;
-	p->overflow_queue = malloc(sizeof(unsigned long) * p->max_overflows);
-	if (p->overflow_queue == NULL)
-		goto fail_free_just_proc;
-
 	return p;
 
 fail_free_proc:
@@ -177,7 +166,6 @@ static void control_destroy_proc(struct proc *p)
 {
 	nr_guaranteed -= p->sched_cfg.guaranteed_cores;
 	mem_unmap_shm(p->region.base);
-	free(p->overflow_queue);
 	free(p);
 }
 

@@ -353,7 +353,7 @@ static inline void thread_cede(struct thread *th)
 
 	/* remove the thread from the polling array (if queues are empty) */
 	th->parked = true;
-	if (lrpc_empty(&th->txpktq) && lrpc_empty(&th->txcmdq))
+	if (lrpc_empty(&th->txcmdq))
 		unpoll_thread(th);
 }
 

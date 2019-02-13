@@ -2,34 +2,27 @@
  * commands.c - dataplane commands to/from runtimes
  */
 
-#include <rte_mbuf.h>
-
 #include <base/log.h>
 #include <base/lrpc.h>
 #include <iokernel/queue.h>
 
 #include "defs.h"
 
-static int commands_drain_queue(struct thread *t, struct rte_mbuf **bufs, int n)
+static int commands_drain_queue(struct thread *t, int n)
 {
-	int i, n_bufs = 0;
+	int i;
 
 	for (i = 0; i < n; i++) {
 		uint64_t cmd;
 		unsigned long payload;
 
 		if (!lrpc_recv(&t->txcmdq, &cmd, &payload)) {
-			if (unlikely(t->parked && lrpc_empty(&t->txpktq)))
+			if (unlikely(t->parked))
 				unpoll_thread(t);
 			break;
 		}
 
 		switch (cmd) {
-		case TXCMD_NET_COMPLETE:
-			bufs[n_bufs++] = (struct rte_mbuf *)payload;
-			/* TODO: validate pointer @buf */
-			break;
-
 		case TXCMD_PARKED_LAST:
 			if (cores_park_kthread(t, false) &&
 			    t->p->active_thread_count == 0 && payload) {
@@ -52,7 +45,7 @@ static int commands_drain_queue(struct thread *t, struct rte_mbuf **bufs, int n)
 		}
 	}
 
-	return n_bufs;
+	return i;
 }
 
 /*
@@ -60,8 +53,7 @@ static int commands_drain_queue(struct thread *t, struct rte_mbuf **bufs, int n)
  */
 bool commands_rx(void)
 {
-	struct rte_mbuf *bufs[IOKERNEL_CMD_BURST_SIZE];
-	int i, n_bufs = 0;
+	int i, n_cmds = 0;
 	static unsigned int pos = 0;
 
 	/*
@@ -71,18 +63,17 @@ bool commands_rx(void)
 	for (i = 0; i < nrts; i++) {
 		unsigned int idx = (pos + i) % nrts;
 
-		if (n_bufs >= IOKERNEL_CMD_BURST_SIZE)
+		if (n_cmds >= IOKERNEL_CMD_BURST_SIZE)
 			break;
-		n_bufs += commands_drain_queue(ts[idx], &bufs[n_bufs],
-				IOKERNEL_CMD_BURST_SIZE - n_bufs);
+		n_cmds += commands_drain_queue(ts[idx],
+				IOKERNEL_CMD_BURST_SIZE - n_cmds);
 	}
 
 	flush_wake_requests();
 
-	STAT_INC(COMMANDS_PULLED, n_bufs);
+	STAT_INC(COMMANDS_PULLED, n_cmds);
 
 	pos++;
-	for (i = 0; i < n_bufs; i++)
-		rte_pktmbuf_free(bufs[i]);
-	return n_bufs > 0;
+
+	return n_cmds > 0;
 }

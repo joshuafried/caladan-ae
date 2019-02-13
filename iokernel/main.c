@@ -37,7 +37,6 @@ static const struct init_entry iok_init_handlers[] = {
 	/* data plane */
 	IOK_INITIALIZER(dpdk),
 	IOK_INITIALIZER(rx),
-	IOK_INITIALIZER(tx),
 	IOK_INITIALIZER(dp_clients),
 #ifndef DIRECTPATH
 	IOK_INITIALIZER(dpdk_late),
@@ -111,14 +110,6 @@ void dataplane_loop()
 
 		/* process a batch of commands from runtimes */
 		work_done |= commands_rx();
-
-#ifndef DIRECTPATH
-		/* drain overflow completion queues */
-		work_done |= tx_drain_completions();
-
-		/* send a burst of egress packets */
-		work_done |= tx_burst();
-#endif
 
 		STAT_INC(BATCH_TOTAL, IOKERNEL_RX_BURST_SIZE);
 

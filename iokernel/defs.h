@@ -26,7 +26,6 @@
 #define IOKERNEL_NUM_MBUFS		(8192 * 16)
 #define IOKERNEL_NUM_COMPLETIONS	32767
 #define IOKERNEL_OVERFLOW_BATCH_DRAIN	64
-#define IOKERNEL_TX_BURST_SIZE		64
 #define IOKERNEL_CMD_BURST_SIZE		64
 #define IOKERNEL_RX_BURST_SIZE		64
 #define IOKERNEL_CONTROL_BURST_SIZE	4
@@ -43,7 +42,6 @@ struct thread {
 	unsigned int		parked:1;
 	unsigned int		waking:1;
 	struct lrpc_chan_out	rxq;
-	struct lrpc_chan_in	txpktq;
 	struct lrpc_chan_in	txcmdq;
 	pid_t			tid;
 	struct q_ptrs		*q_ptrs;
@@ -104,11 +102,6 @@ struct proc {
 	uint32_t lkey;
 	void *mr;
 #endif
-
-	/* Overfloq queue for completion data */
-	size_t max_overflows;
-	size_t nr_overflows;
-	unsigned long *overflow_queue;
 
 	unsigned int mlxq_count;
 	struct {
@@ -245,16 +238,12 @@ enum {
 	RX_UNHANDLED,
 	RX_JOIN_FAIL,
 
-	TX_COMPLETION_OVERFLOW,
-	TX_COMPLETION_FAIL,
 
 	RX_PULLED,
 	COMMANDS_PULLED,
 	COMPLETION_DRAINED,
 	COMPLETION_ENQUEUED,
 	BATCH_TOTAL,
-	TX_PULLED,
-	TX_BACKPRESSURE,
 
 	RQ_GRANT,
 	RX_GRANT,
@@ -289,7 +278,6 @@ extern int cores_init(void);
 extern int control_init(void);
 extern int dpdk_init();
 extern int rx_init();
-extern int tx_init();
 extern int dp_clients_init();
 extern int dpdk_late_init();
 
@@ -297,9 +285,6 @@ extern int dpdk_late_init();
  * dataplane RX/TX functions
  */
 extern bool rx_burst();
-extern bool tx_burst();
-extern bool tx_send_completion(void *obj);
-extern bool tx_drain_completions();
 
 /*
  * other dataplane functions

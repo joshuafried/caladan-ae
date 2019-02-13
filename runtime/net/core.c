@@ -556,6 +556,8 @@ static void net_dump_config(void)
 int net_init(void)
 {
 	int ret;
+	size_t tx_len;
+	void *tx_buf;
 
 	ret = slab_create(&net_rx_buf_slab, "runtime_rx_bufs",
 			  MBUF_DEFAULT_LEN, SLAB_FLAG_LGPAGE);
@@ -567,7 +569,12 @@ int net_init(void)
 	if (!net_rx_buf_tcache)
 		return -ENOMEM;
 
-	ret = mempool_create(&net_tx_buf_mp, iok.tx_buf, iok.tx_len,
+	tx_len = EGRESS_POOL_SIZE(maxks);
+	tx_buf = mem_map_anom(NULL, tx_len, PGSIZE_2MB, 0);
+	if (tx_buf == MAP_FAILED)
+		return -ENOMEM;
+
+	ret = mempool_create(&net_tx_buf_mp, tx_buf, tx_len,
 			     PGSIZE_2MB, MBUF_DEFAULT_LEN);
 	if (ret)
 		return ret;

@@ -45,7 +45,7 @@
 #define SQ_NUM_DESC 128
 #define SQ_CQ_BATCH_F 64
 #define EGRESS_POOL_SIZE(nks) \
-	(PACKET_QUEUE_MCOUNT * MBUF_DEFAULT_LEN * max(16, (nks)) * 16UL)
+	(4096 * MBUF_DEFAULT_LEN * max(16, (nks)) * 16UL)
 #define RX_BUF_BOOL_SZ(nrqs) \
  (align_up(nrqs * RQ_NUM_DESC * 2UL * MBUF_DEFAULT_LEN, PGSIZE_2MB))
 #define POW_TWO_ROUND_UP(x) \
@@ -247,8 +247,6 @@ struct iokernel_control {
 	struct thread_spec threads[NCPU];
 	unsigned int mlxq_count;
 	struct mlxq_spec qspec[NCPU];
-	void *tx_buf;
-	size_t tx_len;
 	void *verbs_mem;
 	size_t verbs_mem_len;
 };
@@ -320,8 +318,8 @@ struct kthread {
 	unsigned long		kthread_idx;
 
 	/* 3rd cache-line */
-	struct lrpc_chan_out	txpktq;
 	struct lrpc_chan_out	txcmdq;
+	unsigned long pad4[4];
 
 	/* 4th-7th cache-line */
 	thread_t		*rq[RUNTIME_RQ_SIZE];
@@ -345,7 +343,7 @@ struct kthread {
 /* compile-time verification of cache-line alignment */
 BUILD_ASSERT(offsetof(struct kthread, lock) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, q_ptrs) % CACHE_LINE_SIZE == 0);
-BUILD_ASSERT(offsetof(struct kthread, txpktq) % CACHE_LINE_SIZE == 0);
+BUILD_ASSERT(offsetof(struct kthread, txcmdq) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, rq) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, timer_lock) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, stats) % CACHE_LINE_SIZE == 0);

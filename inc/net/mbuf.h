@@ -47,6 +47,13 @@ struct mbuf {
 	atomic_t	ref;	    /* a reference count for the mbuf */
 };
 
+/* possible values for txflags above */
+#define OLFLAG_IP_CHKSUM	BIT(0)	/* enable IP checksum generation */
+#define OLFLAG_TCP_CHKSUM	BIT(1)	/* enable TCP checksum generation */
+#define OLFLAG_IPV4		BIT(2)  /* indicates the packet is IPv4 */
+#define OLFLAG_IPV6		BIT(3)  /* indicates the packet is IPv6 */
+
+
 static inline unsigned char *__mbuf_pull(struct mbuf *m, unsigned int len)
 {
 	unsigned char *tmp = m->data;

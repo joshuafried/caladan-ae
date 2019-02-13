@@ -16,15 +16,6 @@ struct rx_net_hdr {
 	char	     payload[];	/* packet data */
 };
 
-/* preamble to egress network packets */
-struct tx_net_hdr {
-	unsigned long completion_data; /* a tag to help complete the request */
-	unsigned int len;	/* the length of the payload */
-	unsigned int olflags;	/* offload flags */
-	unsigned short pad;	/* because of 14 byte ethernet header */
-	char	     payload[];	/* packet data */
-} __attribute__((__packed__));
-
 /* possible values for @csum_type above */
 enum {
 	/*
@@ -46,11 +37,6 @@ enum {
 	CHECKSUM_TYPE_COMPLETE,
 };
 
-/* possible values for @olflags above */
-#define OLFLAG_IP_CHKSUM	BIT(0)	/* enable IP checksum generation */
-#define OLFLAG_TCP_CHKSUM	BIT(1)	/* enable TCP checksum generation */
-#define OLFLAG_IPV4		BIT(2)  /* indicates the packet is IPv4 */
-#define OLFLAG_IPV6		BIT(3)  /* indicates the packet is IPv6 */
 
 /*
  * RX queues: IOKERNEL -> RUNTIMES
@@ -65,23 +51,12 @@ enum {
 
 
 /*
- * TX packet queues: RUNTIMES -> IOKERNEL
- * These queues are only for network packets and can experience HOL blocking.
- */
-enum {
-	TXPKT_NET_XMIT = 0,	/* points to a struct tx_net_hdr */
-	TXPKT_NR,		/* number of commands */
-};
-
-
-/*
  * TX command queues: RUNTIMES -> IOKERNEL
  * These queues handle a variety of commands, and typically they are handled
  * much faster by the IOKERNEL than packets, so no HOL blocking.
  */
 enum {
-	TXCMD_NET_COMPLETE = 0,	/* contains rx_net_hdr.completion_data */
-	TXCMD_PARKED,		/* hint to iokernel that kthread is parked */
+	TXCMD_PARKED = 0,		/* hint to iokernel that kthread is parked */
 	TXCMD_PARKED_LAST,	/* the last undetached kthread is parking */
 	TXCMD_NR,		/* number of commands */
 };
