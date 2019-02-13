@@ -12,6 +12,16 @@
 
 #include "../defs.h"
 
+/* preamble to ingress network packets */
+struct rx_net_hdr {
+	unsigned long completion_data; /* a tag to help complete the request */
+	unsigned int len;	/* the length of the payload */
+	unsigned int rss_hash;	/* the HW RSS 5-tuple hash */
+	unsigned int csum_type; /* the type of checksum */
+	unsigned int csum;	/* 16-bit one's complement */
+	char	     payload[];	/* packet data */
+};
+
 /*
  * Network Error Reporting Functions
  */

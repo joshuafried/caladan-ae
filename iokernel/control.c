@@ -84,9 +84,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	p->sched_cfg = hdr.sched_cfg;
 	BUG_ON(p->sched_cfg.guaranteed_cores < 1);
 	p->thread_count = hdr.thread_count;
-	if (eth_addr_is_multicast(&hdr.mac) || eth_addr_is_zero(&hdr.mac))
-		goto fail_free_proc;
-	p->mac = hdr.mac;
 	p->pending_timer = false;
 	p->uniqid = rdtsc();
 
@@ -99,7 +96,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 		struct thread_spec *s = &threads[i];
 
 		/* attach the RX queue */
-		ret = shm_init_lrpc_out(&reg, &s->rxq, &th->rxq);
+		ret = shm_init_lrpc_out(&reg, &s->rxcmdq, &th->rxcmdq);
 		if (ret)
 			goto fail_free_proc;
 

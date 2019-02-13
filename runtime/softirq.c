@@ -52,7 +52,7 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 		uint64_t cmd;
 		unsigned long payload;
 
-		if (!lrpc_recv(&k->rxq, &cmd, &payload))
+		if (!lrpc_recv(&k->rxcmdq, &cmd, &payload))
 			break;
 
 		budget_left--;
@@ -118,7 +118,7 @@ thread_t *softirq_run_thread(struct kthread *k, unsigned int budget)
 	assert_spin_lock_held(&k->lock);
 
 	/* check if there's any work available */
-	if (lrpc_empty(&k->rxq) && !timer_needed(k) && !verbs_work_exists(k))
+	if (lrpc_empty(&k->rxcmdq) && !timer_needed(k) && !verbs_work_exists(k))
 		return NULL;
 
 	th = thread_create_with_buf(softirq_fn, (void **)&w, sizeof(*w));
@@ -141,7 +141,7 @@ void softirq_run(unsigned int budget)
 
 	k = getk();
 	/* check if there's any work available */
-	if (lrpc_empty(&k->rxq) && !timer_needed(k) && !verbs_work_exists(k)) {
+	if (lrpc_empty(&k->rxcmdq) && !timer_needed(k) && !verbs_work_exists(k)) {
 		putk();
 		return;
 	}

@@ -303,7 +303,7 @@ struct kthread {
 	uint32_t		rq_head;
 	uint32_t		rq_tail;
 	struct list_head	rq_overflow;
-	struct lrpc_chan_in	rxq;
+	struct lrpc_chan_in	rxcmdq;
 	unsigned int		parked:1;
 	unsigned int		detached:1;
 	int pad1;
@@ -430,12 +430,11 @@ extern void softirq_run(unsigned int budget);
 
 struct net_cfg {
 	struct shm_region	tx_region;
-	struct shm_region	rx_region;
 	uint32_t		addr;
 	uint32_t		netmask;
 	uint32_t		gateway;
 	struct eth_addr		mac;
-	uint8_t			pad[14];
+	uint8_t			pad[14 + 16];
 } __packed;
 
 BUILD_ASSERT(sizeof(struct net_cfg) == CACHE_LINE_SIZE);
@@ -449,6 +448,8 @@ struct cfg_arp_static_entry {
 };
 extern int arp_static_count;
 extern struct cfg_arp_static_entry static_entries[MAX_ARP_STATIC_ENTRIES];
+
+struct rx_net_hdr;
 
 extern void __net_recurrent(void);
 extern void net_rx_softirq(struct rx_net_hdr **hdrs, unsigned int nr);

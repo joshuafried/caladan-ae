@@ -36,7 +36,6 @@ static const struct init_entry iok_init_handlers[] = {
 
 	/* data plane */
 	IOK_INITIALIZER(dpdk),
-	IOK_INITIALIZER(rx),
 	IOK_INITIALIZER(dp_clients),
 #ifndef DIRECTPATH
 	IOK_INITIALIZER(dpdk_late),

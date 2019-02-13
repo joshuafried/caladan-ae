@@ -23,11 +23,7 @@
  * Constant limits
  */
 #define IOKERNEL_MAX_PROC		1024
-#define IOKERNEL_NUM_MBUFS		(8192 * 16)
-#define IOKERNEL_NUM_COMPLETIONS	32767
-#define IOKERNEL_OVERFLOW_BATCH_DRAIN	64
 #define IOKERNEL_CMD_BURST_SIZE		64
-#define IOKERNEL_RX_BURST_SIZE		64
 #define IOKERNEL_CONTROL_BURST_SIZE	4
 
 
@@ -41,7 +37,7 @@ struct thread {
 	struct proc		*p;
 	unsigned int		parked:1;
 	unsigned int		waking:1;
-	struct lrpc_chan_out	rxq;
+	struct lrpc_chan_out	rxcmdq;
 	struct lrpc_chan_in	txcmdq;
 	pid_t			tid;
 	struct q_ptrs		*q_ptrs;
@@ -87,9 +83,6 @@ struct proc {
 	struct list_head	idle_threads;
 	unsigned int		inflight_preempts;
 	unsigned int		next_thread_rr; // for spraying join requests/overflow completions
-
-	/* network data */
-	struct eth_addr		mac;
 
 	/* next pending timer, only valid if pending_timer is true */
 	bool			pending_timer;
@@ -207,11 +200,9 @@ enum {
  */
 struct dataplane {
 	uint8_t			port;
-	struct rte_mempool	*rx_mbuf_pool;
 
 	struct proc		*clients[IOKERNEL_MAX_PROC];
 	int			nr_clients;
-	struct rte_hash		*mac_to_proc;
 };
 
 extern struct dataplane dp;
@@ -232,17 +223,10 @@ extern struct core_assignments core_assign;
  * Stats collected in the iokernel
  */
 enum {
-	RX_UNREGISTERED_MAC = 0,
-	RX_UNICAST_FAIL,
-	RX_BROADCAST_FAIL,
-	RX_UNHANDLED,
-	RX_JOIN_FAIL,
+	RX_JOIN_FAIL = 0,
 
-
-	RX_PULLED,
 	COMMANDS_PULLED,
-	COMPLETION_DRAINED,
-	COMPLETION_ENQUEUED,
+
 	BATCH_TOTAL,
 
 	RQ_GRANT,
@@ -277,14 +261,8 @@ extern bool rx_send_to_runtime(struct proc *p, uint32_t hash, uint64_t cmd,
 extern int cores_init(void);
 extern int control_init(void);
 extern int dpdk_init();
-extern int rx_init();
 extern int dp_clients_init();
 extern int dpdk_late_init();
-
-/*
- * dataplane RX/TX functions
- */
-extern bool rx_burst();
 
 /*
  * other dataplane functions

@@ -101,8 +101,8 @@ static void ioqueue_alloc(struct shm_region *r, struct queue_spec *q,
 static void queue_pointers_alloc(struct shm_region *r,
 		struct thread_spec *tspec, char **ptr)
 {
-	/* set wb for rxq */
-	tspec->rxq.wb = ptr_to_shmptr(r, *ptr, sizeof(struct q_ptrs));
+	/* set wb for rxcmdq */
+	tspec->rxcmdq.wb = ptr_to_shmptr(r, *ptr, sizeof(struct q_ptrs));
 
 	tspec->q_ptrs = ptr_to_shmptr(r, *ptr, sizeof(struct q_ptrs));
 	*((uint32_t *) *ptr) = 0;
@@ -111,7 +111,7 @@ static void queue_pointers_alloc(struct shm_region *r,
 
 static int ioqueues_shm_setup(unsigned int threads)
 {
-	struct shm_region *r = &netcfg.tx_region, *ingress_region = &netcfg.rx_region;
+	struct shm_region *r = &netcfg.tx_region;
 	char *ptr;
 	int i, ret;
 	size_t shm_len;
@@ -135,17 +135,6 @@ static int ioqueues_shm_setup(unsigned int threads)
 		return -1;
 	}
 
-	/* map ingress memory */
-	ingress_region->base =
-	    mem_map_shm(INGRESS_MBUF_SHM_KEY, NULL, INGRESS_MBUF_SHM_SIZE,
-			PGSIZE_2MB, false);
-	if (ingress_region->base == MAP_FAILED) {
-		log_err("control_setup: failed to map ingress region");
-		mem_unmap_shm(r->base);
-		return -1;
-	}
-	ingress_region->len = INGRESS_MBUF_SHM_SIZE;
-
 	/* set up queues in shared memory */
 	iok.thread_count = threads;
 	ptr = r->base;
@@ -154,7 +143,7 @@ static int ioqueues_shm_setup(unsigned int threads)
 
 	for (i = 0; i < threads; i++) {
 		struct thread_spec *tspec = &iok.threads[i];
-		ioqueue_alloc(r, &tspec->rxq, &ptr, PACKET_QUEUE_MCOUNT, false);
+		ioqueue_alloc(r, &tspec->rxcmdq, &ptr, PACKET_QUEUE_MCOUNT, false);
 		ioqueue_alloc(r, &tspec->txcmdq, &ptr, COMMAND_QUEUE_MCOUNT, true);
 
 		queue_pointers_alloc(r, tspec, &ptr);
@@ -175,7 +164,6 @@ static int ioqueues_shm_setup(unsigned int threads)
 static void ioqueues_shm_cleanup(void)
 {
 	mem_unmap_shm(netcfg.tx_region.base);
-	mem_unmap_shm(netcfg.rx_region.base);
 }
 
 /*
@@ -193,7 +181,6 @@ int ioqueues_register_iokernel(void)
 	hdr = r->base;
 	hdr->magic = CONTROL_HDR_MAGIC;
 	hdr->thread_count = iok.thread_count;
-	hdr->mac = netcfg.mac;
 
 	hdr->sched_cfg.priority = SCHED_PRIORITY_NORMAL;
 	hdr->sched_cfg.max_cores = iok.thread_count;
@@ -259,7 +246,7 @@ int ioqueues_init_thread(void)
 	struct thread_spec *ts = &iok.threads[myk()->kthread_idx];
 	ts->tid = tid;
 
-	ret = shm_init_lrpc_in(r, &ts->rxq, &myk()->rxq);
+	ret = shm_init_lrpc_in(r, &ts->rxcmdq, &myk()->rxcmdq);
 	BUG_ON(ret);
 
 	ret = shm_init_lrpc_out(r, &ts->txcmdq, &myk()->txcmdq);

@@ -23,7 +23,7 @@ struct q_ptrs {
 
 /* describes a runtime kernel thread */
 struct thread_spec {
-	struct queue_spec	rxq;
+	struct queue_spec	rxcmdq;
 	struct queue_spec	txcmdq;
 	shmptr_t		q_ptrs;
 	pid_t			tid;
@@ -50,7 +50,6 @@ struct sched_spec {
 struct control_hdr {
 	unsigned int		magic;
 	unsigned int		thread_count;
-	struct eth_addr		mac;
 	struct sched_spec	sched_cfg;
 	unsigned int		mlxq_count;
 	shmptr_t		thread_specs;

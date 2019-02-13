@@ -84,6 +84,7 @@ static inline bool verbs_has_rx_packets(struct verbs_queue_rx *vq)
 	return cqe_status(cqe, vq->rx_cq_dv.cqe_cnt, head) != MLX5_CQE_INVALID;
 }
 
+struct rx_net_hdr;
 
 void verbs_rx_completion(unsigned long completion_data);
 int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m);

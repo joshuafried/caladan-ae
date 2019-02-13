@@ -570,6 +570,7 @@ bool cores_park_kthread(struct thread *th, bool force)
 	assert(!bitmap_test(avail_cores, core));
 	assert(!bitmap_test(p->available_threads, kthread));
 
+#if 0
 	/* check for race conditions with the runtime */
 	if (!core_is_preempting(core) && !force) {
 		lrpc_poll_send_tail(&th->rxq);
@@ -579,6 +580,7 @@ bool cores_park_kthread(struct thread *th, bool force)
 			return false;
 		}
 	}
+#endif
 
 	thread_cede(th);
 	if (core_is_preempting(core)) {
@@ -752,11 +754,11 @@ static bool cores_is_proc_congested(struct proc *p)
 
 		/* update the queue positions */
 		rq_tail = load_acquire(&th->q_ptrs->rq_tail);
-		rxq_tail = lrpc_poll_send_tail(&th->rxq);
+		rxq_tail = lrpc_poll_send_tail(&th->rxcmdq);
 		last_rq_head = th->last_rq_head;
 		last_rxq_head = th->last_rxq_head;
 		th->last_rq_head = ACCESS_ONCE(th->q_ptrs->rq_head);
-		th->last_rxq_head = ACCESS_ONCE(th->rxq.send_head);
+		th->last_rxq_head = ACCESS_ONCE(th->rxcmdq.send_head);
 
 		/* if one prior queue was congested, no need to find more */
 		if (congested)

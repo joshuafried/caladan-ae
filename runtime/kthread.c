@@ -139,10 +139,6 @@ void kthread_detach(struct kthread *r)
 	if (nr_inflight_tx(&r->vq_tx) > 0)
 		return;
 
-	/* one last check, an RX cmd could have squeaked in */
-	if (unlikely(!lrpc_empty(&r->rxq)))
-		return;
-
 	spin_lock(&klock);
 	assert(r != k);
 	assert(nrks > 0);
