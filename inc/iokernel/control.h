@@ -28,7 +28,6 @@ struct thread_spec {
 	struct queue_spec	txcmdq;
 	shmptr_t		q_ptrs;
 	pid_t			tid;
-	int32_t			park_efd;
 };
 
 enum {

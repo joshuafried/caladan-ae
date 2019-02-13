@@ -306,9 +306,9 @@ struct kthread {
 	uint32_t		rq_tail;
 	struct list_head	rq_overflow;
 	struct lrpc_chan_in	rxq;
-	int			park_efd;
 	unsigned int		parked:1;
 	unsigned int		detached:1;
+	int pad1;
 
 	/* 2nd cache-line */
 	struct q_ptrs		*q_ptrs;
