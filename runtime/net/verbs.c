@@ -12,6 +12,7 @@
 
 #include <base/log.h>
 #include <base/mempool.h>
+#include <base/random.h>
 #include <base/slab.h>
 #include <net/mbuf.h>
 
@@ -371,8 +372,8 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 	/* send queue spec to iokernel */
 	struct mlxq_spec *qs = &iok.qspec[iok.mlxq_count++];
 	BUG_ON(iok.mlxq_count > NCPU);
-	qs->cq_buf = ptr_to_shmptr(&netcfg.tx_region, v->rx_cq_dv.buf,  v->rx_cq_dv.cqe_cnt * sizeof(struct mlx5_cqe64));
-	qs->cq_idx = ptr_to_shmptr(&netcfg.tx_region, v->cq_head, sizeof(*v->cq_head));
+	qs->cq_buf = ptr_to_shmptr(&iok.shared_region, v->rx_cq_dv.buf,  v->rx_cq_dv.cqe_cnt * sizeof(struct mlx5_cqe64));
+	qs->cq_idx = ptr_to_shmptr(&iok.shared_region, v->cq_head, sizeof(*v->cq_head));
 	qs->cqe_cnt = v->rx_cq_dv.cqe_cnt;
 
 	/* set byte_count and lkey for all descriptors once */
@@ -494,11 +495,9 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 
 	/* Populate random hash key, todo - decide what to do here */
 	static char key[40];
-	fd = open("/dev/urandom", O_RDONLY);
-	if (fd < 0 || read(fd, key, 40) != 40)
-		return -errno;
-
-	close(fd);
+	ret = fill_random_bytes(key, 40);
+	if (ret)
+		return ret;
 
 	/* Create the main RX QP using the indirection table */
 	struct ibv_rx_hash_conf rss_cnf = {

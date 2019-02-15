@@ -15,6 +15,7 @@
 #include <base/log.h>
 #include <base/lrpc.h>
 #include <base/mem.h>
+#include <base/random.h>
 #include <base/thread.h>
 
 #include <iokernel/shm.h>
@@ -24,29 +25,14 @@
 
 #include "defs.h"
 
-#define PACKET_QUEUE_MCOUNT	4096
-#define COMMAND_QUEUE_MCOUNT	4096
+#define COMMAND_QUEUE_MCOUNT	128
+
+struct iokernel_control iok;
+
 /* the egress buffer pool must be large enough to fill all the TXQs entirely */
 
 struct iokernel_control iok;
 
-static int generate_random_mac(struct eth_addr *mac)
-{
-	int fd, ret;
-	fd = open("/dev/urandom", O_RDONLY);
-	if (fd < 0)
-		return -1;
-
-	ret = read(fd, mac, sizeof(*mac));
-	close(fd);
-	if (ret != sizeof(*mac))
-		return -1;
-
-	mac->addr[0] &= ~ETH_ADDR_GROUP;
-	mac->addr[0] |= ETH_ADDR_LOCAL_ADMIN;
-
-	return 0;
-}
 
 // Could be a macro really, this is totally static :/
 static size_t calculate_shm_space(unsigned int thread_count)
@@ -59,8 +45,8 @@ static size_t calculate_shm_space(unsigned int thread_count)
 	ret += sizeof(struct mlxq_spec) * NCPU;
 	ret = align_up(ret, CACHE_LINE_SIZE);
 
-	// RX queues (wb is not included)
-	q = sizeof(struct lrpc_msg) * PACKET_QUEUE_MCOUNT;
+	// RX command queues (wb is not included)
+	q = sizeof(struct lrpc_msg) * COMMAND_QUEUE_MCOUNT;
 	q = align_up(q, CACHE_LINE_SIZE);
 	ret += q * thread_count;
 
@@ -73,13 +59,9 @@ static size_t calculate_shm_space(unsigned int thread_count)
 	// Shared queue pointers for the iokernel to use to determine busyness
 	q = align_up(sizeof(struct q_ptrs), CACHE_LINE_SIZE);
 	ret += q * thread_count;
-
 	ret = align_up(ret, PGSIZE_2MB);
 
-	// SHM for verbs queues
-	// TODO: fixme
 	ret += verbs_shm_space_needed(0, 0);
-	ret = align_up(ret, PGSIZE_2MB);
 
 	return ret;
 }
@@ -111,20 +93,14 @@ static void queue_pointers_alloc(struct shm_region *r,
 
 static int ioqueues_shm_setup(unsigned int threads)
 {
-	struct shm_region *r = &netcfg.tx_region;
+	struct shm_region *r = &iok.shared_region;
 	char *ptr;
 	int i, ret;
 	size_t shm_len;
 
-	if (!netcfg.mac.addr[0]) {
-		ret = generate_random_mac(&netcfg.mac);
-		if (ret < 0)
-			return ret;
-	}
-
-	BUILD_ASSERT(sizeof(netcfg.mac) >= sizeof(mem_key_t));
-	iok.key = *(mem_key_t*)(&netcfg.mac);
-	iok.key = rand_crc32c(iok.key);
+	ret = fill_random_bytes(&iok.key, sizeof(iok.key));
+	if (ret)
+		return ret;
 
 	/* map shared memory for control header, command queues, and egress pkts */
 	shm_len = calculate_shm_space(threads);
@@ -138,32 +114,30 @@ static int ioqueues_shm_setup(unsigned int threads)
 	/* set up queues in shared memory */
 	iok.thread_count = threads;
 	ptr = r->base;
-	ptr += sizeof(struct control_hdr) + sizeof(struct thread_spec) * threads + sizeof(struct mlxq_spec) * NCPU;
+	ptr += sizeof(struct control_hdr);
+	ptr += sizeof(struct thread_spec) * threads;
+	ptr += sizeof(struct mlxq_spec) * NCPU;
 	ptr = (char *)align_up((uintptr_t)ptr, CACHE_LINE_SIZE);
 
 	for (i = 0; i < threads; i++) {
 		struct thread_spec *tspec = &iok.threads[i];
-		ioqueue_alloc(r, &tspec->rxcmdq, &ptr, PACKET_QUEUE_MCOUNT, false);
+		ioqueue_alloc(r, &tspec->rxcmdq, &ptr, COMMAND_QUEUE_MCOUNT, false);
 		ioqueue_alloc(r, &tspec->txcmdq, &ptr, COMMAND_QUEUE_MCOUNT, true);
 
 		queue_pointers_alloc(r, tspec, &ptr);
 	}
 
 	ptr = (char *)align_up((uintptr_t)ptr, PGSIZE_2MB);
-
 	iok.verbs_mem_len = verbs_shm_space_needed(0, 0); // FIXME
 	ptr_to_shmptr(r, ptr, iok.verbs_mem_len);
 	iok.verbs_mem = ptr;
-	ptr += align_up(iok.verbs_mem_len, PGSIZE_2MB);
-
-	iok.next_free = ptr_to_shmptr(r, ptr, 0);
 
 	return 0;
 }
 
 static void ioqueues_shm_cleanup(void)
 {
-	mem_unmap_shm(netcfg.tx_region.base);
+	mem_unmap_shm(iok.shared_region.base);
 }
 
 /*
@@ -173,7 +147,7 @@ static void ioqueues_shm_cleanup(void)
 int ioqueues_register_iokernel(void)
 {
 	struct control_hdr *hdr;
-	struct shm_region *r = &netcfg.tx_region;
+	struct shm_region *r = &iok.shared_region;
 	struct sockaddr_un addr;
 	int ret;
 
@@ -189,11 +163,11 @@ int ioqueues_register_iokernel(void)
 	hdr->sched_cfg.scaleout_latency_us = 0;
 
 	struct thread_spec *threads = (struct thread_spec *)((unsigned char *)r->base + sizeof(*hdr));
-	hdr->thread_specs = ptr_to_shmptr(&netcfg.tx_region, threads, sizeof(*threads) * iok.thread_count);
+	hdr->thread_specs = ptr_to_shmptr(r, threads, sizeof(*threads) * iok.thread_count);
 	memcpy(threads, iok.threads, sizeof(*threads) * iok.thread_count);
 
 	struct mlxq_spec *qs = (struct mlxq_spec *)((unsigned char *)threads + sizeof(*threads) * iok.thread_count);
-	hdr->mlxq_specs = ptr_to_shmptr(&netcfg.tx_region, qs, sizeof(*qs) * iok.mlxq_count);
+	hdr->mlxq_specs = ptr_to_shmptr(r, qs, sizeof(*qs) * iok.mlxq_count);
 	memcpy(qs, iok.qspec, sizeof(*qs) * iok.mlxq_count);
 	hdr->mlxq_count = iok.mlxq_count;
 
@@ -221,8 +195,8 @@ int ioqueues_register_iokernel(void)
 		goto fail_close_fd;
 	}
 
-	ret = write(iok.fd, &netcfg.tx_region.len, sizeof(netcfg.tx_region.len));
-	if (ret != sizeof(netcfg.tx_region.len)) {
+	ret = write(iok.fd, &r->len, sizeof(r->len));
+	if (ret != sizeof(r->len)) {
 		log_err("register_iokernel: write() failed [%s]", strerror(errno));
 		goto fail_close_fd;
 	}
@@ -240,7 +214,7 @@ int ioqueues_init_thread(void)
 {
 	int ret;
 	pid_t tid = gettid();
-	struct shm_region *r = &netcfg.tx_region;
+	struct shm_region *r = &iok.shared_region;
 
 	assert(myk()->kthread_idx < iok.thread_count);
 	struct thread_spec *ts = &iok.threads[myk()->kthread_idx];

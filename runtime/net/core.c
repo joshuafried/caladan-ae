@@ -4,11 +4,13 @@
 
 #include <stdio.h>
 
+#include <base/hash.h>
 #include <base/log.h>
 #include <base/mempool.h>
+#include <base/random.h>
 #include <base/slab.h>
-#include <base/hash.h>
 #include <base/thread.h>
+
 #include <asm/chksum.h>
 #include <runtime/net.h>
 
@@ -27,7 +29,7 @@ static struct tcache *net_rx_buf_tcache;
 static DEFINE_PERTHREAD(struct tcache_perthread, net_rx_buf_pt);
 
 /* TX buffer allocation */
-static struct mempool net_tx_buf_mp;
+struct mempool net_tx_buf_mp;
 static struct tcache *net_tx_buf_tcache;
 static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 
@@ -558,6 +560,14 @@ int net_init(void)
 	int ret;
 	size_t tx_len;
 	void *tx_buf;
+
+	if (!netcfg.mac.addr[0]) {
+		ret = fill_random_bytes(&netcfg.mac, sizeof(netcfg.mac));
+		if (ret)
+			return ret;
+		netcfg.mac.addr[0] &= ~ETH_ADDR_GROUP;
+		netcfg.mac.addr[0] |= ETH_ADDR_LOCAL_ADMIN;
+	}
 
 	ret = slab_create(&net_rx_buf_slab, "runtime_rx_bufs",
 			  MBUF_DEFAULT_LEN, SLAB_FLAG_LGPAGE);

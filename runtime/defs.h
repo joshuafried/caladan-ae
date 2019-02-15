@@ -241,14 +241,18 @@ extern unsigned int nrqs;
 
 struct iokernel_control {
 	int fd;
+
+	/* shared memory setup */
 	mem_key_t key;
-	shmptr_t next_free;
+	struct shm_region	shared_region;
+	void *verbs_mem;
+	size_t verbs_mem_len;
+
+	/* threads + other queues register themselves here */
 	unsigned int thread_count;
 	struct thread_spec threads[NCPU];
 	unsigned int mlxq_count;
 	struct mlxq_spec qspec[NCPU];
-	void *verbs_mem;
-	size_t verbs_mem_len;
 };
 
 extern struct iokernel_control iok;
@@ -429,12 +433,11 @@ extern void softirq_run(unsigned int budget);
  */
 
 struct net_cfg {
-	struct shm_region	tx_region;
 	uint32_t		addr;
 	uint32_t		netmask;
 	uint32_t		gateway;
 	struct eth_addr		mac;
-	uint8_t			pad[14 + 16];
+	uint8_t			pad[14 + 32];
 } __packed;
 
 BUILD_ASSERT(sizeof(struct net_cfg) == CACHE_LINE_SIZE);
