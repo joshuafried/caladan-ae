@@ -12,3 +12,4 @@ struct netaddr {
 };
 
 extern int str_to_netaddr(const char *str, struct netaddr *addr);
+extern uint32_t compute_rss_hash(uint16_t local_port, struct netaddr remote);

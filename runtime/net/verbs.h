@@ -25,7 +25,8 @@ struct verbs_queue_rx {
 
 	/* direct verbs cq */
 	struct mlx5dv_cq rx_cq_dv;
-	uint32_t *cq_head; // head pointer will be in shared memory
+	uint32_t cq_head;
+	uint32_t *cq_head_ptr; // head pointer will be in shared memory
 
 } __aligned(CACHE_LINE_SIZE);
 
@@ -41,13 +42,14 @@ struct verbs_queue_tx {
 
 	/* direct verbs cq */
 	struct mlx5dv_cq tx_cq_dv __aligned(CACHE_LINE_SIZE);
-	uint32_t *cq_head; // head pointer will be in shared memory
+	uint32_t cq_head;
+	uint32_t *cq_head_ptr; // head pointer will be in shared memory
 
 } __aligned(CACHE_LINE_SIZE);
 
 static inline unsigned int nr_inflight_tx(struct verbs_queue_tx *v)
 {
-	return v->sq_head - load_acquire(v->cq_head);
+	return v->sq_head - v->cq_head;
 }
 
 /*
@@ -70,7 +72,7 @@ static inline uint8_t cqe_status(struct mlx5_cqe64 *cqe, uint32_t cqe_cnt, uint3
 
 static inline bool verbs_has_tx_completions(struct verbs_queue_tx *vq)
 {
-	uint32_t head = *vq->cq_head;
+	uint32_t head = vq->cq_head;
 	struct mlx5_cqe64 *cqes = vq->tx_cq_dv.buf;
 	struct mlx5_cqe64 *cqe = &cqes[head & (vq->tx_cq_dv.cqe_cnt - 1)];
 	return cqe_status(cqe, vq->tx_cq_dv.cqe_cnt, head) != MLX5_CQE_INVALID;
@@ -78,7 +80,7 @@ static inline bool verbs_has_tx_completions(struct verbs_queue_tx *vq)
 
 static inline bool verbs_has_rx_packets(struct verbs_queue_rx *vq)
 {
-	uint32_t head = *vq->cq_head;
+	uint32_t head = vq->cq_head;
 	struct mlx5_cqe64 *cqes = vq->rx_cq_dv.buf;
 	struct mlx5_cqe64 *cqe = &cqes[head & (vq->rx_cq_dv.cqe_cnt - 1)];
 	return cqe_status(cqe, vq->rx_cq_dv.cqe_cnt, head) != MLX5_CQE_INVALID;

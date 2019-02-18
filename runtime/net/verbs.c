@@ -37,6 +37,13 @@ static struct mempool verbs_buf_mp;
 static struct tcache *verbs_buf_tcache;
 static DEFINE_PERTHREAD(struct tcache_perthread, verbs_buf_pt);
 
+static unsigned char rss_key[40] = {
+	0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A,
+	0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF,
+	0x8F, 0xDE, 0xD2, 0xC5, 0xE2, 0x04, 0xB1, 0xCF, 0xB1, 0xB1, 0xA1,
+	0x0D, 0x6D, 0x86, 0xBA, 0x61, 0x78, 0xEB};
+
+
 void verbs_rx_completion(unsigned long completion_data)
 {
 	char *buf = (char *)completion_data - RX_BUF_RESERVED;
@@ -76,7 +83,7 @@ static int verbs_refill_rxqueue(struct verbs_queue_rx *vq, int nrdesc)
 
 	struct mlx5dv_rwq *wq = &vq->rx_wq_dv;
 
-	assert(nrdesc + vq->wq_head > *vq->cq_head + wq->wqe_cnt);
+	assert(nrdesc + vq->wq_head >= vq->cq_head + wq->wqe_cnt);
 
 	for (i = 0; i < nrdesc; i++) {
 		buf = verbs_rx_alloc_buf();
@@ -105,7 +112,12 @@ static int verbs_refill_rxqueue(struct verbs_queue_rx *vq, int nrdesc)
  */
 int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 {
+	int size;
 	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
+	struct mlx5_wqe_ctrl_seg *ctrl;
+	struct mlx5_wqe_eth_seg *eseg;
+	struct mlx5_wqe_data_seg *dpseg;
+	void *segment;
 
 	if (nr_inflight_tx(v) >= RUNTIME_SOFTIRQ_BUDGET) {
 		struct mbuf *mbs[RUNTIME_SOFTIRQ_BUDGET];
@@ -117,14 +129,14 @@ int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 		}
 	}
 
-	void *segment = v->tx_qp_dv.sq.buf + idx * v->tx_qp_dv.sq.stride;
-	struct mlx5_wqe_ctrl_seg *ctrl = segment;
-	struct mlx5_wqe_eth_seg *eseg = segment + sizeof(*ctrl);
-	struct mlx5_wqe_data_seg *dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
+	segment = v->tx_qp_dv.sq.buf + idx * v->tx_qp_dv.sq.stride;
+	ctrl = segment;
+	eseg = segment + sizeof(*ctrl);
+	dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
 
-	int size = (sizeof(*ctrl) / 16) +
-	           (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
-	           sizeof(struct mlx5_wqe_data_seg) / 16;
+	size = (sizeof(*ctrl) / 16) +
+	       (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
+	       sizeof(struct mlx5_wqe_data_seg) / 16;
 
 	/* set ctrl segment */
 	*(uint32_t *)(segment + 8) = 0;
@@ -177,12 +189,16 @@ static inline int mlx5_get_cqe_format(struct mlx5_cqe64 *cqe)
 	return (cqe->op_own & 0xc) >> 2;
 }
 
+static uint32_t mlx5_get_rss_result(struct mlx5_cqe64 *cqe)
+{
+	return ntoh32(*((uint32_t *)cqe + 3));
+}
+
 int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned int budget)
 {
 	char *buf;
 	uint8_t opcode;
 	uint16_t wqe_idx;
-	uint32_t head = *v->cq_head;
 	int rx_cnt;
 
 	struct mlx5dv_rwq *wq = &v->rx_wq_dv;
@@ -191,14 +207,17 @@ int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned
 	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
 	struct rx_net_hdr *hdr;
 
-	for (rx_cnt = 0; rx_cnt < budget; rx_cnt++, head++) {
-		cqe = &cqes[head & (cq->cqe_cnt - 1)];
-		opcode = cqe_status(cqe, cq->cqe_cnt, head);
+	for (rx_cnt = 0; rx_cnt < budget; rx_cnt++, v->cq_head++) {
+		cqe = &cqes[v->cq_head & (cq->cqe_cnt - 1)];
+		opcode = cqe_status(cqe, cq->cqe_cnt, v->cq_head);
 
 		if (opcode == MLX5_CQE_INVALID)
 			break;
 
-		BUG_ON(opcode != MLX5_CQE_RESP_SEND);
+		if (unlikely(opcode != MLX5_CQE_RESP_SEND)) {
+			log_err("got opcode %02X", opcode);
+			BUG();
+		}
 
 		assert(mlx5_get_cqe_format(cqe) != 0x3); // not compressed
 
@@ -208,16 +227,18 @@ int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned
 		hdr->completion_data = (unsigned long)buf;
 		hdr->len = be32toh(cqe->byte_cnt);
 		hdr->csum_type = mlx5_csum_ok(cqe);
+		hdr->rss_hash = mlx5_get_rss_result(cqe);
 		hdrs[rx_cnt] = hdr;
 	}
 
-	*v->cq_head = head;
+	if (unlikely(!rx_cnt))
+		return rx_cnt;
 
-	if (likely(rx_cnt)) {
-		udma_to_device_barrier();
-		cq->dbrec[0] = htobe32(head & 0xffffff);
-		BUG_ON(verbs_refill_rxqueue(v, rx_cnt));
-	}
+	udma_to_device_barrier();
+	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
+	BUG_ON(verbs_refill_rxqueue(v, rx_cnt));
+
+	*v->cq_head_ptr = v->cq_head;
 
 	return rx_cnt;
 
@@ -233,12 +254,11 @@ int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsi
 
 	unsigned int compl_cnt;
 	uint8_t opcode;
-	uint32_t head = *v->cq_head;
 	uint16_t wqe_idx;
 
-	for (compl_cnt = 0; compl_cnt < budget; compl_cnt++, head++) {
-		cqe = &cqes[head & (cq->cqe_cnt - 1)];
-		opcode = cqe_status(cqe, cq->cqe_cnt, head);
+	for (compl_cnt = 0; compl_cnt < budget; compl_cnt++, v->cq_head++) {
+		cqe = &cqes[v->cq_head & (cq->cqe_cnt - 1)];
+		opcode = cqe_status(cqe, cq->cqe_cnt, v->cq_head);
 
 		if (opcode == MLX5_CQE_INVALID)
 			break;
@@ -251,12 +271,13 @@ int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsi
 		mbufs[compl_cnt] = load_acquire(&v->buffers[wqe_idx]);
 	}
 
-	if (likely(compl_cnt)) {
-		udma_to_device_barrier();
-		cq->dbrec[0] = htobe32(head & 0xffffff);
-	}
+	if (unlikely(!compl_cnt))
+		return 0;
 
-	*v->cq_head = head;
+	udma_to_device_barrier();
+	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
+
+	*v->cq_head_ptr = v->cq_head;
 
 	return compl_cnt;
 }
@@ -369,16 +390,16 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 		return -ENOMEM;
 
 	/* allocate a shared memory head pointer */
-	v->cq_head = simple_alloc(CACHE_LINE_SIZE, 0);
-	if (!v->cq_head)
+	v->cq_head_ptr = simple_alloc(CACHE_LINE_SIZE, 0);
+	if (!v->cq_head_ptr)
 		return -ENOMEM;
-	*v->cq_head = 0;
+	*v->cq_head_ptr = 0;
 
 	/* send queue spec to iokernel */
 	struct mlxq_spec *qs = &iok.qspec[iok.mlxq_count++];
 	BUG_ON(iok.mlxq_count > NCPU);
 	qs->cq_buf = ptr_to_shmptr(&iok.shared_region, v->rx_cq_dv.buf,  v->rx_cq_dv.cqe_cnt * sizeof(struct mlx5_cqe64));
-	qs->cq_idx = ptr_to_shmptr(&iok.shared_region, v->cq_head, sizeof(*v->cq_head));
+	qs->cq_idx = ptr_to_shmptr(&iok.shared_region, v->cq_head_ptr, sizeof(*v->cq_head_ptr));
 	qs->cqe_cnt = v->rx_cq_dv.cqe_cnt;
 
 	/* set byte_count and lkey for all descriptors once */
@@ -392,12 +413,46 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 	return 0;
 }
 
+/* copied from dpdk/lib/librte_hash/rte_thash.h */
+static inline uint32_t
+rte_softrss(uint32_t *input_tuple, uint32_t input_len,
+    const uint8_t *rss_key)
+{
+	uint32_t i, j, map, ret = 0;
+
+	for (j = 0; j < input_len; j++) {
+		for (map = input_tuple[j]; map;	map &= (map - 1)) {
+			i = (uint32_t)__builtin_ctz(map);
+			ret ^= hton32(((const uint32_t *)rss_key)[j]) << (31 - i) |
+					(uint32_t)((uint64_t)(hton32(((const uint32_t *)rss_key)[j + 1])) >>
+					(i + 1));
+		}
+	}
+	return ret;
+}
+
+/**
+ * compute_rss_hash - compute rss hash for incoming packets
+ * @local_port: the local port number
+ * @remote: the remote network address
+ *
+ * Returns the 32 bit hash
+ */
+uint32_t compute_rss_hash(uint16_t local_port, struct netaddr remote)
+{
+	uint32_t input_tuple[] = {
+		remote.ip, netcfg.addr, local_port | remote.port << 16
+	};
+
+	return rte_softrss(input_tuple, ARRAY_SIZE(input_tuple), rss_key);
+}
+
 /*
  * verbs_init - intialize all TX/RX queues
  */
 int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 {
-	int i, fd, ret;
+	int i, ret;
 	void *rx_buf;
 
 	struct ibv_device **dev_list;
@@ -498,17 +553,12 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 	if (!rwq_ind_table)
 		return -errno;
 
-	/* Populate random hash key, todo - decide what to do here */
-	static char key[40];
-	ret = fill_random_bytes(key, 40);
-	if (ret)
-		return ret;
-
 	/* Create the main RX QP using the indirection table */
 	struct ibv_rx_hash_conf rss_cnf = {
 		.rx_hash_function = IBV_RX_HASH_FUNC_TOEPLITZ,
-		.rx_hash_key_len = 40,
-		.rx_hash_key = (void *)&key[0],
+		.rx_hash_key_len = ARRAY_SIZE(rss_key),
+		.rx_hash_key = rss_key,
+
 #ifdef MLX5_TCP_RSS
 		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_TCP | IBV_RX_HASH_DST_PORT_TCP,
 #else
@@ -523,7 +573,11 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 		.rx_hash_conf = rss_cnf,
 	};
 
-	qp = ibv_create_qp_ex(context, &qp_ex_attr);
+	struct mlx5dv_qp_init_attr dv_qp_attr = {
+		.comp_mask = 0,
+	};
+
+	qp = mlx5dv_create_qp(context, &qp_ex_attr, &dv_qp_attr);
 	if (!qp)
 		return -errno;
 
@@ -673,15 +727,21 @@ int verbs_init_tx_queue(struct verbs_queue_tx *v)
 		return -ENOMEM;
 
 	/* allocate a shared memory head pointer */
-	v->cq_head = simple_alloc(CACHE_LINE_SIZE, 0);
-	if (!v->cq_head)
+	v->cq_head_ptr = simple_alloc(CACHE_LINE_SIZE, 0);
+	if (!v->cq_head_ptr)
 		return -ENOMEM;
-	*v->cq_head = 0;
+	*v->cq_head_ptr = 0;
 
 	return 0;
 }
 
 int verbs_init_rx_queue(struct verbs_queue_rx *v)
 {
-	return verbs_refill_rxqueue(v, RQ_NUM_DESC);
+	int ret;
+
+	preempt_disable();
+	ret = verbs_refill_rxqueue(v, RQ_NUM_DESC);
+	preempt_enable();
+
+	return ret;
 }
