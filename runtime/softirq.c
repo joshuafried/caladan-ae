@@ -13,10 +13,9 @@
 DECLARE_PERTHREAD(struct tcache_perthread, thread_pt);
 
 struct softirq_work {
-	unsigned int recv_cnt, compl_cnt, join_cnt, timer_budget;
+	unsigned int recv_cnt, join_cnt, timer_budget;
 	struct kthread *k;
 	struct rx_net_hdr *recv_reqs[SOFTIRQ_MAX_BUDGET];
-	struct mbuf *compl_reqs[SOFTIRQ_MAX_BUDGET];
 	struct kthread *join_reqs[SOFTIRQ_MAX_BUDGET];
 };
 
@@ -24,10 +23,6 @@ static void softirq_fn(void *arg)
 {
 	struct softirq_work *w = arg;
 	int i;
-
-	/* complete TX requests and free packets */
-	for (i = 0; i < w->compl_cnt; i++)
-		mbuf_free(w->compl_reqs[i]);
 
 	/* deliver new RX packets to the runtime */
 	net_rx_softirq(w->recv_reqs, w->recv_cnt);
@@ -44,7 +39,7 @@ static void softirq_fn(void *arg)
 static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 				unsigned int budget)
 {
-	unsigned int recv_cnt = 0, compl_cnt = 0, join_cnt = 0;
+	unsigned int recv_cnt = 0, join_cnt = 0;
 	int j, budget_left;
 
 	budget_left = min(budget, SOFTIRQ_MAX_BUDGET);
@@ -67,9 +62,6 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 		}
 	}
 
-	// TODO: fix me
-	w->compl_cnt = verbs_gather_completions(w->compl_reqs, &k->vq_tx, budget_left);
-
 	// budget_left = SOFTIRQ_MAX_BUDGET / 2;
 	for (j = 0; budget_left && j < k->nr_vq_rx; j++) {
 		int idx = (j + k->pos_vq_rx) % k->nr_vq_rx;
@@ -89,9 +81,6 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 static bool verbs_work_exists(struct kthread *k)
 {
 	int j = 0;
-
-	if (verbs_has_tx_completions(&k->vq_tx))
-		return true;
 
 	for (j = 0; j < k->nr_vq_rx; j++) {
 		int pos = (j + k->pos_vq_rx) % k->nr_vq_rx;

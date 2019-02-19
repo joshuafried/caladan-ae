@@ -107,9 +107,14 @@ int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 {
 	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
 
-	if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
-		log_warn_ratelimited("txq full");
-		return 1;
+	if (nr_inflight_tx(v) >= RUNTIME_SOFTIRQ_BUDGET) {
+		struct mbuf *mbs[RUNTIME_SOFTIRQ_BUDGET];
+		int compl =  verbs_gather_completions(mbs, v, RUNTIME_SOFTIRQ_BUDGET);
+		for (int i = 0; i < compl; i++) mbuf_free(mbs[i]);
+		if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
+			log_warn_ratelimited("txq full");
+			return 1;
+		}
 	}
 
 	void *segment = v->tx_qp_dv.sq.buf + idx * v->tx_qp_dv.sq.stride;
