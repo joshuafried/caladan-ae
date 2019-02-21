@@ -22,6 +22,7 @@ struct verbs_queue_rx {
 	void **buffers; // array of posted buffers
 	struct mlx5dv_rwq rx_wq_dv;
 	uint32_t wq_head;
+	spinlock_t lock;
 
 	/* direct verbs cq */
 	struct mlx5dv_cq rx_cq_dv;

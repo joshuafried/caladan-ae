@@ -39,8 +39,8 @@
 #define RUNTIME_WATCHDOG_US		50
 
 
-
 /* Network parameters */
+#define MAXQS NCPU
 #define RQ_NUM_DESC 64
 #define SQ_NUM_DESC 128
 #define SQ_CQ_BATCH_F 64
@@ -335,9 +335,7 @@ struct kthread {
 	unsigned long		pad2[6];
 
 	struct verbs_queue_tx vq_tx __aligned(CACHE_LINE_SIZE);
-	unsigned int nr_vq_rx;
 	unsigned int pos_vq_rx;
-	struct verbs_queue_rx *vq_rx[NCPU];
 	unsigned long		pad3[3];
 
 	/* 9th cache-line, statistics counters */
@@ -482,6 +480,9 @@ static inline bool timer_needed(struct kthread *k)
 }
 
 
+/* Queue shuffling support */
+extern unsigned long *get_queues(struct kthread *k);
+
 /*
  * Init
  */
@@ -504,6 +505,7 @@ extern int net_init(void);
 extern int arp_init(void);
 extern int trans_init(void);
 extern int smalloc_init(void);
+extern int kthread_init(void);
 
 /* late initialization */
 extern int ioqueues_register_iokernel(void);

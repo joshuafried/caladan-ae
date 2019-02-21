@@ -500,14 +500,10 @@ int net_init_thread(void)
 	if (ret)
 		return ret;
 
-	k->nr_vq_rx = 0;
-
 	/* attach all RX queues to kthread 0 */
 	if (!k->kthread_idx) {
-		k->nr_vq_rx = nrvqs;
-		for (j = 0; j < k->nr_vq_rx; j++) {
-			k->vq_rx[j] = &vqs[j];
-			ret = verbs_init_rx_queue(k->vq_rx[j]);
+		for (j = 0; j < nrvqs; j++) {
+			ret = verbs_init_rx_queue(&vqs[j]);
 			if (ret)
 				return ret;
 		}

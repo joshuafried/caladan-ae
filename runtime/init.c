@@ -39,6 +39,8 @@ static const struct init_entry global_init_handlers[] = {
 	GLOBAL_INITIALIZER(net),
 	GLOBAL_INITIALIZER(arp),
 	GLOBAL_INITIALIZER(trans),
+
+	GLOBAL_INITIALIZER(kthread),
 };
 
 #define THREAD_INITIALIZER(name) \

@@ -40,7 +40,8 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 				unsigned int budget)
 {
 	unsigned int recv_cnt = 0, join_cnt = 0;
-	int j, budget_left;
+	unsigned long *qs;
+	int j, budget_left, todo, rcvd;
 
 	budget_left = min(budget, SOFTIRQ_MAX_BUDGET);
 	while (budget_left) {
@@ -62,33 +63,35 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 		}
 	}
 
-	// budget_left = SOFTIRQ_MAX_BUDGET / 2;
-	for (j = 0; budget_left && j < k->nr_vq_rx; j++) {
-		int idx = (j + k->pos_vq_rx) % k->nr_vq_rx;
-		int rcv = verbs_gather_rx(w->recv_reqs + recv_cnt, k->vq_rx[idx], budget_left);
-		recv_cnt += rcv;
-		budget_left -= rcv;
+	qs = get_queues(k);
+	bitmap_for_each_set(qs, nrvqs, j) {
+		if (!budget_left)
+			break;
+
+		if (!verbs_has_rx_packets(&vqs[j]))
+			continue;
+
+		if (!spin_try_lock(&vqs[j].lock))
+			continue;
+
+		todo = min(budget_left, SOFTIRQ_MAX_BUDGET - recv_cnt);
+		rcvd = verbs_gather_rx(w->recv_reqs + recv_cnt, &vqs[j], todo);
+		recv_cnt += rcvd;
+		spin_unlock(&vqs[j].lock);
 	}
 
-	k->pos_vq_rx += j;
-
-	w->k = k;
 	w->recv_cnt = recv_cnt;
 	w->join_cnt = join_cnt;
 	w->timer_budget = budget_left;
 }
 
-static bool verbs_work_exists(struct kthread *k)
+
+static __thread thread_t *next_irq;
+static __thread struct softirq_work *next_irq_w;
+
+static inline void softirq_work_init(struct softirq_work *w)
 {
-	int j = 0;
-
-	for (j = 0; j < k->nr_vq_rx; j++) {
-		int pos = (j + k->pos_vq_rx) % k->nr_vq_rx;
-		if (verbs_has_rx_packets(k->vq_rx[pos]))
-			return true;
-	}
-
-	return false;
+	w->recv_cnt = w->join_cnt = w->timer_budget = 0;
 }
 
 /**
@@ -106,17 +109,24 @@ thread_t *softirq_run_thread(struct kthread *k, unsigned int budget)
 
 	assert_spin_lock_held(&k->lock);
 
-	/* check if there's any work available */
-	if (lrpc_empty(&k->rxcmdq) && !timer_needed(k) && !verbs_work_exists(k))
+	if (!next_irq) {
+		next_irq = thread_create_with_buf(softirq_fn, (void **)&next_irq_w, sizeof(*w));
+		if (unlikely(!next_irq))
+			return NULL;
+		softirq_work_init(next_irq_w);
+	}
+
+	softirq_gather_work(next_irq_w, k, budget);
+
+	if (!next_irq_w->recv_cnt && !next_irq_w->join_cnt && !timer_needed(k))
 		return NULL;
 
-	th = thread_create_with_buf(softirq_fn, (void **)&w, sizeof(*w));
-	if (unlikely(!th))
-		return NULL;
-
-	softirq_gather_work(w, k, budget);
+	th = next_irq;
+	next_irq_w->k = k;
 	th->state = THREAD_STATE_RUNNABLE;
+	next_irq = NULL;
 	return th;
+
 }
 
 /**
@@ -129,16 +139,13 @@ void softirq_run(unsigned int budget)
 	struct softirq_work w;
 
 	k = getk();
-	/* check if there's any work available */
-	if (lrpc_empty(&k->rxcmdq) && !timer_needed(k) && !verbs_work_exists(k)) {
-		putk();
-		return;
-	}
 
 	spin_lock(&k->lock);
 	softirq_gather_work(&w, k, budget);
+	w.k = k;
 	spin_unlock(&k->lock);
 	putk();
 
-	softirq_fn(&w);
+	if (w.recv_cnt || w.join_cnt || timer_needed(k))
+		softirq_fn(&w);
 }

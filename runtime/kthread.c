@@ -15,6 +15,7 @@
 #include <base/list.h>
 #include <base/lock.h>
 #include <base/log.h>
+#include <base/random.h>
 #include <runtime/sync.h>
 #include <runtime/timer.h>
 
@@ -45,6 +46,15 @@ __thread struct kthread *mykthread;
 struct cpu_record cpu_map[NCPU] __attribute__((aligned(CACHE_LINE_SIZE)));
 
 static __thread int ksched_fd;
+
+static DEFINE_BITMAP(core_awake, NCPU);
+static atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
+
+static unsigned int preference_table[NCPU][MAXQS];
+static __thread uint64_t last_kthread_gen;
+static __thread unsigned long cached_assignments[NCPU][MAXQS/64];
+
+
 
 static struct kthread *allock(void)
 {
@@ -128,7 +138,6 @@ void kthread_detach(struct kthread *r)
 	assert(r != k);
 	assert(r->parked == true);
 	assert(r->detached == false);
-	assert(r->nr_vq_rx == 0);
 
 	/* make sure the park rxcmd was processed */
 	lrpc_poll_send_tail(&r->txcmdq);
@@ -179,6 +188,9 @@ static void kthread_yield_to_iokernel(void)
 	clear_preempt_needed();
 	uint64_t last_core = k->curr_cpu;
 
+	bitmap_atomic_clear(core_awake, last_core);
+	atomic64_inc(&kthread_gen);
+
 	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_PARK));
 #if 0
 	while (ioctl(ksched_fd, KSCHED_IOC_PARK)) {
@@ -189,6 +201,9 @@ static void kthread_yield_to_iokernel(void)
 #endif
 
 	k->curr_cpu = sched_getcpu();
+
+	bitmap_atomic_set(core_awake, k->curr_cpu);
+	atomic64_inc(&kthread_gen);
 
 	if (k->curr_cpu != last_core)
 		STAT(CORE_MIGRATIONS)++;
@@ -280,9 +295,84 @@ void kthread_wait_to_attach(void)
 	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_START));
 	k->curr_cpu = sched_getcpu();
 	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
+	bitmap_atomic_set(core_awake, k->curr_cpu);
+	atomic64_inc(&kthread_gen);
 
 	/* attach the kthread for the first time */
 	kthread_attach();
 	atomic_inc(&runningks);
+}
+
+int kthread_init(void)
+{
+	int i, j, ret;
+
+	unsigned char rands[nrvqs];
+
+	for (i = 0; i < cpu_count; i++) {
+		if (bitmap_find_next_set(cpu_info_tbl[i].thread_siblings_mask,
+			  cpu_count, 0) < i)
+			continue;
+
+		ret = fill_random_bytes(rands, nrvqs);
+		if (ret)
+			return ret;
+
+		for (j = 0; j < nrvqs; j++)
+			preference_table[i][j] = j;
+
+		for (j = nrvqs - 1; j >= 1; j--)
+			swapvars(preference_table[i][j], preference_table[i][rands[j] % j]);
+	}
+
+	return 0;
+}
+
+static void compute_preferences(void)
+{
+	int i, j, q, phys_id, n = 0;
+
+	DEFINE_BITMAP(core_done, cpu_count);
+	DEFINE_BITMAP(q_done, nrvqs);
+
+	bitmap_init(q_done, nrvqs, false);
+	memset(cached_assignments, 0, sizeof(cached_assignments));
+
+	while (true) {
+		bitmap_init(core_done, cpu_count, false);
+
+		bitmap_for_each_set(core_awake, cpu_count, i) {
+			phys_id = min(i, cpu_map[i].sibling_core);
+			if (bitmap_test(core_done, phys_id))
+				continue;
+
+			bitmap_set(core_done, phys_id);
+
+			j = 0;
+			do {
+				assert(j < nrvqs);
+				q = preference_table[phys_id][j++];
+			} while (bitmap_test(q_done, q));
+
+			bitmap_set(q_done, q);
+			bitmap_set(cached_assignments[phys_id], q);
+			if (++n == nrvqs)
+				return;
+		}
+	}
+}
+
+
+unsigned long *get_queues(struct kthread *k)
+{
+	int phys_id;
+
+	if (unlikely(atomic64_read(&kthread_gen) != last_kthread_gen)) {
+		last_kthread_gen = atomic64_read(&kthread_gen);
+		compute_preferences();
+	}
+
+	phys_id = min(k->curr_cpu, cpu_map[k->curr_cpu].sibling_core);
+	return cached_assignments[phys_id];
 }
 

@@ -323,6 +323,7 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 	int i, ret;
 
 	memset(v, 0, sizeof(*v));
+	spin_lock_init(&v->lock);
 
 	/* Create a CQ */
 	struct ibv_cq_init_attr_ex cq_attr = {
