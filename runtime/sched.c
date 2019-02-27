@@ -416,6 +416,7 @@ void join_kthread(struct kthread *k)
 		waketh = list_pop(&tmp, thread_t, link);
 		if (!waketh)
 			break;
+		assert(waketh->state == THREAD_STATE_RUNNABLE);
 		waketh->state = THREAD_STATE_SLEEPING;
 		thread_ready(waketh);
 	}
@@ -690,7 +691,6 @@ static void thread_finish_exit(void)
 	tcache_free(&perthread_get(thread_pt), th);
 	__self = NULL;
 
-	spin_lock(&myk()->lock);
 	schedule();
 }
 
@@ -701,7 +701,47 @@ void thread_exit(void)
 {
 	/* can't free the stack we're currently using, so switch */
 	preempt_disable();
-	jmp_runtime_nosave(thread_finish_exit);
+
+	struct kthread *k = myk();
+	thread_t *nextth, *oldth = thread_self();
+
+	spin_lock(&k->lock);
+
+	nextth = k->rq[k->rq_tail % RUNTIME_RQ_SIZE];
+
+	/* slow path: switch from the uthread stack to the runtime stack */
+	if (k->rq_head == k->rq_tail || nextth->stack || oldth->main_thread ||
+	    (!disable_watchdog &&
+	     unlikely(rdtsc() - last_watchdog_tsc >
+		      cycles_per_us * RUNTIME_WATCHDOG_US))) {
+		jmp_runtime_nosave(thread_finish_exit);
+	}
+
+	/* pop the next runnable thread from the queue */
+	k->rq_tail++;
+	k->q_ptrs->rq_tail++;
+	spin_unlock(&k->lock);
+
+	/* increment the RCU generation number (odd is in thread) */
+	store_release(&k->rcu_gen, k->rcu_gen + 2);
+	assert((k->rcu_gen & 0x1) == 0x1);
+
+	/* check for misuse of preemption disabling */
+	BUG_ON((preempt_cnt & ~PREEMPT_NOT_PENDING) != 1);
+
+	/* switch stacks and enter the next thread */
+	STAT(RESCHEDULES)++;
+
+	nextth->stack = oldth->stack;
+	tcache_free(&perthread_get(thread_pt), oldth);
+
+	assert(nextth->state == THREAD_STATE_RUNNABLE);
+	nextth->state = THREAD_STATE_RUNNING;
+	__self = nextth;
+
+	nextth->tf.rsp = stack_init_to_rsp(nextth->stack, thread_exit);
+	__jmp_thread(&nextth->tf);
+
 }
 
 /**
