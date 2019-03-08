@@ -11,7 +11,7 @@
 
 #include "defs.h"
 
-#define SMALLOC_MAG_SIZE	8
+#define SMALLOC_MAG_SIZE	RUNTIME_SMALLOC_MAG_SIZE
 #define SMALLOC_BITS            15
 #define SMALLOC_MIN_SIZE	SLAB_MIN_SIZE
 #define SMALLOC_MAX_SIZE        (SMALLOC_MIN_SIZE << (SMALLOC_BITS - 1))

@@ -13,6 +13,7 @@
 
 #include <asm/chksum.h>
 #include <runtime/net.h>
+#include <runtime/smalloc.h>
 
 #include "verbs.h"
 #include "defs.h"
@@ -22,11 +23,6 @@
 
 /* important global state */
 struct net_cfg netcfg __aligned(CACHE_LINE_SIZE);
-
-/* RX buffer allocation */
-static struct slab net_rx_buf_slab;
-static struct tcache *net_rx_buf_tcache;
-static DEFINE_PERTHREAD(struct tcache_perthread, net_rx_buf_pt);
 
 /* TX buffer allocation */
 struct mempool net_tx_buf_mp;
@@ -46,22 +42,13 @@ unsigned int nrvqs;
  * RX Networking Functions
  */
 
-static void net_rx_release_mbuf(struct mbuf *m)
-{
-	preempt_disable();
-	tcache_free(&perthread_get(net_rx_buf_pt), m);
-	preempt_enable();
-}
-
 static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 {
 	struct mbuf *m;
 	void *buf;
 
 	/* allocate the buffer to store the payload */
-	preempt_disable();
-	m = tcache_alloc(&perthread_get(net_rx_buf_pt));
-	preempt_enable();
+	m = smalloc(MBUF_RESERVED + hdr->len);
 
 	if (unlikely(!m)) {
 		log_warn_ratelimited("rx: out of mbufs!");
@@ -74,7 +61,7 @@ static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 	/* copy the payload and release the buffer back to the iokernel */
 	memcpy(buf, hdr->payload, hdr->len);
 
-	mbuf_init(m, buf, MBUF_DEFAULT_LEN - MBUF_RESERVED, 0);
+	mbuf_init(m, buf, hdr->len, 0);
 	m->len = hdr->len;
 	m->csum_type = hdr->csum_type;
 	m->csum = hdr->csum;
@@ -82,7 +69,7 @@ static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 
 	verbs_rx_completion(hdr->completion_data);
 
-	m->release = net_rx_release_mbuf;
+	m->release = (void (*)(struct mbuf *))sfree;
 	return m;
 }
 
@@ -507,7 +494,6 @@ int net_init_thread(void)
 	int j, ret;
 	struct kthread *k = myk();
 
-	tcache_init_perthread(net_rx_buf_tcache, &perthread_get(net_rx_buf_pt));
 	tcache_init_perthread(net_tx_buf_tcache, &perthread_get(net_tx_buf_pt));
 
 	ret = verbs_init_thread();
@@ -568,16 +554,6 @@ int net_init(void)
 		netcfg.mac.addr[0] &= ~ETH_ADDR_GROUP;
 		netcfg.mac.addr[0] |= ETH_ADDR_LOCAL_ADMIN;
 	}
-
-	ret = slab_create(&net_rx_buf_slab, "runtime_rx_bufs",
-			  MBUF_DEFAULT_LEN, SLAB_FLAG_LGPAGE);
-	if (ret)
-		return ret;
-
-	net_rx_buf_tcache = slab_create_tcache(&net_rx_buf_slab,
-					       NET_RX_BUF_SLAB_TC_MAG);
-	if (!net_rx_buf_tcache)
-		return -ENOMEM;
 
 	tx_len = EGRESS_POOL_SIZE(maxks);
 	tx_buf = mem_map_anom(NULL, tx_len, PGSIZE_2MB, 0);
