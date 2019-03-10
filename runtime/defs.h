@@ -40,10 +40,15 @@
 
 
 /* Network parameters */
-#define MAXQS NCPU
-#define RQ_NUM_DESC 64
-#define SQ_NUM_DESC 128
-#define SQ_CQ_BATCH_F 64
+#define MAXQS			NCPU
+#define RQ_NUM_DESC		64
+#define SQ_NUM_DESC		128
+
+#define SQ_CLEAN_THRESH		RUNTIME_SOFTIRQ_BUDGET
+#define SQ_CLEAN_MAX		RUNTIME_SOFTIRQ_BUDGET
+
+BUILD_ASSERT(SQ_CLEAN_THRESH <= SQ_NUM_DESC);
+
 #define EGRESS_POOL_SIZE(nks) \
 	(4096 * MBUF_DEFAULT_LEN * max(16, (nks)) * 16UL)
 #define RX_BUF_BOOL_SZ(nrqs) \
