@@ -42,6 +42,12 @@ extern void thread_yield(void);
 extern int thread_spawn(thread_fn_t fn, void *arg);
 extern void thread_exit(void) __noreturn;
 
+inline int get_maxks(void)
+{
+	extern unsigned int maxks;
+	return maxks;
+}
+
 /* main initialization */
 typedef int (*initializer_fn_t)(void);
 
