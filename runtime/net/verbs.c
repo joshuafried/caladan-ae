@@ -37,11 +37,17 @@ static struct mempool verbs_buf_mp;
 static struct tcache *verbs_buf_tcache;
 static DEFINE_PERTHREAD(struct tcache_perthread, verbs_buf_pt);
 
+/* Ingress verbs queues */
+struct verbs_queue_rx vqs[NCPU];
+unsigned int nrvqs;
+
 static unsigned char rss_key[40] = {
 	0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A,
 	0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF,
 	0x8F, 0xDE, 0xD2, 0xC5, 0xE2, 0x04, 0xB1, 0xCF, 0xB1, 0xB1, 0xA1,
 	0x0D, 0x6D, 0x86, 0xBA, 0x61, 0x78, 0xEB};
+
+static int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsigned int budget);
 
 
 void verbs_rx_completion(unsigned long completion_data)
@@ -248,7 +254,7 @@ int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned
 /*
  * verbs_gather_work - collect up to budget received packets and completions
  */
-int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsigned int budget)
+static int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsigned int budget)
 {
 	struct mlx5dv_cq *cq = &v->tx_cq_dv;
 	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
@@ -410,7 +416,20 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 		struct mlx5_wqe_data_seg *seg = wq->buf + i * wq->stride;
 		seg->byte_count =  htobe32(BUF_SZ - RX_BUF_RESERVED);
 		seg->lkey = htobe32(mr_rx->lkey);
+
+		/* fill queue with buffers */
+		unsigned char *buf = mempool_alloc(&verbs_buf_mp);
+		if (!buf)
+			return -ENOMEM;
+
+		buf += RX_BUF_RESERVED;
+		seg->addr = htobe64((unsigned long)buf);
+		v->buffers[i] = buf;
+		v->wq_head++;
 	}
+
+	udma_to_device_barrier();
+	wq->dbrec[0] = htobe32(v->wq_head & 0xffff);
 
 	return 0;
 }
@@ -452,7 +471,7 @@ uint32_t compute_rss_hash(uint16_t local_port, struct netaddr remote)
 /*
  * verbs_init - intialize all TX/RX queues
  */
-int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
+int verbs_init(void)
 {
 	int i, ret;
 	void *rx_buf;
@@ -461,10 +480,15 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 	struct ibv_device *ib_dev;
 	struct ibv_qp *qp;
 	struct ibv_rwq_ind_table *rwq_ind_table;
-	struct ibv_wq *ind_tbl[nrqs];
+	struct ibv_wq *ind_tbl[MAXQS];
 	struct ibv_flow *eth_flow;
 
-	if (!is_power_of_two(nrqs))
+	nrvqs = NRRXQS(maxks, guaranteedks);
+	BUG_ON(nrvqs > MAXQS);
+
+	log_info("Creating %u rx queues", nrvqs);
+
+	if (!is_power_of_two(nrvqs))
 		return -EINVAL;
 
 	dev_list = ibv_get_device_list(NULL);
@@ -510,17 +534,17 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 	}
 
 	/* Register memory for TX buffers */
-	mr_tx = ibv_reg_mr(pd, tx_mp->buf, tx_mp->len, IBV_ACCESS_LOCAL_WRITE);
+	mr_tx = ibv_reg_mr(pd, net_tx_buf_mp.buf, net_tx_buf_mp.len, IBV_ACCESS_LOCAL_WRITE);
 	if (!mr_tx) {
 		log_err("verbs_init: Couldn't register mr");
 		return -1;
 	}
 
-	rx_buf = mem_map_anom(NULL, RX_BUF_BOOL_SZ(nrqs), PGSIZE_2MB, 0);
+	rx_buf = mem_map_anom(NULL, RX_BUF_BOOL_SZ(nrvqs), PGSIZE_2MB, 0);
 	if (rx_buf == MAP_FAILED)
 		return -ENOMEM;
 
-	ret = mempool_create(&verbs_buf_mp, rx_buf, RX_BUF_BOOL_SZ(nrqs),
+	ret = mempool_create(&verbs_buf_mp, rx_buf, RX_BUF_BOOL_SZ(nrvqs),
 			     PGSIZE_2MB, BUF_SZ);
 	if (ret)
 		return ret;
@@ -530,14 +554,14 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 	if (!verbs_buf_tcache)
 		return -ENOMEM;
 
-	mr_rx = ibv_reg_mr(pd, rx_buf, RX_BUF_BOOL_SZ(nrqs), IBV_ACCESS_LOCAL_WRITE);
+	mr_rx = ibv_reg_mr(pd, rx_buf, RX_BUF_BOOL_SZ(nrvqs), IBV_ACCESS_LOCAL_WRITE);
 	if (!mr_rx) {
 		log_err("verbs_init: Couldn't register mr");
 		return -1;
 	}
 
-	for (i = 0; i < nrqs; i++) {
-		struct verbs_queue_rx *v = &qs[i];
+	for (i = 0; i < nrvqs; i++) {
+		struct verbs_queue_rx *v = &vqs[i];
 		ret = verbs_create_rx_queue(v);
 		if (ret)
 			return ret;
@@ -547,7 +571,7 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 
 	/* Create Receive Work Queue Indirection Table */
 	struct ibv_rwq_ind_table_init_attr rwq_attr = {
-		.log_ind_tbl_size = __builtin_ctz(nrqs),
+		.log_ind_tbl_size = __builtin_ctz(nrvqs),
 		.ind_tbl = ind_tbl,
 		.comp_mask = 0,
 	};
@@ -635,16 +659,7 @@ int verbs_init(struct mempool *tx_mp, struct verbs_queue_rx *qs, int nrqs)
 	return 0;
 }
 
-/*
- * verbs_init_thread - intializes per-thread data structures
- * */
-int verbs_init_thread(void)
-{
-	tcache_init_perthread(verbs_buf_tcache, &perthread_get(verbs_buf_pt));
-	return 0;
-}
-
-int verbs_init_tx_queue(struct verbs_queue_tx *v)
+static int verbs_init_tx_queue(struct verbs_queue_tx *v)
 {
 	int ret;
 
@@ -737,13 +752,15 @@ int verbs_init_tx_queue(struct verbs_queue_tx *v)
 	return 0;
 }
 
-int verbs_init_rx_queue(struct verbs_queue_rx *v)
+/*
+ * verbs_init_thread - intializes per-thread data structures
+ * */
+int verbs_init_thread(void)
 {
-	int ret;
+	struct kthread *k = myk();
 
-	preempt_disable();
-	ret = verbs_refill_rxqueue(v, RQ_NUM_DESC);
-	preempt_enable();
+	tcache_init_perthread(verbs_buf_tcache, &perthread_get(verbs_buf_pt));
 
-	return ret;
+	k->pos_vq_rx = 0;
+	return verbs_init_tx_queue(&k->vq_tx);
 }

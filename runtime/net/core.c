@@ -31,13 +31,6 @@ static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 
 #define MBUF_RESERVED (align_up(sizeof(struct mbuf), CACHE_LINE_SIZE))
 
-/* Rudimentary per-kthread verb queues */
-struct verbs_queue_rx vqs[NCPU];
-unsigned int nrvqs;
-
-#define MBUF_RESERVED (align_up(sizeof(struct mbuf), CACHE_LINE_SIZE))
-
-
 /*
  * RX Networking Functions
  */
@@ -491,29 +484,7 @@ int str_to_netaddr(const char *str, struct netaddr *addr)
  */
 int net_init_thread(void)
 {
-	int j, ret;
-	struct kthread *k = myk();
-
 	tcache_init_perthread(net_tx_buf_tcache, &perthread_get(net_tx_buf_pt));
-
-	ret = verbs_init_thread();
-	if (ret)
-		return ret;
-
-	/* attach all RX queues to kthread 0 */
-	if (!k->kthread_idx) {
-		for (j = 0; j < nrvqs; j++) {
-			ret = verbs_init_rx_queue(&vqs[j]);
-			if (ret)
-				return ret;
-		}
-	}
-
-	k->pos_vq_rx = 0;
-
-	ret = verbs_init_tx_queue(&k->vq_tx);
-	if (ret)
-		return ret;
 
 	return 0;
 }
@@ -565,12 +536,6 @@ int net_init(void)
 		"runtime_tx_bufs", NET_TX_BUF_TC_MAG);
 	if (!net_tx_buf_tcache)
 		return -ENOMEM;
-
-	nrvqs = NRRXQS(maxks, guaranteedks);
-	log_info("Creating %u rx queues", nrvqs);
-	ret = verbs_init(&net_tx_buf_mp, vqs, nrvqs);
-	if (ret)
-		return ret;
 
 	log_info("net: started network stack");
 	net_dump_config();

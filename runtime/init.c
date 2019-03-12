@@ -37,6 +37,7 @@ static const struct init_entry global_init_handlers[] = {
 
 	/* network stack */
 	GLOBAL_INITIALIZER(net),
+	GLOBAL_INITIALIZER(verbs),
 	GLOBAL_INITIALIZER(arp),
 	GLOBAL_INITIALIZER(trans),
 
@@ -58,6 +59,7 @@ static const struct init_entry thread_init_handlers[] = {
 
 	/* network stack */
 	THREAD_INITIALIZER(net),
+	THREAD_INITIALIZER(verbs),
 };
 
 #define LATE_INITIALIZER(name) \

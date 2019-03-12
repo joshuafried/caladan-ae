@@ -5,11 +5,6 @@
 
 #pragma once
 
-#include <base/atomic.h>
-#include <base/mempool.h>
-#include <base/list.h>
-#include <net/mbuf.h>
-
 #include <infiniband/mlx5dv.h>
 #include <infiniband/verbs.h>
 
@@ -91,13 +86,7 @@ struct rx_net_hdr;
 
 void verbs_rx_completion(unsigned long completion_data);
 int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m);
-
 int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned int budget);
-int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *v, unsigned int budget);
 
 /* Initialization functions */
-int verbs_init(struct mempool *mp, struct verbs_queue_rx *qs, int nrqs);
-int verbs_init_thread(void);
-int verbs_init_rx_queue(struct verbs_queue_rx *v);
-int verbs_init_tx_queue(struct verbs_queue_tx *v);
 size_t verbs_shm_space_needed(size_t rx_qs, size_t tx_qs);

@@ -22,6 +22,8 @@ struct rx_net_hdr {
 	char	     payload[];	/* packet data */
 };
 
+extern struct mempool net_tx_buf_mp;
+
 /*
  * Network Error Reporting Functions
  */

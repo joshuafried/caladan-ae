@@ -500,6 +500,7 @@ extern int timer_init_thread(void);
 extern int sched_init_thread(void);
 extern int net_init_thread(void);
 extern int smalloc_init_thread(void);
+extern int verbs_init_thread(void);
 
 /* global initialization */
 extern int ioqueues_init(unsigned int threads);
@@ -511,6 +512,7 @@ extern int arp_init(void);
 extern int trans_init(void);
 extern int smalloc_init(void);
 extern int kthread_init(void);
+extern int verbs_init(void);
 
 /* late initialization */
 extern int ioqueues_register_iokernel(void);
