@@ -40,7 +40,7 @@
 
 
 /* Network parameters */
-#define MAXQS				NCPU
+#define MAX_BUNDLES			NCPU
 #define RQ_NUM_DESC			128
 #define SQ_NUM_DESC			128
 
@@ -62,11 +62,26 @@ BUILD_ASSERT(SQ_CLEAN_THRESH <= SQ_NUM_DESC);
  (align_up(nrqs * RQ_NUM_DESC * 2UL * MBUF_DEFAULT_LEN, PGSIZE_2MB))
 #define POW_TWO_ROUND_UP(x) \
  ((x) <= 1UL ? 1UL : 1UL << (64 - __builtin_clzl((x) - 1)))
-#define NRRXQS(maxks, guaranteedks) (POW_TWO_ROUND_UP(maxks))
+#define NR_BUNDLES(maxks, guaranteedks) (POW_TWO_ROUND_UP(maxks))
 
 #define MLX5_TCP_RSS 1
-extern struct verbs_queue_rx vqs[NCPU];
-extern unsigned int nrvqs;
+
+
+struct io_bundle {
+
+	spinlock_t lock;
+
+	/* ingress network queue */
+	struct verbs_queue_rx rxq;
+
+	/* timer wheel */
+
+	/* storage queue */
+
+} __aligned(CACHE_LINE_SIZE);
+
+extern struct io_bundle bundles[MAX_BUNDLES];
+extern unsigned int nr_bundles;
 
 /*
  * Trap frame support
@@ -486,7 +501,21 @@ static inline bool timer_needed(struct kthread *k)
 
 
 /* Queue shuffling support */
-extern unsigned long *get_queues(struct kthread *k);
+extern atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
+extern __thread uint64_t last_kthread_gen;
+extern __thread unsigned long cached_assignments[NCPU][div_up(MAX_BUNDLES,64)];
+extern unsigned long *__get_queues(struct kthread *k);
+
+static inline unsigned long *get_queues(struct kthread *k)
+{
+	int phys_id;
+
+	if (unlikely(atomic64_read(&kthread_gen) != last_kthread_gen))
+		return __get_queues(k);
+
+	phys_id = min(k->curr_cpu, cpu_map[k->curr_cpu].sibling_core);
+	return cached_assignments[phys_id];
+}
 
 /*
  * Init
@@ -503,7 +532,7 @@ extern int smalloc_init_thread(void);
 extern int verbs_init_thread(void);
 
 /* global initialization */
-extern int ioqueues_init(unsigned int threads);
+extern int ioqueues_init(void);
 extern int stack_init(void);
 extern int sched_init(void);
 extern int preempt_init(void);

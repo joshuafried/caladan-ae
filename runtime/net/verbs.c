@@ -37,10 +37,6 @@ static struct mempool verbs_buf_mp;
 static struct tcache *verbs_buf_tcache;
 static DEFINE_PERTHREAD(struct tcache_perthread, verbs_buf_pt);
 
-/* Ingress verbs queues */
-struct verbs_queue_rx vqs[NCPU];
-unsigned int nrvqs;
-
 static unsigned char rss_key[40] = {
 	0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A,
 	0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF,
@@ -330,7 +326,6 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 	int i, ret;
 
 	memset(v, 0, sizeof(*v));
-	spin_lock_init(&v->lock);
 
 	/* Create a CQ */
 	struct ibv_cq_init_attr_ex cq_attr = {
@@ -480,15 +475,12 @@ int verbs_init(void)
 	struct ibv_device *ib_dev;
 	struct ibv_qp *qp;
 	struct ibv_rwq_ind_table *rwq_ind_table;
-	struct ibv_wq *ind_tbl[MAXQS];
+	struct ibv_wq *ind_tbl[MAX_BUNDLES];
 	struct ibv_flow *eth_flow;
 
-	nrvqs = NRRXQS(maxks, guaranteedks);
-	BUG_ON(nrvqs > MAXQS);
+	log_info("Creating %u rx queues", nr_bundles);
 
-	log_info("Creating %u rx queues", nrvqs);
-
-	if (!is_power_of_two(nrvqs))
+	if (!is_power_of_two(nr_bundles))
 		return -EINVAL;
 
 	dev_list = ibv_get_device_list(NULL);
@@ -540,11 +532,11 @@ int verbs_init(void)
 		return -1;
 	}
 
-	rx_buf = mem_map_anom(NULL, RX_BUF_BOOL_SZ(nrvqs), PGSIZE_2MB, 0);
+	rx_buf = mem_map_anom(NULL, RX_BUF_BOOL_SZ(nr_bundles), PGSIZE_2MB, 0);
 	if (rx_buf == MAP_FAILED)
 		return -ENOMEM;
 
-	ret = mempool_create(&verbs_buf_mp, rx_buf, RX_BUF_BOOL_SZ(nrvqs),
+	ret = mempool_create(&verbs_buf_mp, rx_buf, RX_BUF_BOOL_SZ(nr_bundles),
 			     PGSIZE_2MB, BUF_SZ);
 	if (ret)
 		return ret;
@@ -554,14 +546,14 @@ int verbs_init(void)
 	if (!verbs_buf_tcache)
 		return -ENOMEM;
 
-	mr_rx = ibv_reg_mr(pd, rx_buf, RX_BUF_BOOL_SZ(nrvqs), IBV_ACCESS_LOCAL_WRITE);
+	mr_rx = ibv_reg_mr(pd, rx_buf, RX_BUF_BOOL_SZ(nr_bundles), IBV_ACCESS_LOCAL_WRITE);
 	if (!mr_rx) {
 		log_err("verbs_init: Couldn't register mr");
 		return -1;
 	}
 
-	for (i = 0; i < nrvqs; i++) {
-		struct verbs_queue_rx *v = &vqs[i];
+	for (i = 0; i < nr_bundles; i++) {
+		struct verbs_queue_rx *v = &bundles[i].rxq;
 		ret = verbs_create_rx_queue(v);
 		if (ret)
 			return ret;
@@ -571,7 +563,7 @@ int verbs_init(void)
 
 	/* Create Receive Work Queue Indirection Table */
 	struct ibv_rwq_ind_table_init_attr rwq_attr = {
-		.log_ind_tbl_size = __builtin_ctz(nrvqs),
+		.log_ind_tbl_size = __builtin_ctz(nr_bundles),
 		.ind_tbl = ind_tbl,
 		.comp_mask = 0,
 	};

@@ -64,20 +64,20 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 	}
 
 	qs = get_queues(k);
-	bitmap_for_each_set(qs, nrvqs, j) {
+	bitmap_for_each_set(qs, nr_bundles, j) {
 		if (!budget_left)
 			break;
 
-		if (!verbs_has_rx_packets(&vqs[j]))
+		if (!verbs_has_rx_packets(&bundles[j].rxq))
 			continue;
 
-		if (!spin_try_lock(&vqs[j].lock))
+		if (!spin_try_lock(&bundles[j].lock))
 			continue;
 
 		todo = min(budget_left, SOFTIRQ_MAX_BUDGET - recv_cnt);
-		rcvd = verbs_gather_rx(w->recv_reqs + recv_cnt, &vqs[j], todo);
+		rcvd = verbs_gather_rx(w->recv_reqs + recv_cnt, &bundles[j].rxq, todo);
 		recv_cnt += rcvd;
-		spin_unlock(&vqs[j].lock);
+		spin_unlock(&bundles[j].lock);
 	}
 
 	w->recv_cnt = recv_cnt;

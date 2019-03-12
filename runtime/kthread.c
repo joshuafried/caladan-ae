@@ -48,11 +48,11 @@ struct cpu_record cpu_map[NCPU] __attribute__((aligned(CACHE_LINE_SIZE)));
 static __thread int ksched_fd;
 
 static DEFINE_BITMAP(core_awake, NCPU);
-static atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
+ atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
 
-static unsigned int preference_table[NCPU][MAXQS];
-static __thread uint64_t last_kthread_gen;
-static __thread unsigned long cached_assignments[NCPU][MAXQS/64];
+static unsigned int preference_table[NCPU][MAX_BUNDLES];
+__thread uint64_t last_kthread_gen;
+__thread unsigned long cached_assignments[NCPU][div_up(MAX_BUNDLES,64)];
 
 
 
@@ -307,21 +307,21 @@ int kthread_init(void)
 {
 	int i, j, ret;
 
-	unsigned char rands[nrvqs];
+	unsigned char rands[nr_bundles];
 
 	for (i = 0; i < cpu_count; i++) {
 		if (bitmap_find_next_set(cpu_info_tbl[i].thread_siblings_mask,
 			  cpu_count, 0) < i)
 			continue;
 
-		ret = fill_random_bytes(rands, nrvqs);
+		ret = fill_random_bytes(rands, nr_bundles);
 		if (ret)
 			return ret;
 
-		for (j = 0; j < nrvqs; j++)
+		for (j = 0; j < nr_bundles; j++)
 			preference_table[i][j] = j;
 
-		for (j = nrvqs - 1; j >= 1; j--)
+		for (j = nr_bundles - 1; j >= 1; j--)
 			swapvars(preference_table[i][j], preference_table[i][rands[j] % j]);
 	}
 
@@ -333,9 +333,9 @@ static void compute_preferences(void)
 	int i, j, q, phys_id, n = 0;
 
 	DEFINE_BITMAP(core_done, cpu_count);
-	DEFINE_BITMAP(q_done, nrvqs);
+	DEFINE_BITMAP(q_done, nr_bundles);
 
-	bitmap_init(q_done, nrvqs, false);
+	bitmap_init(q_done, nr_bundles, false);
 	memset(cached_assignments, 0, sizeof(cached_assignments));
 
 	while (true) {
@@ -350,20 +350,20 @@ static void compute_preferences(void)
 
 			j = 0;
 			do {
-				assert(j < nrvqs);
+				assert(j < nr_bundles);
 				q = preference_table[phys_id][j++];
 			} while (bitmap_test(q_done, q));
 
 			bitmap_set(q_done, q);
 			bitmap_set(cached_assignments[phys_id], q);
-			if (++n == nrvqs)
+			if (++n == nr_bundles)
 				return;
 		}
 	}
 }
 
 
-unsigned long *get_queues(struct kthread *k)
+unsigned long *__get_queues(struct kthread *k)
 {
 	int phys_id;
 

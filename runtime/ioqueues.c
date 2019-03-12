@@ -33,6 +33,8 @@ struct iokernel_control iok;
 
 struct iokernel_control iok;
 
+struct io_bundle bundles[MAX_BUNDLES];
+unsigned int nr_bundles;
 
 // Could be a macro really, this is totally static :/
 static size_t calculate_shm_space(unsigned int thread_count)
@@ -237,11 +239,16 @@ int ioqueues_init_thread(void)
  * General initialization for runtime <-> iokernel communication. Must be
  * called before per-thread ioqueues initialization.
  */
-int ioqueues_init(unsigned int threads)
+int ioqueues_init(void)
 {
-	int ret;
+	int i, ret;
 
-	ret = ioqueues_shm_setup(threads);
+	nr_bundles = NR_BUNDLES(maxks, guaranteedks);
+
+	for (i = 0; i < nr_bundles; i++)
+		spin_lock_init(&bundles[i].lock);
+
+	ret = ioqueues_shm_setup(maxks);
 	if (ret) {
 		log_err("ioqueues_init: ioqueues_shm_setup() failed, ret = %d", ret);
 		return ret;
