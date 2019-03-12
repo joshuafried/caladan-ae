@@ -43,6 +43,7 @@ static const struct init_entry global_init_handlers[] = {
 	GLOBAL_INITIALIZER(trans),
 
 	GLOBAL_INITIALIZER(kthread),
+	GLOBAL_INITIALIZER(timer),
 };
 
 #define THREAD_INITIALIZER(name) \
@@ -54,7 +55,6 @@ static const struct init_entry thread_init_handlers[] = {
 	THREAD_INITIALIZER(kthread),
 	THREAD_INITIALIZER(ioqueues),
 	THREAD_INITIALIZER(stack),
-	THREAD_INITIALIZER(timer),
 	THREAD_INITIALIZER(sched),
 	THREAD_INITIALIZER(smalloc),
 

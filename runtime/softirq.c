@@ -5,6 +5,7 @@
 #include <base/stddef.h>
 #include <base/log.h>
 #include <runtime/thread.h>
+#include <runtime/timer.h>
 
 #include "defs.h"
 #include "net/defs.h"
@@ -13,10 +14,10 @@
 DECLARE_PERTHREAD(struct tcache_perthread, thread_pt);
 
 struct softirq_work {
-	unsigned int recv_cnt, join_cnt, timer_budget;
-	struct kthread *k;
+	unsigned int recv_cnt, join_cnt, timeout_cnt;
 	struct rx_net_hdr *recv_reqs[SOFTIRQ_MAX_BUDGET];
 	struct kthread *join_reqs[SOFTIRQ_MAX_BUDGET];
+	struct timer_entry *timeouts[SOFTIRQ_MAX_BUDGET];
 };
 
 static void softirq_fn(void *arg)
@@ -28,8 +29,8 @@ static void softirq_fn(void *arg)
 	net_rx_softirq(w->recv_reqs, w->recv_cnt);
 
 	/* handle any pending timeouts */
-	if (timer_needed(w->k))
-		timer_softirq(w->k, w->timer_budget);
+	for (i = 0; i < w->timeout_cnt; i++)
+		w->timeouts[i]->fn(w->timeouts[i]->arg);
 
 	/* join parked kthreads */
 	for (i = 0; i < w->join_cnt; i++)
@@ -39,7 +40,7 @@ static void softirq_fn(void *arg)
 static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 				unsigned int budget)
 {
-	unsigned int recv_cnt = 0, join_cnt = 0;
+	unsigned int recv_cnt = 0, join_cnt = 0, timeout_cnt = 0;
 	unsigned long *qs;
 	int j, budget_left, todo, rcvd;
 
@@ -68,7 +69,7 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 		if (!budget_left)
 			break;
 
-		if (!verbs_has_rx_packets(&bundles[j].rxq))
+		if (!verbs_has_rx_packets(&bundles[j].rxq) && !timer_needed(&bundles[j]))
 			continue;
 
 		if (!spin_try_lock(&bundles[j].lock))
@@ -77,12 +78,16 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 		todo = min(budget_left, SOFTIRQ_MAX_BUDGET - recv_cnt);
 		rcvd = verbs_gather_rx(w->recv_reqs + recv_cnt, &bundles[j].rxq, todo);
 		recv_cnt += rcvd;
+
+		// TODO: budget me
+		timeout_cnt += timer_gather(&bundles[j], SOFTIRQ_MAX_BUDGET - timeout_cnt, w->timeouts + timeout_cnt);
+
 		spin_unlock(&bundles[j].lock);
 	}
 
 	w->recv_cnt = recv_cnt;
 	w->join_cnt = join_cnt;
-	w->timer_budget = budget_left;
+	w->timeout_cnt = timeout_cnt;
 }
 
 
@@ -91,7 +96,7 @@ static __thread struct softirq_work *next_irq_w;
 
 static inline void softirq_work_init(struct softirq_work *w)
 {
-	w->recv_cnt = w->join_cnt = w->timer_budget = 0;
+	w->recv_cnt = w->join_cnt = w->timeout_cnt = 0;
 }
 
 /**
@@ -118,11 +123,10 @@ thread_t *softirq_run_thread(struct kthread *k, unsigned int budget)
 
 	softirq_gather_work(next_irq_w, k, budget);
 
-	if (!next_irq_w->recv_cnt && !next_irq_w->join_cnt && !timer_needed(k))
+	if (!next_irq_w->recv_cnt && !next_irq_w->join_cnt && !next_irq_w->timeout_cnt)
 		return NULL;
 
 	th = next_irq;
-	next_irq_w->k = k;
 	th->state = THREAD_STATE_RUNNABLE;
 	next_irq = NULL;
 	return th;
@@ -142,10 +146,9 @@ void softirq_run(unsigned int budget)
 
 	spin_lock(&k->lock);
 	softirq_gather_work(&w, k, budget);
-	w.k = k;
 	spin_unlock(&k->lock);
 	putk();
 
-	if (w.recv_cnt || w.join_cnt || timer_needed(k))
+	if (w.recv_cnt || w.join_cnt || w.timeout_cnt)
 		softirq_fn(&w);
 }

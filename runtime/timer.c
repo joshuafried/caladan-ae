@@ -45,9 +45,9 @@ static bool is_valid_heap(struct timer_idx *heap, int n)
  * valid min heap
  * @k: the kthread
  */
-static void assert_timer_heap_is_valid(struct kthread *k)
+static void assert_timer_heap_is_valid(struct io_bundle *b)
 {
-	assert(is_valid_heap(k->timers, k->timern));
+	assert(is_valid_heap(b->timers, b->timern));
 }
 
 static void sift_up(struct timer_idx *heap, int i)
@@ -94,87 +94,45 @@ static void sift_down(struct timer_idx *heap, int i, int n)
 	}
 }
 
-/**
- * timer_merge - merges a timer heap from another kthread into our timer heap
- * @r: the remote kthread whose timer heap we will absorb
- */
-void timer_merge(struct kthread *r)
-{
-	struct kthread *k = myk();
-	int i;
 
-	spin_lock(&k->timer_lock);
-	spin_lock(&r->timer_lock);
-
-	if (r->timern == 0) {
-		spin_unlock(&r->timer_lock);
-		goto done;
-	}
-
-	/* move all timers from r to the end of our array */
-	for (i = 0; i < r->timern; i++) {
-		k->timers[k->timern] = r->timers[i];
-		k->timers[k->timern].e->idx = k->timern;
-		k->timers[k->timern].e->localk = k;
-		k->timern++;
-
-		if (k->timern >= RUNTIME_MAX_TIMERS)
-			BUG();
-	}
-	r->timern = 0;
-	spin_unlock(&r->timer_lock);
-
-	/*
-         * Restore heap order by sifting each non-leaf element downward,
-         * starting from the bottom of the heap and working upward (runs in
-	 * linear time).
-	 */
-	for (i = k->timern / D; i >= 0; i--)
-		sift_down(k->timers, i, k->timern);
-
-done:
-	spin_unlock(&k->timer_lock);
-}
 
 /**
  * timer_earliest_deadline - return the first deadline for this kthread or 0 if
  * there are no active timers.
  */
-uint64_t timer_earliest_deadline()
+uint64_t timer_earliest_deadline(struct io_bundle *b)
 {
-	struct kthread *k = myk();
 	uint64_t deadline_us;
 
 	/* deliberate race condition */
-	if (k->timern == 0)
+	if (b->timern == 0)
 		deadline_us = 0;
 	else
-		deadline_us = k->timers[0].deadline_us;
+		deadline_us = b->timers[0].deadline_us;
 
 	return deadline_us;
 }
 
-static void timer_start_locked(struct timer_entry *e, uint64_t deadline_us)
+static void timer_start_locked(struct timer_entry *e, uint64_t deadline_us, struct io_bundle *b)
 {
-	struct kthread *k = myk();
 	int i;
 
-	assert_spin_lock_held(&k->timer_lock);
+	assert_spin_lock_held(&b->lock);
 
 	/* can't insert a timer twice! */
 	BUG_ON(e->armed);
 
-	i = k->timern++;
-	if (k->timern >= RUNTIME_MAX_TIMERS) {
+	i = b->timern++;
+	if (b->timern >= RUNTIME_MAX_TIMERS) {
 		/* TODO: support unlimited timers */
 		BUG();
 	}
 
-	k->timers[i].deadline_us = deadline_us;
-	k->timers[i].e = e;
+	b->timers[i].deadline_us = deadline_us;
+	b->timers[i].e = e;
 	e->idx = i;
-	e->localk = k;
-	sift_up(k->timers, i);
+	e->bundle = b;
+	sift_up(b->timers, i);
 	e->armed = true;
 }
 
@@ -183,15 +141,16 @@ static void timer_start_locked(struct timer_entry *e, uint64_t deadline_us)
  * @e: the timer entry to start
  * @deadline_us: the deadline in microseconds
  *
- * @e must have been initialized with timer_init().
+ * @e must have been initialized with init_timer().
  */
 void timer_start(struct timer_entry *e, uint64_t deadline_us)
 {
 	struct kthread *k = getk();
+	struct io_bundle *b = get_first_bundle(k);
 
-	spin_lock_np(&k->timer_lock);
-	timer_start_locked(e, deadline_us);
-	spin_unlock_np(&k->timer_lock);
+	spin_lock(&b->lock);
+	timer_start_locked(e, deadline_us, b);
+	spin_unlock(&b->lock);
 	putk();
 }
 
@@ -204,43 +163,29 @@ void timer_start(struct timer_entry *e, uint64_t deadline_us)
  */
 bool timer_cancel(struct timer_entry *e)
 {
-	struct kthread *k;
 	int last;
+	struct io_bundle *b = e->bundle;
 
-try_again:
-	preempt_disable();
-	k = load_acquire(&e->localk);
-
-	spin_lock_np(&k->timer_lock);
-
-	if (e->localk != k) {
-		/* Timer was merged to a different heap */
-		spin_unlock_np(&k->timer_lock);
-		preempt_enable();
-		goto try_again;
-	}
+	spin_lock_np(&b->lock);
 
 	if (!e->armed) {
-		spin_unlock_np(&k->timer_lock);
-		preempt_enable();
+		spin_unlock_np(&b->lock);
 		return false;
 	}
 	e->armed = false;
 
-	last = --k->timern;
+	last = --b->timern;
 	if (e->idx == last) {
-		spin_unlock_np(&k->timer_lock);
-		preempt_enable();
+		spin_unlock_np(&b->lock);
 		return true;
 	}
 
-	k->timers[e->idx] = k->timers[last];
-	k->timers[e->idx].e->idx = e->idx;
-	sift_up(k->timers, e->idx);
-	sift_down(k->timers, e->idx, k->timern);
-	spin_unlock_np(&k->timer_lock);
+	b->timers[e->idx] = b->timers[last];
+	b->timers[e->idx].e->idx = e->idx;
+	sift_up(b->timers, e->idx);
+	sift_down(b->timers, e->idx, b->timern);
+	spin_unlock_np(&b->lock);
 
-	preempt_enable();
 	return true;
 }
 
@@ -252,16 +197,19 @@ static void timer_finish_sleep(unsigned long arg)
 
 static void __timer_sleep(uint64_t deadline_us)
 {
+	struct io_bundle *b;
 	struct kthread *k;
 	struct timer_entry e;
 
-	timer_init(&e, timer_finish_sleep, (unsigned long)thread_self());
+	init_timer(&e, timer_finish_sleep, (unsigned long)thread_self());
 
 	k = getk();
-	spin_lock_np(&k->timer_lock);
+	b = get_first_bundle(k);
+
+	spin_lock_np(&b->lock);
 	putk();
-	timer_start_locked(&e, deadline_us);
-	thread_park_and_unlock_np(&k->timer_lock);
+	timer_start_locked(&e, deadline_us, b);
+	thread_park_and_unlock_np(&b->lock);
 }
 
 /**
@@ -285,56 +233,43 @@ void timer_sleep(uint64_t duration_us)
 	__timer_sleep(microtime() + duration_us);
 }
 
-/**
- * timer_softirq - handles expired timers
- * @k: the kthread to check
- * @budget: the maximum number of timers to handle
- */
-void timer_softirq(struct kthread *k, unsigned int budget)
+int timer_gather(struct io_bundle *b, unsigned int budget, struct timer_entry **entries)
 {
 	struct timer_entry *e;
 	uint64_t now_us;
-	int i;
+	int i, nr_timeouts = 0;
 
-	spin_lock_np(&k->timer_lock);
-	assert_timer_heap_is_valid(k);
+	assert_spin_lock_held(&b->lock);
+	assert_timer_heap_is_valid(b);
 
 	now_us = microtime();
-	while (budget-- && k->timern > 0 &&
-	       k->timers[0].deadline_us <= now_us) {
-		i = --k->timern;
-		e = k->timers[0].e;
+	while (budget-- && b->timern > 0 &&
+	       b->timers[0].deadline_us <= now_us) {
+		i = --b->timern;
+		e = b->timers[0].e;
+		e->armed = false;
 		if (i > 0) {
-			k->timers[0] = k->timers[i];
-			k->timers[0].e->idx = 0;
-			sift_down(k->timers, 0, i);
+			b->timers[0] = b->timers[i];
+			b->timers[0].e->idx = 0;
+			sift_down(b->timers, 0, i);
 		}
-		spin_unlock_np(&k->timer_lock);
-
-		/* execute the timer handler */
-		e->fn(e->arg);
-
-		spin_lock_np(&k->timer_lock);
-		now_us = microtime();
+		entries[nr_timeouts++] = e;
 	}
 
-	spin_unlock_np(&k->timer_lock);
+	return nr_timeouts;
 }
 
-/**
- * timer_init_thread - initializes per-thread timer state
- *
- * Returns 0 if successful, otherwise fail.
- */
-int timer_init_thread(void)
+int timer_init(void)
 {
-	struct kthread *k = myk();
-
-	k->timers = aligned_alloc(CACHE_LINE_SIZE,
+	int i;
+	for (i = 0; i < nr_bundles; i++) {
+		bundles[i].timern = 0;
+		bundles[i].timers = aligned_alloc(CACHE_LINE_SIZE,
 			align_up(sizeof(struct timer_idx) * RUNTIME_MAX_TIMERS,
 				 CACHE_LINE_SIZE));
-	if (!k->timers)
-		return -ENOMEM;
+		if (!bundles[i].timers)
+			return -ENOMEM;
+	}
 
 	return 0;
 }

@@ -70,7 +70,6 @@ static struct kthread *allock(void)
 	list_head_init(&k->rq_overflow);
 	mbufq_init(&k->txpktq_overflow);
 	mbufq_init(&k->txcmdq_overflow);
-	spin_lock_init(&k->timer_lock);
 	k->detached = true;
 
 	return k;
@@ -164,15 +163,11 @@ found:
 	mbufq_merge_to_tail(&k->txpktq_overflow, &r->txpktq_overflow);
 	mbufq_merge_to_tail(&k->txcmdq_overflow, &r->txcmdq_overflow);
 
-	/* merge timer queue into our own */
-	timer_merge(r);
-
 	/* verify the kthread is correctly detached */
 	assert(r->rq_head == r->rq_tail);
 	assert(list_empty(&r->rq_overflow));
 	assert(mbufq_empty(&r->txpktq_overflow));
 	assert(mbufq_empty(&r->txcmdq_overflow));
-	assert(r->timern == 0);
 
 	/* set state */
 	r->detached = true;
@@ -221,7 +216,7 @@ void kthread_park(bool voluntary)
 {
 	struct kthread *k = myk();
 	unsigned long payload = 0;
-	uint64_t cmd = TXCMD_PARKED, deadline_us;
+	uint64_t cmd = TXCMD_PARKED;
 
 	if (!voluntary ||
 	    !mbufq_empty(&k->txpktq_overflow) ||
@@ -235,29 +230,12 @@ void kthread_park(bool voluntary)
 	/* atomically verify we have at least @spinks kthreads running */
 	if (atomic_read(&runningks) <= spinks)
 		return;
-	int remaining_ks = atomic_sub_and_fetch(&runningks, 1);
-	if (unlikely(remaining_ks < spinks)) {
+	if (unlikely(atomic_sub_and_fetch(&runningks, 1) < spinks)) {
 		atomic_inc(&runningks);
 		return;
 	}
 
 	uint64_t now = microtime();
-
-	if (!payload && k->timern) {
-		if (remaining_ks) {
-			payload = (unsigned long)k;
-		} else {
-			cmd = TXCMD_PARKED_LAST;
-			deadline_us = timer_earliest_deadline();
-			if (deadline_us) {
-				payload = deadline_us - now;
-				if ((int64_t)payload <= 0) {
-					cmd = TXCMD_PARKED;
-					payload = (unsigned long)k;
-				}
-			}
-		}
-	}
 
 	k->parked = true;
 	k->park_us = now;

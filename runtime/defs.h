@@ -75,6 +75,8 @@ struct io_bundle {
 	struct verbs_queue_rx rxq;
 
 	/* timer wheel */
+	unsigned int			timern;
+	struct timer_idx		*timers;
 
 	/* storage queue */
 
@@ -348,12 +350,6 @@ struct kthread {
 	/* 4th-7th cache-line */
 	thread_t		*rq[RUNTIME_RQ_SIZE];
 
-	/* 8th cache-line */
-	spinlock_t		timer_lock;
-	unsigned int		timern;
-	struct timer_idx	*timers;
-	unsigned long		pad2[6];
-
 	struct verbs_queue_tx vq_tx __aligned(CACHE_LINE_SIZE);
 	unsigned int pos_vq_rx;
 	unsigned long		pad3[3];
@@ -367,7 +363,6 @@ BUILD_ASSERT(offsetof(struct kthread, lock) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, q_ptrs) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, txcmdq) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, rq) % CACHE_LINE_SIZE == 0);
-BUILD_ASSERT(offsetof(struct kthread, timer_lock) % CACHE_LINE_SIZE == 0);
 BUILD_ASSERT(offsetof(struct kthread, stats) % CACHE_LINE_SIZE == 0);
 
 extern __thread struct kthread *mykthread;
@@ -479,10 +474,9 @@ extern void net_rx_softirq(struct rx_net_hdr **hdrs, unsigned int nr);
 /*
  * Timer support
  */
+struct timer_entry;
 
-extern void timer_softirq(struct kthread *k, unsigned int budget);
-extern void timer_merge(struct kthread *r);
-extern uint64_t timer_earliest_deadline(void);
+extern int timer_gather(struct io_bundle *b, unsigned int budget, struct timer_entry **entries);
 
 struct timer_idx {
 	uint64_t		deadline_us;
@@ -491,12 +485,12 @@ struct timer_idx {
 
 /**
  * timer_needed - returns true if pending timers have to be handled
- * @k: the kthread to check
+ * @b: the io bundle to check
  */
-static inline bool timer_needed(struct kthread *k)
+static inline bool timer_needed(struct io_bundle *b)
 {
 	/* deliberate race condition */
-	return k->timern > 0 && k->timers[0].deadline_us <= microtime();
+	return b->timern > 0 && b->timers[0].deadline_us <= microtime();
 }
 
 
@@ -517,6 +511,19 @@ static inline unsigned long *get_queues(struct kthread *k)
 	return cached_assignments[phys_id];
 }
 
+static inline struct io_bundle *get_first_bundle(struct kthread *k)
+{
+	int pos;
+	unsigned long *qs;
+
+	assert_preempt_disabled();
+	qs = get_queues(k);
+	pos = bitmap_find_next_set(qs, nr_bundles, 0);
+	BUG_ON(pos == nr_bundles);
+
+	return &bundles[pos];
+}
+
 /*
  * Init
  */
@@ -525,7 +532,6 @@ static inline unsigned long *get_queues(struct kthread *k)
 extern int kthread_init_thread(void);
 extern int ioqueues_init_thread(void);
 extern int stack_init_thread(void);
-extern int timer_init_thread(void);
 extern int sched_init_thread(void);
 extern int net_init_thread(void);
 extern int smalloc_init_thread(void);
@@ -542,6 +548,7 @@ extern int trans_init(void);
 extern int smalloc_init(void);
 extern int kthread_init(void);
 extern int verbs_init(void);
+extern int timer_init(void);
 
 /* late initialization */
 extern int ioqueues_register_iokernel(void);

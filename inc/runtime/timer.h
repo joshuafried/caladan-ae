@@ -8,14 +8,14 @@
 
 typedef void (*timer_fn_t)(unsigned long arg);
 
-struct kthread;
+struct io_bundle;
 
 struct timer_entry {
 	bool		armed;
 	unsigned int	idx;
 	timer_fn_t	fn;
 	unsigned long	arg;
-	struct kthread *localk;
+	struct io_bundle *bundle;
 };
 
 
@@ -30,7 +30,7 @@ struct timer_entry {
  * @arg: an argument passed to the timer handler
  */
 static inline void
-timer_init(struct timer_entry *e, timer_fn_t fn, unsigned long arg)
+init_timer(struct timer_entry *e, timer_fn_t fn, unsigned long arg)
 {
 	e->armed = false;
 	e->fn = fn;
