@@ -11,10 +11,7 @@
 #include <iokernel/control.h>
 #include <net/ethernet.h>
 
-#include "mlx.h"
 #include "ref.h"
-
-#define DIRECTPATH 1
 
 /* #define STATS 1 */
 
@@ -25,6 +22,7 @@
 #define IOKERNEL_CMD_BURST_SIZE		64
 #define IOKERNEL_CONTROL_BURST_SIZE	4
 
+#define CORES_ADJUST_INTERVAL_US	5
 
 /*
  * Process Support
@@ -56,6 +54,19 @@ struct thread {
 	unsigned int ooo_preempt;
 };
 
+struct bundle {
+	/* shared variables from runtime */
+	struct bundle_vars *b_vars;
+
+	/* mlx5 rx completion buffer */
+	void *rx_cq_buf;
+	uint32_t rx_cq_cnt;
+
+	/* mlx5 rx history */
+	uint32_t cq_idx;
+	bool cq_pending;
+};
+
 struct proc {
 	pid_t			pid;
 	struct shm_region	region;
@@ -76,33 +87,17 @@ struct proc {
 	/* runtime threads */
 	unsigned int		thread_count;
 	unsigned int		active_thread_count;
+	unsigned int		bundle_count;
 	struct thread		threads[NCPU];
+	struct bundle		bundles[NCPU];
 	struct thread		*active_threads[NCPU];
 	DEFINE_BITMAP(available_threads, NCPU);
 	struct list_head	idle_threads;
 	unsigned int		inflight_preempts;
 	unsigned int		next_thread_rr; // for spraying join requests/overflow completions
 
-	/* next pending timer, only valid if pending_timer is true */
-	bool			pending_timer;
-	uint64_t		deadline_us;
-	unsigned int		timer_idx;
-
 	/* Unique identifier -- never recycled across runtimes*/
 	uintptr_t		uniqid;
-#ifdef MLX
-	uint32_t lkey;
-	void *mr;
-#endif
-
-	unsigned int mlxq_count;
-	struct {
-		void *buf;
-		uint32_t *cq_idx;
-		uint32_t cqe_cnt;
-		uint32_t last_idx;
-		bool last_pending;
-	} mlxqs[NCPU];
 
 	/* table of physical addresses for shared memory */
 	physaddr_t		page_paddrs[];
@@ -226,7 +221,7 @@ enum {
 
 	COMMANDS_PULLED,
 
-	BATCH_TOTAL,
+	IOKERNEL_LOOPS,
 
 	RQ_GRANT,
 	RX_GRANT,

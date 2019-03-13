@@ -54,13 +54,6 @@ static int commands_drain_queue(struct thread *t, int n)
 		}
 
 		switch (cmd) {
-		case TXCMD_PARKED_LAST:
-			if (cores_park_kthread(t, false) &&
-			    t->p->active_thread_count == 0 && payload) {
-				t->p->pending_timer = true;
-				t->p->deadline_us = microtime() + payload;
-			}
-			break;
 		case TXCMD_PARKED:
 			/* notify another kthread if the park was involuntary */
 			if (cores_park_kthread(t, false) && payload != 0) {

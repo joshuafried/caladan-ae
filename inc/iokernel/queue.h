@@ -23,6 +23,5 @@ enum {
  */
 enum {
 	TXCMD_PARKED = 0,		/* hint to iokernel that kthread is parked */
-	TXCMD_PARKED_LAST,	/* the last undetached kthread is parking */
 	TXCMD_NR,		/* number of commands */
 };

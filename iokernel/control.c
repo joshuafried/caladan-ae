@@ -39,7 +39,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	size_t nr_pages;
 	struct proc *p;
 	struct thread_spec *threads;
-	struct mlxq_spec *mlxqs;
+	struct bundle_spec *bundles;
 	void *shbuf;
 	int i, ret;
 
@@ -55,7 +55,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	if (hdr.magic != CONTROL_HDR_MAGIC)
 		goto fail_unmap;
 	if (hdr.thread_count > NCPU || hdr.thread_count == 0 ||
-			hdr.mlxq_count > NCPU)
+			hdr.bundle_count > NCPU)
 		goto fail_unmap;
 
 	if (hdr.sched_cfg.guaranteed_cores + nr_guaranteed > get_total_cores()) {
@@ -84,7 +84,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	p->sched_cfg = hdr.sched_cfg;
 	BUG_ON(p->sched_cfg.guaranteed_cores < 1);
 	p->thread_count = hdr.thread_count;
-	p->pending_timer = false;
 	p->uniqid = rdtsc();
 
 	memcpy(threads, shmptr_to_ptr(&reg, hdr.thread_specs, sizeof(*threads) * hdr.thread_count),
@@ -122,22 +121,25 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 
 	free(threads);
 
-	mlxqs = malloc(sizeof(*mlxqs) * hdr.mlxq_count);
-	if (!mlxqs)
+	bundles = malloc(sizeof(*bundles) * hdr.bundle_count);
+	if (!bundles)
 		goto fail_free_just_proc;
 
-	memcpy(mlxqs, shmptr_to_ptr(&reg, hdr.mlxq_specs, sizeof(*mlxqs) * hdr.mlxq_count),
-	       sizeof(*mlxqs) * hdr.mlxq_count);
+	memcpy(bundles, shmptr_to_ptr(&reg, hdr.bundle_specs, sizeof(*bundles) * hdr.bundle_count),
+	       sizeof(*bundles) * hdr.bundle_count);
 
-	for (i = 0; i < hdr.mlxq_count; i++) {
-		p->mlxqs[i].buf = shmptr_to_ptr(&reg, mlxqs[i].cq_buf, 0);
-		p->mlxqs[i].cqe_cnt = mlxqs[i].cqe_cnt;
-		p->mlxqs[i].cq_idx = shmptr_to_ptr(&reg, mlxqs[i].cq_idx, 0);
-		p->mlxqs[i].last_idx = 0;
-		p->mlxqs[i].last_pending = false;
+	for (i = 0; i < hdr.bundle_count; i++) {
+		struct bundle *b = &p->bundles[i];
+
+		b->b_vars = shmptr_to_ptr(&reg, bundles[i].b_vars, sizeof(b->b_vars));
+		b->rx_cq_buf = shmptr_to_ptr(&reg, bundles[i].rx_cq_buf, 0);
+		b->rx_cq_cnt = bundles[i].cqe_cnt;
+
+		b->cq_idx = 0;
+		b->cq_pending = false;
 	}
-	free(mlxqs);
-	p->mlxq_count = hdr.mlxq_count;
+	free(bundles);
+	p->bundle_count = hdr.bundle_count;
 
 
 	/* initialize the table of physical page addresses */

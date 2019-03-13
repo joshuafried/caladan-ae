@@ -2,16 +2,9 @@
  * ioqueues.c
  */
 
-#include <fcntl.h>
-#include <pthread.h>
-#include <string.h>
-#include <sys/ipc.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <sys/un.h>
-#include <unistd.h>
 
-#include <base/hash.h>
 #include <base/log.h>
 #include <base/lrpc.h>
 #include <base/mem.h>
@@ -19,9 +12,6 @@
 #include <base/thread.h>
 
 #include <iokernel/shm.h>
-
-#include <net/ethernet.h>
-#include <net/mbuf.h>
 
 #include "defs.h"
 
@@ -37,30 +27,34 @@ struct io_bundle bundles[MAX_BUNDLES];
 unsigned int nr_bundles;
 
 // Could be a macro really, this is totally static :/
-static size_t calculate_shm_space(unsigned int thread_count)
+static size_t calculate_shm_space(void)
 {
 	size_t ret = 0, q;
 
 	// Header + queue_spec information
 	ret += sizeof(struct control_hdr);
-	ret += sizeof(struct thread_spec) * thread_count;
-	ret += sizeof(struct mlxq_spec) * NCPU;
+	ret += sizeof(struct thread_spec) * maxks;
+	ret += sizeof(struct bundle_spec) * nr_bundles;
 	ret = align_up(ret, CACHE_LINE_SIZE);
 
 	// RX command queues (wb is not included)
 	q = sizeof(struct lrpc_msg) * COMMAND_QUEUE_MCOUNT;
 	q = align_up(q, CACHE_LINE_SIZE);
-	ret += q * thread_count;
+	ret += q * maxks;
 
 	// TX command queues
 	q = sizeof(struct lrpc_msg) * COMMAND_QUEUE_MCOUNT;
 	q = align_up(q, CACHE_LINE_SIZE);
 	q += align_up(sizeof(uint32_t), CACHE_LINE_SIZE);
-	ret += q * thread_count;
+	ret += q * maxks;
 
 	// Shared queue pointers for the iokernel to use to determine busyness
 	q = align_up(sizeof(struct q_ptrs), CACHE_LINE_SIZE);
-	ret += q * thread_count;
+	ret += q * maxks;
+
+	q = align_up(sizeof(struct bundle_vars), CACHE_LINE_SIZE);
+	ret += q * nr_bundles;
+
 	ret = align_up(ret, PGSIZE_2MB);
 
 	ret += verbs_shm_space_needed(0, 0);
@@ -93,7 +87,8 @@ static void queue_pointers_alloc(struct shm_region *r,
 	*ptr += align_up(sizeof(struct q_ptrs), CACHE_LINE_SIZE);
 }
 
-static int ioqueues_shm_setup(unsigned int threads)
+
+static int ioqueues_shm_setup(void)
 {
 	struct shm_region *r = &iok.shared_region;
 	char *ptr;
@@ -105,7 +100,7 @@ static int ioqueues_shm_setup(unsigned int threads)
 		return ret;
 
 	/* map shared memory for control header, command queues, and egress pkts */
-	shm_len = calculate_shm_space(threads);
+	shm_len = calculate_shm_space();
 	r->len = shm_len;
 	r->base = mem_map_shm(iok.key, NULL, shm_len, PGSIZE_2MB, true);
 	if (r->base == MAP_FAILED) {
@@ -114,19 +109,27 @@ static int ioqueues_shm_setup(unsigned int threads)
 	}
 
 	/* set up queues in shared memory */
-	iok.thread_count = threads;
 	ptr = r->base;
 	ptr += sizeof(struct control_hdr);
-	ptr += sizeof(struct thread_spec) * threads;
-	ptr += sizeof(struct mlxq_spec) * NCPU;
+	iok.threads = (struct thread_spec *)ptr;
+	ptr += sizeof(struct thread_spec) * maxks;
+	iok.bundles = (struct bundle_spec *)ptr;
+	ptr += sizeof(struct bundle_spec) * nr_bundles;
 	ptr = (char *)align_up((uintptr_t)ptr, CACHE_LINE_SIZE);
 
-	for (i = 0; i < threads; i++) {
+	for (i = 0; i < maxks; i++) {
 		struct thread_spec *tspec = &iok.threads[i];
 		ioqueue_alloc(r, &tspec->rxcmdq, &ptr, COMMAND_QUEUE_MCOUNT, false);
 		ioqueue_alloc(r, &tspec->txcmdq, &ptr, COMMAND_QUEUE_MCOUNT, true);
 
 		queue_pointers_alloc(r, tspec, &ptr);
+	}
+
+	for (i = 0; i < nr_bundles; i++) {
+		struct bundle_spec *bspec = &iok.bundles[i];
+		bspec->b_vars = ptr_to_shmptr(r, ptr, sizeof(struct bundle_vars));
+		bundles[i].b_vars = (struct bundle_vars *)ptr;
+		ptr += align_up(sizeof(struct bundle_vars), CACHE_LINE_SIZE);
 	}
 
 	ptr = (char *)align_up((uintptr_t)ptr, PGSIZE_2MB);
@@ -156,22 +159,17 @@ int ioqueues_register_iokernel(void)
 	/* initialize control header */
 	hdr = r->base;
 	hdr->magic = CONTROL_HDR_MAGIC;
-	hdr->thread_count = iok.thread_count;
+	hdr->thread_count = maxks;
+	hdr->bundle_count = nr_bundles;
 
 	hdr->sched_cfg.priority = SCHED_PRIORITY_NORMAL;
-	hdr->sched_cfg.max_cores = iok.thread_count;
+	hdr->sched_cfg.max_cores = maxks;
 	hdr->sched_cfg.guaranteed_cores = guaranteedks;
 	hdr->sched_cfg.congestion_latency_us = 0;
 	hdr->sched_cfg.scaleout_latency_us = 0;
 
-	struct thread_spec *threads = (struct thread_spec *)((unsigned char *)r->base + sizeof(*hdr));
-	hdr->thread_specs = ptr_to_shmptr(r, threads, sizeof(*threads) * iok.thread_count);
-	memcpy(threads, iok.threads, sizeof(*threads) * iok.thread_count);
-
-	struct mlxq_spec *qs = (struct mlxq_spec *)((unsigned char *)threads + sizeof(*threads) * iok.thread_count);
-	hdr->mlxq_specs = ptr_to_shmptr(r, qs, sizeof(*qs) * iok.mlxq_count);
-	memcpy(qs, iok.qspec, sizeof(*qs) * iok.mlxq_count);
-	hdr->mlxq_count = iok.mlxq_count;
+	hdr->bundle_specs = ptr_to_shmptr(r, iok.bundles, sizeof(struct bundle_spec) * nr_bundles);
+	hdr->thread_specs = ptr_to_shmptr(r, iok.threads, sizeof(struct thread_spec) * maxks);
 
 	/* register with iokernel */
 	BUILD_ASSERT(strlen(CONTROL_SOCK_PATH) <= sizeof(addr.sun_path) - 1);
@@ -218,7 +216,7 @@ int ioqueues_init_thread(void)
 	pid_t tid = gettid();
 	struct shm_region *r = &iok.shared_region;
 
-	assert(myk()->kthread_idx < iok.thread_count);
+	assert(myk()->kthread_idx < maxks);
 	struct thread_spec *ts = &iok.threads[myk()->kthread_idx];
 	ts->tid = tid;
 
@@ -248,7 +246,7 @@ int ioqueues_init(void)
 	for (i = 0; i < nr_bundles; i++)
 		spin_lock_init(&bundles[i].lock);
 
-	ret = ioqueues_shm_setup(maxks);
+	ret = ioqueues_shm_setup();
 	if (ret) {
 		log_err("ioqueues_init: ioqueues_shm_setup() failed, ret = %d", ret);
 		return ret;

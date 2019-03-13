@@ -21,6 +21,20 @@ struct q_ptrs {
 	uint32_t rq_tail;
 };
 
+/* describes an io bundle */
+struct bundle_spec {
+	shmptr_t rx_cq_buf;
+	uint32_t cqe_cnt;
+	shmptr_t b_vars;
+};
+
+/* shared variables for an io bundle */
+struct bundle_vars {
+	uint32_t rx_cq_idx;
+	unsigned int timern;
+	uint64_t next_deadline_tsc;
+};
+
 /* describes a runtime kernel thread */
 struct thread_spec {
 	struct queue_spec	rxcmdq;
@@ -51,7 +65,7 @@ struct control_hdr {
 	unsigned int		magic;
 	unsigned int		thread_count;
 	struct sched_spec	sched_cfg;
-	unsigned int		mlxq_count;
+	unsigned int		bundle_count;
 	shmptr_t		thread_specs;
-	shmptr_t		mlxq_specs;
+	shmptr_t		bundle_specs;
 };

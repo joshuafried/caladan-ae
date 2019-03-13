@@ -8,7 +8,6 @@
 
 #include "defs.h"
 
-#define CORES_ADJUST_INTERVAL_US	5
 #define LOG_INTERVAL_US		(1000 * 1000)
 struct dataplane dp;
 
@@ -91,12 +90,11 @@ void dataplane_loop()
 		/* process a batch of commands from runtimes */
 		work_done |= commands_rx();
 
-		STAT_INC(BATCH_TOTAL, IOKERNEL_RX_BURST_SIZE);
+		STAT_INC(IOKERNEL_LOOPS, 1);
 
 #ifdef STATS
 		if (microtime() > next_log_time) {
 			print_stats();
-			dpdk_print_eth_stats();
 			next_log_time += LOG_INTERVAL_US;
 		}
 #endif

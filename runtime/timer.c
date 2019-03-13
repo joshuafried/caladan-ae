@@ -94,6 +94,13 @@ static void sift_down(struct timer_idx *heap, int i, int n)
 	}
 }
 
+static inline void update_iok_pointers(struct io_bundle *b)
+{
+	b->b_vars->timern = b->timern;
+	if (b->timern)
+		b->b_vars->next_deadline_tsc = b->timers[0].deadline_us * cycles_per_us + start_tsc;
+}
+
 
 
 /**
@@ -134,6 +141,7 @@ static void timer_start_locked(struct timer_entry *e, uint64_t deadline_us, stru
 	e->bundle = b;
 	sift_up(b->timers, i);
 	e->armed = true;
+	update_iok_pointers(b);
 }
 
 /**
@@ -184,6 +192,7 @@ bool timer_cancel(struct timer_entry *e)
 	b->timers[e->idx].e->idx = e->idx;
 	sift_up(b->timers, e->idx);
 	sift_down(b->timers, e->idx, b->timern);
+	update_iok_pointers(b);
 	spin_unlock_np(&b->lock);
 
 	return true;
@@ -255,6 +264,8 @@ int timer_gather(struct io_bundle *b, unsigned int budget, struct timer_entry **
 		}
 		entries[nr_timeouts++] = e;
 	}
+
+	update_iok_pointers(b);
 
 	return nr_timeouts;
 }

@@ -76,7 +76,7 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 			continue;
 
 		todo = min(budget_left, SOFTIRQ_MAX_BUDGET - recv_cnt);
-		rcvd = verbs_gather_rx(w->recv_reqs + recv_cnt, &bundles[j].rxq, todo);
+		rcvd = verbs_gather_rx(w->recv_reqs + recv_cnt, &bundles[j], todo);
 		recv_cnt += rcvd;
 
 		// TODO: budget me

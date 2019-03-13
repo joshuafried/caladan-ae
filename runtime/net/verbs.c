@@ -197,13 +197,14 @@ static uint32_t mlx5_get_rss_result(struct mlx5_cqe64 *cqe)
 	return ntoh32(*((uint32_t *)cqe + 3));
 }
 
-int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned int budget)
+int verbs_gather_rx(struct rx_net_hdr **hdrs, struct io_bundle *b, unsigned int budget)
 {
 	char *buf;
 	uint8_t opcode;
 	uint16_t wqe_idx;
 	int rx_cnt;
 
+	struct verbs_queue_rx *v = &b->rxq;
 	struct mlx5dv_rwq *wq = &v->rx_wq_dv;
 	struct mlx5dv_cq *cq = &v->rx_cq_dv;
 
@@ -241,7 +242,7 @@ int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned
 	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
 	BUG_ON(verbs_refill_rxqueue(v, rx_cnt));
 
-	*v->cq_head_ptr = v->cq_head;
+	b->b_vars->rx_cq_idx = v->cq_head;
 
 	return rx_cnt;
 
@@ -279,8 +280,6 @@ static int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *
 
 	udma_to_device_barrier();
 	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
-
-	*v->cq_head_ptr = v->cq_head;
 
 	return compl_cnt;
 }
@@ -321,9 +320,10 @@ static struct mlx5dv_ctx_allocators dv_allocators = {
 	.free = simple_free,
 };
 
-static int verbs_create_rx_queue(struct verbs_queue_rx *v)
+static int verbs_create_rx_queue(int index, struct io_bundle *b)
 {
 	int i, ret;
+	struct verbs_queue_rx *v = &b->rxq;
 
 	memset(v, 0, sizeof(*v));
 
@@ -393,17 +393,12 @@ static int verbs_create_rx_queue(struct verbs_queue_rx *v)
 		return -ENOMEM;
 
 	/* allocate a shared memory head pointer */
-	v->cq_head_ptr = simple_alloc(CACHE_LINE_SIZE, 0);
-	if (!v->cq_head_ptr)
-		return -ENOMEM;
-	*v->cq_head_ptr = 0;
+	b->b_vars->rx_cq_idx = 0;
 
 	/* send queue spec to iokernel */
-	struct mlxq_spec *qs = &iok.qspec[iok.mlxq_count++];
-	BUG_ON(iok.mlxq_count > NCPU);
-	qs->cq_buf = ptr_to_shmptr(&iok.shared_region, v->rx_cq_dv.buf,  v->rx_cq_dv.cqe_cnt * sizeof(struct mlx5_cqe64));
-	qs->cq_idx = ptr_to_shmptr(&iok.shared_region, v->cq_head_ptr, sizeof(*v->cq_head_ptr));
-	qs->cqe_cnt = v->rx_cq_dv.cqe_cnt;
+	struct bundle_spec *bs = &iok.bundles[index];
+	bs->rx_cq_buf = ptr_to_shmptr(&iok.shared_region, v->rx_cq_dv.buf,  v->rx_cq_dv.cqe_cnt * sizeof(struct mlx5_cqe64));
+	bs->cqe_cnt = v->rx_cq_dv.cqe_cnt;
 
 	/* set byte_count and lkey for all descriptors once */
 	struct mlx5dv_rwq *wq = &v->rx_wq_dv;
@@ -553,12 +548,11 @@ int verbs_init(void)
 	}
 
 	for (i = 0; i < nr_bundles; i++) {
-		struct verbs_queue_rx *v = &bundles[i].rxq;
-		ret = verbs_create_rx_queue(v);
+		ret = verbs_create_rx_queue(i, &bundles[i]);
 		if (ret)
 			return ret;
 
-		ind_tbl[i] = v->rx_wq;
+		ind_tbl[i] = bundles[i].rxq.rx_wq;
 	}
 
 	/* Create Receive Work Queue Indirection Table */
@@ -734,12 +728,6 @@ static int verbs_init_tx_queue(struct verbs_queue_tx *v)
 	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
 	if (!v->buffers)
 		return -ENOMEM;
-
-	/* allocate a shared memory head pointer */
-	v->cq_head_ptr = simple_alloc(CACHE_LINE_SIZE, 0);
-	if (!v->cq_head_ptr)
-		return -ENOMEM;
-	*v->cq_head_ptr = 0;
 
 	return 0;
 }

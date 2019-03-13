@@ -4,12 +4,6 @@
 #include <infiniband/mlx5dv.h>
 #include <infiniband/verbs.h>
 
-struct mlxq_spec {
-	shmptr_t cq_buf;
-	uint32_t cqe_cnt;
-	shmptr_t cq_idx;
-};
-
 static inline bool cq_is_empty(void *buf, uint32_t cqe_cnt, uint32_t cq_idx)
 {
 	struct mlx5_cqe64 *cqes = buf;

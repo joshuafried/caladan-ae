@@ -71,6 +71,9 @@ struct io_bundle {
 
 	spinlock_t lock;
 
+	/* cache line of variables shared with iokernel */
+	struct bundle_vars *b_vars;
+
 	/* ingress network queue */
 	struct verbs_queue_rx rxq;
 
@@ -258,9 +261,6 @@ stack_init_to_rsp_with_buf(struct stack *s, void **buf, size_t buf_len,
  * ioqueues
  */
 
-DECLARE_SPINLOCK(qlock);
-extern unsigned int nrqs;
-
 struct iokernel_control {
 	int fd;
 
@@ -271,10 +271,8 @@ struct iokernel_control {
 	size_t verbs_mem_len;
 
 	/* threads + other queues register themselves here */
-	unsigned int thread_count;
-	struct thread_spec threads[NCPU];
-	unsigned int mlxq_count;
-	struct mlxq_spec qspec[NCPU];
+	struct thread_spec *threads;
+	struct bundle_spec *bundles;
 };
 
 extern struct iokernel_control iok;

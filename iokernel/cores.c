@@ -640,9 +640,6 @@ struct thread *cores_add_core(struct proc *p)
 	if (p->active_thread_count == p->thread_count)
 		return NULL;
 
-	/* Cancel pending timers */
-	p->pending_timer = false;
-
 	/* pick a core to add and a thread to run on it */
 	core = pick_core_for_proc(p);
 	th = pick_thread_for_proc(p, core);
@@ -746,8 +743,11 @@ void cores_free_proc(struct proc *p)
 static bool cores_is_proc_congested(struct proc *p)
 {
 	struct thread *th;
+	struct bundle *b;
 	uint32_t rq_tail, rxq_tail, last_rq_head, last_rxq_head;
-	bool congested = false;
+	unsigned int timern;
+	uint64_t cur_tsc, next_deadline_tsc;
+	bool last_pending, congested = false;
 	int i;
 
 	for (i = 0; i < p->active_thread_count; i++) {
@@ -786,19 +786,47 @@ static bool cores_is_proc_congested(struct proc *p)
 		}
 	}
 
-	/* Check direct path queues */
-	for (i = 0; i < p->mlxq_count; i++) {
-		uint32_t cur_tail = ACCESS_ONCE(*p->mlxqs[i].cq_idx);
-		bool pending = !cq_is_empty(p->mlxqs[i].buf, p->mlxqs[i].cqe_cnt, cur_tail);
-		if (cur_tail == p->mlxqs[i].last_idx && pending && p->mlxqs[i].last_pending) {
-			congested = true;
-		}
-		p->mlxqs[i].last_idx = cur_tail;
-		p->mlxqs[i].last_pending = pending;
-	}
+	/* Check bundles for queued I/O */
+	cur_tsc = rdtsc();
+	for (i = 0; i < p->bundle_count; i++) {
+		b = &p->bundles[i];
 
-	if (p->pending_timer && microtime() >= p->deadline_us)
-		congested = true;
+		/* check mlx5 rxq */
+		last_rxq_head = b->cq_idx;
+		b->cq_idx = ACCESS_ONCE(b->b_vars->rx_cq_idx);
+
+		timern = ACCESS_ONCE(b->b_vars->timern);
+		next_deadline_tsc = ACCESS_ONCE(b->b_vars->next_deadline_tsc);
+
+		last_pending = b->cq_pending;
+		b->cq_pending = !cq_is_empty(b->rx_cq_buf, b->rx_cq_cnt, b->cq_idx);
+
+		/* fast path */
+		if (!p->active_thread_count && b->cq_pending) {
+			congested = true;
+			continue;
+		}
+
+		if (last_rxq_head == b->cq_idx && last_pending && b->cq_pending) {
+			congested = true;
+			continue;
+		}
+
+		/* check timer */
+		if (!timern || next_deadline_tsc > cur_tsc)
+			continue;
+
+		if (!p->active_thread_count) {
+			congested = true;
+			continue;
+		}
+
+		if (next_deadline_tsc + CORES_ADJUST_INTERVAL_US * cycles_per_us < cur_tsc) {
+			congested = true;
+			continue;
+		}
+
+	}
 
 	return congested;
 }

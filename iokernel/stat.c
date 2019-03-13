@@ -14,7 +14,7 @@ static const char *stat_names[] = {
 
 	"COMMANDS_PULLED",
 
-	"BATCH_TOTAL",
+	"IOKERNEL_LOOPS",
 	"RQ_GRANT",
 	"RX_GRANT",
 	"ADJUSTS",

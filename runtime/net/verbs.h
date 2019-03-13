@@ -21,7 +21,6 @@ struct verbs_queue_rx {
 	/* direct verbs cq */
 	struct mlx5dv_cq rx_cq_dv;
 	uint32_t cq_head;
-	uint32_t *cq_head_ptr; // head pointer will be in shared memory
 
 } __aligned(CACHE_LINE_SIZE);
 
@@ -38,7 +37,6 @@ struct verbs_queue_tx {
 	/* direct verbs cq */
 	struct mlx5dv_cq tx_cq_dv __aligned(CACHE_LINE_SIZE);
 	uint32_t cq_head;
-	uint32_t *cq_head_ptr; // head pointer will be in shared memory
 
 } __aligned(CACHE_LINE_SIZE);
 
@@ -82,10 +80,11 @@ static inline bool verbs_has_rx_packets(struct verbs_queue_rx *vq)
 }
 
 struct rx_net_hdr;
+struct io_bundle;
 
 void verbs_rx_completion(unsigned long completion_data);
 int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m);
-int verbs_gather_rx(struct rx_net_hdr **hdrs, struct verbs_queue_rx *v, unsigned int budget);
+int verbs_gather_rx(struct rx_net_hdr **hdrs, struct io_bundle *b, unsigned int budget);
 
 /* Initialization functions */
 size_t verbs_shm_space_needed(size_t rx_qs, size_t tx_qs);
