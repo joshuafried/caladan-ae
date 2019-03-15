@@ -76,7 +76,7 @@ static inline unsigned char *verbs_rx_alloc_buf(void)
  * WARNING: nrdesc must not exceed the number of free slots in the RXq
  * returns 0 on success, errno on error
  */
-static int verbs_refill_rxqueue(struct verbs_queue_rx *vq, int nrdesc)
+static inline int verbs_refill_rxqueue(struct verbs_queue_rx *vq, int nrdesc)
 {
 	unsigned int i;
 	uint32_t index;
@@ -105,6 +105,37 @@ static int verbs_refill_rxqueue(struct verbs_queue_rx *vq, int nrdesc)
 
 }
 
+static void verbs_init_tx_segment(struct verbs_queue_tx *v, unsigned int idx)
+{
+	int size;
+	struct mlx5_wqe_ctrl_seg *ctrl;
+	struct mlx5_wqe_eth_seg *eseg;
+	struct mlx5_wqe_data_seg *dpseg;
+	void *segment;
+
+	segment = v->tx_qp_dv.sq.buf + idx * v->tx_qp_dv.sq.stride;
+	ctrl = segment;
+	eseg = segment + sizeof(*ctrl);
+	dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
+
+	size = (sizeof(*ctrl) / 16) +
+	       (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
+	       sizeof(struct mlx5_wqe_data_seg) / 16;
+
+	/* set ctrl segment */
+	*(uint32_t *)(segment + 8) = 0;
+	ctrl->imm = 0;
+	ctrl->fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
+	ctrl->qpn_ds = htobe32(size | (v->tx_qp->qp_num << 8));
+
+	/* set eseg */
+	memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
+	eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
+
+	/* set dpseg */
+	dpseg->lkey = htobe32(mr_tx->lkey);
+}
+
 /*
  * verbs_transmit_one - send one mbuf
  * @v: queue to use
@@ -114,7 +145,7 @@ static int verbs_refill_rxqueue(struct verbs_queue_rx *vq, int nrdesc)
  */
 int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 {
-	int i, compl, size;
+	int i, compl = 0;
 	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
 	struct mbuf *mbs[SQ_CLEAN_MAX];
 	struct mlx5_wqe_ctrl_seg *ctrl;
@@ -137,25 +168,11 @@ int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m)
 	eseg = segment + sizeof(*ctrl);
 	dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
 
-	size = (sizeof(*ctrl) / 16) +
-	       (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
-	       sizeof(struct mlx5_wqe_data_seg) / 16;
-
-	/* set ctrl segment */
-	*(uint32_t *)(segment + 8) = 0;
-	ctrl->imm = 0;
-	ctrl->fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
 	ctrl->opmod_idx_opcode = htobe32(((v->sq_head & 0xffff) << 8) |
 					       MLX5_OPCODE_SEND);
-	ctrl->qpn_ds = htobe32(size | (v->tx_qp->qp_num << 8));
 
-	/* set eseg */
-	memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
-	eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
 
-	/* set dpseg */
 	dpseg->byte_count = htobe32(mbuf_length(m));
-	dpseg->lkey = htobe32(mr_tx->lkey);
 	dpseg->addr = htobe64((uint64_t)mbuf_data(m));
 
 	/* record buffer */
@@ -238,7 +255,6 @@ int verbs_gather_rx(struct rx_net_hdr **hdrs, struct io_bundle *b, unsigned int 
 	if (unlikely(!rx_cnt))
 		return rx_cnt;
 
-	udma_to_device_barrier();
 	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
 	BUG_ON(verbs_refill_rxqueue(v, rx_cnt));
 
@@ -275,10 +291,6 @@ static int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *
 		mbufs[compl_cnt] = load_acquire(&v->buffers[wqe_idx]);
 	}
 
-	if (unlikely(!compl_cnt))
-		return 0;
-
-	udma_to_device_barrier();
 	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
 
 	return compl_cnt;
@@ -647,7 +659,7 @@ int verbs_init(void)
 
 static int verbs_init_tx_queue(struct verbs_queue_tx *v)
 {
-	int ret;
+	int i, ret;
 
 	memset(v, 0, sizeof(*v));
 
@@ -728,6 +740,9 @@ static int verbs_init_tx_queue(struct verbs_queue_tx *v)
 	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
 	if (!v->buffers)
 		return -ENOMEM;
+
+	for (i = 0; i < v->tx_qp_dv.sq.wqe_cnt; i++)
+		verbs_init_tx_segment(v, i);
 
 	return 0;
 }
