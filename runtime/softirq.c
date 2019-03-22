@@ -42,7 +42,8 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 {
 	unsigned int recv_cnt = 0, join_cnt = 0, timeout_cnt = 0;
 	unsigned long *qs;
-	int j, budget_left, todo, rcvd;
+	int j, budget_left, todo, rcvd, nrqs;
+	struct io_bundle *b;
 
 	budget_left = min(budget, SOFTIRQ_MAX_BUDGET);
 	while (budget_left) {
@@ -64,25 +65,27 @@ static void softirq_gather_work(struct softirq_work *w, struct kthread *k,
 		}
 	}
 
-	qs = get_queues(k);
-	bitmap_for_each_set(qs, nr_bundles, j) {
+	qs = get_queues(k, &nrqs);
+	for (j = 0; j < nrqs; j++) {
+		b = &bundles[qs[j]];
+
 		if (!budget_left)
 			break;
 
-		if (!verbs_has_rx_packets(&bundles[j].rxq) && !timer_needed(&bundles[j]))
+		if (!verbs_has_rx_packets(&b->rxq) && !timer_needed(b))
 			continue;
 
-		if (!spin_try_lock(&bundles[j].lock))
+		if (!spin_try_lock(&b->lock))
 			continue;
 
 		todo = min(budget_left, SOFTIRQ_MAX_BUDGET - recv_cnt);
-		rcvd = verbs_gather_rx(w->recv_reqs + recv_cnt, &bundles[j], todo);
+		rcvd = verbs_gather_rx(w->recv_reqs + recv_cnt, b, todo);
 		recv_cnt += rcvd;
 
 		// TODO: budget me
-		timeout_cnt += timer_gather(&bundles[j], SOFTIRQ_MAX_BUDGET - timeout_cnt, w->timeouts + timeout_cnt);
+		timeout_cnt += timer_gather(b, SOFTIRQ_MAX_BUDGET - timeout_cnt, w->timeouts + timeout_cnt);
 
-		spin_unlock(&bundles[j].lock);
+		spin_unlock(&b->lock);
 	}
 
 	w->recv_cnt = recv_cnt;

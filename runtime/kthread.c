@@ -52,7 +52,8 @@ static DEFINE_BITMAP(core_awake, NCPU);
 
 static unsigned int preference_table[NCPU][MAX_BUNDLES];
 __thread uint64_t last_kthread_gen;
-__thread unsigned long cached_assignments[NCPU][div_up(MAX_BUNDLES,64)];
+__thread unsigned long cached_assignments[NCPU][MAX_BUNDLES];
+__thread unsigned long assignment_count[NCPU];
 
 
 
@@ -143,9 +144,6 @@ void kthread_detach(struct kthread *r)
 	if (unlikely(lrpc_get_cached_length(&r->txcmdq) > 0))
 		return;
 
-	/* this kthread may have pending completions */
-	if (nr_inflight_tx(&r->vq_tx) > 0)
-		return;
 
 	spin_lock(&klock);
 	assert(r != k);
@@ -310,22 +308,20 @@ static void compute_preferences(void)
 {
 	int i, j, q, phys_id, n = 0;
 
-	DEFINE_BITMAP(core_done, cpu_count);
 	DEFINE_BITMAP(q_done, nr_bundles);
+	DEFINE_BITMAP(phys_awake, cpu_count);
 
 	bitmap_init(q_done, nr_bundles, false);
-	memset(cached_assignments, 0, sizeof(cached_assignments));
+	bitmap_init(phys_awake, cpu_count, false);
+	memset(assignment_count, 0, sizeof(unsigned long) * cpu_count);
+
+	bitmap_for_each_set(core_awake, cpu_count, i) {
+		phys_id = min(i, cpu_map[i].sibling_core);
+		bitmap_set(phys_awake, phys_id);
+	}
 
 	while (true) {
-		bitmap_init(core_done, cpu_count, false);
-
-		bitmap_for_each_set(core_awake, cpu_count, i) {
-			phys_id = min(i, cpu_map[i].sibling_core);
-			if (bitmap_test(core_done, phys_id))
-				continue;
-
-			bitmap_set(core_done, phys_id);
-
+		bitmap_for_each_set(phys_awake, cpu_count, phys_id) {
 			j = 0;
 			do {
 				assert(j < nr_bundles);
@@ -333,7 +329,7 @@ static void compute_preferences(void)
 			} while (bitmap_test(q_done, q));
 
 			bitmap_set(q_done, q);
-			bitmap_set(cached_assignments[phys_id], q);
+			cached_assignments[phys_id][assignment_count[phys_id]++] = q;
 			if (++n == nr_bundles)
 				return;
 		}
@@ -341,16 +337,15 @@ static void compute_preferences(void)
 }
 
 
-unsigned long *__get_queues(struct kthread *k)
+unsigned long *__get_queues(struct kthread *k, int *nrqs)
 {
 	int phys_id;
 
-	if (unlikely(atomic64_read(&kthread_gen) != last_kthread_gen)) {
-		last_kthread_gen = atomic64_read(&kthread_gen);
-		compute_preferences();
-	}
+	last_kthread_gen = atomic64_read(&kthread_gen);
+	compute_preferences();
 
 	phys_id = min(k->curr_cpu, cpu_map[k->curr_cpu].sibling_core);
+	*nrqs = assignment_count[phys_id];
 	return cached_assignments[phys_id];
 }
 

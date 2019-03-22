@@ -495,17 +495,19 @@ static inline bool timer_needed(struct io_bundle *b)
 /* Queue shuffling support */
 extern atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
 extern __thread uint64_t last_kthread_gen;
-extern __thread unsigned long cached_assignments[NCPU][div_up(MAX_BUNDLES,64)];
-extern unsigned long *__get_queues(struct kthread *k);
+extern __thread unsigned long cached_assignments[NCPU][MAX_BUNDLES];
+extern __thread unsigned long assignment_count[NCPU];
+extern unsigned long *__get_queues(struct kthread *k, int *nrqs);
 
-static inline unsigned long *get_queues(struct kthread *k)
+static inline unsigned long *get_queues(struct kthread *k, int *nrqs)
 {
 	int phys_id;
 
 	if (unlikely(atomic64_read(&kthread_gen) != last_kthread_gen))
-		return __get_queues(k);
+		return __get_queues(k, nrqs);
 
 	phys_id = min(k->curr_cpu, cpu_map[k->curr_cpu].sibling_core);
+	*nrqs = assignment_count[phys_id];
 	return cached_assignments[phys_id];
 }
 
@@ -515,11 +517,10 @@ static inline struct io_bundle *get_first_bundle(struct kthread *k)
 	unsigned long *qs;
 
 	assert_preempt_disabled();
-	qs = get_queues(k);
-	pos = bitmap_find_next_set(qs, nr_bundles, 0);
-	BUG_ON(pos == nr_bundles);
+	qs = get_queues(k, &pos);
+	BUG_ON(pos == 0);
 
-	return &bundles[pos];
+	return &bundles[qs[0]];
 }
 
 /*
