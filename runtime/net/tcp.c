@@ -586,6 +586,9 @@ struct netaddr tcp_remote_addr(tcpconn_t *c)
 static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 			     struct list_head *q, struct mbuf **mout)
 {
+	uint64_t start_tsc = rdtsc();
+	unsigned int start_cpu = myk()->curr_cpu;
+	bool blocked = false;
 	struct mbuf *m;
 	size_t readlen = 0;
 
@@ -593,8 +596,17 @@ static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 	spin_lock_np(&c->lock);
 
 	/* block until there is an actionable event */
-	while (!c->rx_closed && (c->rx_exclusive || list_empty(&c->rxq)))
+	while (!c->rx_closed && (c->rx_exclusive || list_empty(&c->rxq))) {
 		waitq_wait(&c->rx_wq, &c->lock);
+		blocked = true;
+	}
+
+	if (blocked && rdtsc() - start_tsc < cycles_per_us * 50UL) {
+		STAT(TCP_LOCK)++;
+		if (!cores_have_affinity(myk()->curr_cpu, start_cpu))
+			STAT(TCP_LOCK_STEAL)++;
+	}
+
 
 	/* is the socket closed? */
 	if (c->rx_closed) {

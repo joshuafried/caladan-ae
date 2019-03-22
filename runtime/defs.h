@@ -322,6 +322,9 @@ enum {
 	STAT_RX_TCP_OUT_OF_ORDER,
 	STAT_RX_TCP_TEXT_CYCLES,
 
+	STAT_TCP_LOCK,
+	STAT_TCP_LOCK_STEAL,
+
 	/* total number of counters */
 	STAT_NR,
 };
@@ -423,6 +426,17 @@ struct cpu_record {
 BUILD_ASSERT(sizeof(struct cpu_record) == CACHE_LINE_SIZE);
 
 extern struct cpu_record cpu_map[NCPU];
+
+/**
+ * cores_have_affinity - returns true if two cores have cache affinity
+ * @cpua: the first core
+ * @cpub: the second core
+ */
+static inline bool cores_have_affinity(unsigned int cpua, unsigned int cpub)
+{
+	return cpua == cpub ||
+	       cpu_map[cpua].sibling_core == cpub;
+}
 
 /**
  * STAT - gets a stat counter

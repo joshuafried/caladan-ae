@@ -47,17 +47,6 @@ static __thread uint64_t last_watchdog_tsc;
 thread_t *thread_self(void);
 
 /**
- * cores_have_affinity - returns true if two cores have cache affinity
- * @cpua: the first core
- * @cpub: the second core
- */
-static inline bool cores_have_affinity(unsigned int cpua, unsigned int cpub)
-{
-	return cpua == cpub ||
-	       cpu_map[cpua].sibling_core == cpub;
-}
-
-/**
  * jmp_thread - runs a thread, popping its trap frame
  * @th: the thread to run
  *
