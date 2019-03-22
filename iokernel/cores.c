@@ -747,7 +747,7 @@ static bool cores_is_proc_congested(struct proc *p)
 	uint32_t rq_tail, rxq_tail, last_rq_head, last_rxq_head;
 	unsigned int timern;
 	uint64_t cur_tsc, next_deadline_tsc;
-	bool last_pending, congested = false;
+	bool last_pending, congested = false, bundle_congestion = false, inflight_wakeup = false;
 	int i;
 
 	for (i = 0; i < p->active_thread_count; i++) {
@@ -765,6 +765,7 @@ static bool cores_is_proc_congested(struct proc *p)
 		if (congested)
 			continue;
 
+		inflight_wakeup |= th->waking;
 		/* if the thread just woke up, give it a pass this round */
 		if (th->waking) {
 			th->waking = false;
@@ -808,7 +809,7 @@ static bool cores_is_proc_congested(struct proc *p)
 		}
 
 		if (last_rxq_head == b->cq_idx && last_pending && b->cq_pending) {
-			congested = true;
+			bundle_congestion = true;
 			continue;
 		}
 
@@ -822,13 +823,15 @@ static bool cores_is_proc_congested(struct proc *p)
 		}
 
 		if (next_deadline_tsc + CORES_ADJUST_INTERVAL_US * cycles_per_us < cur_tsc) {
-			congested = true;
+			bundle_congestion = true;
 			continue;
 		}
 
 	}
 
-	return congested;
+	bundle_congestion &= !inflight_wakeup;
+
+	return congested | bundle_congestion;
 }
 
 /*
