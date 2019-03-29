@@ -192,12 +192,10 @@ static bool steal_work(struct kthread *l, struct kthread *r)
 	if (th)
 		goto done;
 
-	/* check for softirqs */
-	th = softirq_run_thread(r, RUNTIME_SOFTIRQ_BUDGET);
-	if (th) {
-		STAT(SOFTIRQS_STOLEN)++;
-		goto done;
-	}
+	/* check for lrpc cmd messages */
+	if (!lrpc_empty(&r->rxcmdq))
+		th = softirq_steal_lrpc(r, RUNTIME_SOFTIRQ_BUDGET);
+
 
 done:
 	/* either enqueue the stolen work or detach the kthread */
@@ -213,14 +211,14 @@ done:
 	return th != NULL;
 }
 
-static __noinline struct thread *do_watchdog(struct kthread *l)
+static __noinline struct thread *do_watchdog(void)
 {
 	thread_t *th;
 
-	assert_spin_lock_held(&l->lock);
+	assert_spin_lock_held(&myk()->lock);
 
 	/* then check the network queues */
-	th = softirq_run_thread(l, RUNTIME_SOFTIRQ_BUDGET);
+	th = softirq_run_local(RUNTIME_SOFTIRQ_BUDGET);
 	if (th) {
 		STAT(SOFTIRQS_LOCAL)++;
 		return th;
@@ -228,6 +226,8 @@ static __noinline struct thread *do_watchdog(struct kthread *l)
 
 	return NULL;
 }
+
+thread_t *softirq_steal_bundle(struct kthread *k, unsigned int budget);
 
 /* the main scheduler routine, decides what to run next */
 static __noreturn __noinline void schedule(void)
@@ -266,7 +266,7 @@ static __noreturn __noinline void schedule(void)
 	    unlikely(start_tsc - last_watchdog_tsc >
 	             cycles_per_us * RUNTIME_WATCHDOG_US)) {
 		last_watchdog_tsc = start_tsc;
-		th = do_watchdog(l);
+		th = do_watchdog();
 		if (th)
 			goto done;
 	}
@@ -284,7 +284,7 @@ again:
 	l->rq_head = l->rq_tail = 0;
 
 	/* then check for local softirqs */
-	th = softirq_run_thread(l, RUNTIME_SOFTIRQ_BUDGET);
+	th = softirq_run_local(RUNTIME_SOFTIRQ_BUDGET);
 	if (th) {
 		STAT(SOFTIRQS_LOCAL)++;
 		goto done;
@@ -303,11 +303,23 @@ again:
 	if (r != l && steal_work(l, r))
 		goto done;
 
-	/* finally try to steal from every kthread */
+	/* try to steal from every kthread */
 	for (i = 0; i < last_nrks; i++) {
 		int pos = (i + l->kthread_idx) % last_nrks;
 		if (ks[pos] != l && steal_work(l, ks[pos]))
 			goto done;
+	}
+
+	/* try to steal from every bundle */
+	for (i = 0; i < last_nrks; i++) {
+		int pos = (i + l->kthread_idx) % last_nrks;
+		if (ks[pos] != l) {
+			th = softirq_steal_bundle(ks[pos], RUNTIME_SOFTIRQ_BUDGET);
+			if (th) {
+				STAT(SOFTIRQS_STOLEN)++;
+				goto done;
+			}
+		}
 	}
 
 	/* keep trying to find work until the polling timeout expires */

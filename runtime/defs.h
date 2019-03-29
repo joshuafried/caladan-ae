@@ -435,7 +435,10 @@ extern struct cpu_record cpu_map[NCPU];
 
 extern bool disable_watchdog;
 
-extern thread_t *softirq_run_thread(struct kthread *k, unsigned int budget);
+extern thread_t *softirq_steal_bundle(struct kthread *k, unsigned int budget);
+extern thread_t *softirq_steal_lrpc(struct kthread *k, unsigned int budget);
+
+extern thread_t *softirq_run_local(unsigned int budget);
 extern void softirq_run(unsigned int budget);
 
 
