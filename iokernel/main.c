@@ -8,7 +8,7 @@
 
 #include "defs.h"
 
-#define LOG_INTERVAL_US		(1000 * 1000)
+#define LOG_INTERVAL_US		(1000UL * 1000UL)
 struct dataplane dp;
 
 struct init_entry {
@@ -59,9 +59,9 @@ void dataplane_loop()
 {
 	bool work_done;
 #ifdef STATS
-	uint64_t next_log_time = microtime();
+	uint64_t next_log_time = rdtsc();
 #endif
-	uint64_t now, last_time = microtime();
+	uint64_t now, last_time = rdtsc();
 
 	/*
 	 * Check that the port is on the same NUMA node as the polling thread
@@ -79,10 +79,10 @@ void dataplane_loop()
 		if (!work_done)
 			dp_clients_rx_control_lrpcs();
 
-		now = microtime();
+		now = rdtsc();
 
 		/* adjust core assignments */
-		if (now - last_time > CORES_ADJUST_INTERVAL_US) {
+		if (now - last_time > CORES_ADJUST_INTERVAL_US * cycles_per_us) {
 			cores_adjust_assignments();
 			last_time = now;
 		}
@@ -93,9 +93,9 @@ void dataplane_loop()
 		STAT_INC(IOKERNEL_LOOPS, 1);
 
 #ifdef STATS
-		if (microtime() > next_log_time) {
+		if (now > next_log_time) {
 			print_stats();
-			next_log_time += LOG_INTERVAL_US;
+			next_log_time += LOG_INTERVAL_US * cycles_per_us;
 		}
 #endif
 	}
