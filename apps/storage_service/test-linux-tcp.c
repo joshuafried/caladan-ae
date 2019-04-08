@@ -24,7 +24,7 @@ static int str_to_ip(const char *str, uint32_t *addr)
 	return 0;
 }
 
-#define SERVER_IP_ADDR "192.168.1.7"
+#define SERVER_IP_ADDR "192.168.1.4"
 
 int main(int argc, char *argv[])
 {
