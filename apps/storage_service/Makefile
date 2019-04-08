@@ -37,7 +37,7 @@ SPDK_LIBS += -lrt -luuid -lcrypto -lnuma -ldl
 
 librt_libs = $(BASEPATH)/libruntime.a $(BASEPATH)/libnet.a $(BASEPATH)/libbase.a
 
-src = server.c test-linux-tcp.c
+src = server.c test-shenango-tcp.c
 obj = $(src:.c=.o)
 
 all: test server
@@ -52,8 +52,8 @@ all: test server
 server: server.o
 	$(LD) $(LDFLAGS) -o $@ $< $(librt_libs) $(SPDK_LIBS) -lpthread
 
-test: test-linux-tcp.o 
-	$(LD) $(LDFLAGS) -o $@ $< 
+test: test-shenango-tcp.o 
+	$(LD) $(LDFLAGS) -o $@ $< $(librt_libs) $(SPDK_LIBS) -lpthread
 
 clean:
 	rm -f $(obj)
