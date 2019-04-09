@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <base/limits.h>
 #include <base/types.h>
 #include <base/compiler.h>
 #include <runtime/preempt.h>
@@ -46,6 +47,13 @@ inline int get_maxks(void)
 {
 	extern unsigned int maxks;
 	return maxks;
+}
+
+static inline int get_current_affinity(void)
+{
+	extern __thread unsigned int curr_phys_cpu;
+	extern unsigned int preference_table[NCPU][NCPU];
+	return preference_table[curr_phys_cpu][0];
 }
 
 /* main initialization */

@@ -62,7 +62,7 @@ BUILD_ASSERT(SQ_CLEAN_THRESH <= SQ_NUM_DESC);
  (align_up(nrqs * RQ_NUM_DESC * 2UL * MBUF_DEFAULT_LEN, PGSIZE_2MB))
 #define POW_TWO_ROUND_UP(x) \
  ((x) <= 1UL ? 1UL : 1UL << (64 - __builtin_clzl((x) - 1)))
-#define NR_BUNDLES(maxks, guaranteedks) (POW_TWO_ROUND_UP(maxks))
+#define NR_BUNDLES(maxks, guaranteedks) (POW_TWO_ROUND_UP(maxks) / 2)
 
 #define MLX5_TCP_RSS 1
 
@@ -501,34 +501,44 @@ static inline bool timer_needed(struct io_bundle *b)
 
 
 /* Queue shuffling support */
-extern atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
-extern __thread uint64_t last_kthread_gen;
-extern __thread unsigned long cached_assignments[NCPU][MAX_BUNDLES];
-extern __thread unsigned long assignment_count[NCPU];
-extern unsigned long *__get_queues(struct kthread *k, int *nrqs);
+extern unsigned int bundle_assignments[MAX_BUNDLES];
+extern unsigned int preference_table[NCPU][MAX_BUNDLES];
 
-static inline unsigned long *get_queues(struct kthread *k, int *nrqs)
+/**
+ * get_core_id - returns core ID number used for bundle assignments
+ * for a given kthread
+ * @k: the kthread
+ */
+static inline unsigned int get_core_id(struct kthread *k)
 {
-	int phys_id;
+	return min(k->curr_cpu, cpu_map[k->curr_cpu].sibling_core);
+}
 
-	if (unlikely(atomic64_read(&kthread_gen) != last_kthread_gen))
-		return __get_queues(k, nrqs);
+/**
+ * update_assignments - recomputes bundle assignments.
+ *
+ * checks for changes to active kthread configuration,
+ * recomputing only if necessary
+ *
+ */
+static inline void update_assignments(void)
+{
+	extern atomic64_t kthread_gen;
+	extern uint64_t kthread_assignment_gen;
+	extern void __update_assignments(void);
 
-	phys_id = min(k->curr_cpu, cpu_map[k->curr_cpu].sibling_core);
-	*nrqs = assignment_count[phys_id];
-	return cached_assignments[phys_id];
+	if (unlikely(load_acquire(&kthread_assignment_gen) != atomic64_read(&kthread_gen)))
+		__update_assignments();
 }
 
 static inline struct io_bundle *get_first_bundle(struct kthread *k)
 {
-	int pos;
-	unsigned long *qs;
+	unsigned long id;
 
 	assert_preempt_disabled();
-	qs = get_queues(k, &pos);
-	BUG_ON(pos == 0);
 
-	return &bundles[qs[0]];
+	id = get_core_id(k);
+	return &bundles[preference_table[id][0]];
 }
 
 /*

@@ -91,23 +91,26 @@ static unsigned int poll_lrpc(struct softirq_work *w, struct kthread *k,
 static void softirq_gather_bundles(struct softirq_work *w, struct kthread *k,
 				unsigned int budget)
 {
-	unsigned long *qs;
-	int j, budget_left, nrqs;
-	struct io_bundle *b;
+	unsigned long id;
+	int j, budget_left, qidx;
 
 	assert_preempt_disabled();
 
 	budget_left = min(budget, SOFTIRQ_MAX_BUDGET);
-	qs = get_queues(k, &nrqs);
+	id = get_core_id(k);
 
+	update_assignments();
 
-	for (j = 0; j < nrqs; j++) {
-		b = &bundles[qs[(j + k->pos_vq_rx) % nrqs]];
+	for (j = 0; j < nr_bundles; j++) {
 
 		if (!budget_left)
 			break;
 
-		budget_left -= poll_bundle(w, b, budget_left / (nrqs - j));
+		qidx = (j + k->pos_vq_rx) & (nr_bundles - 1);
+		if (ACCESS_ONCE(bundle_assignments[qidx]) != id)
+			continue;
+
+		budget_left -= poll_bundle(w, &bundles[qidx], budget_left);
 	}
 
 	k->pos_vq_rx += j;
