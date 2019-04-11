@@ -296,33 +296,14 @@ static int verbs_gather_completions(struct mbuf **mbufs, struct verbs_queue_tx *
 	return compl_cnt;
 }
 
-size_t verbs_shm_space_needed(size_t rx_qs, size_t tx_qs)
-{
-	// TODO: precisely calculate
-	return 12 * PGSIZE_2MB;
-}
-
 /*
  * simple_alloc - simple memory allocator for internal MLX5 structures
  */
 static void *simple_alloc(size_t size, void *priv_data)
 {
-	static size_t nxt;
-	static DEFINE_SPINLOCK(alloc_lock);
-
-	void *p = NULL;
-
-	spin_lock(&alloc_lock);
-
-	if (nxt + size > iok.verbs_mem_len)
-		goto out;
-
-	p = (unsigned char *)iok.verbs_mem + nxt;
-	nxt += align_up(size, PGSIZE_4KB);
-
-out:
-	spin_unlock(&alloc_lock);
-	return p;
+	void *out;
+	iok_shm_alloc(size, PGSIZE_4KB, &out);
+	return out;
 }
 
 static void simple_free(void *ptr, void *priv_data) {}

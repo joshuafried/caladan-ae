@@ -85,6 +85,3 @@ struct io_bundle;
 void verbs_rx_completion(unsigned long completion_data);
 int verbs_transmit_one(struct verbs_queue_tx *v, struct mbuf *m);
 int verbs_gather_rx(struct rx_net_hdr **hdrs, struct io_bundle *b, unsigned int budget);
-
-/* Initialization functions */
-size_t verbs_shm_space_needed(size_t rx_qs, size_t tx_qs);

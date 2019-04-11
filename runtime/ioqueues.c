@@ -19,123 +19,89 @@
 
 struct iokernel_control iok;
 
-/* the egress buffer pool must be large enough to fill all the TXQs entirely */
-
-struct iokernel_control iok;
-
 struct io_bundle bundles[MAX_BUNDLES];
 unsigned int nr_bundles;
 
-// Could be a macro really, this is totally static :/
-static size_t calculate_shm_space(void)
+/* coarse-grained simple allocator for iokernel shm region */
+/* all allocations are on cache line boundaries */
+shmptr_t iok_shm_alloc(size_t size, size_t alignment, void **out)
 {
-	size_t ret = 0, q;
+	static DEFINE_SPINLOCK(shmlock);
+	static size_t allocated;
+	struct shm_region *r = &iok.shared_region;
+	void *p;
 
-	// Header + queue_spec information
-	ret += sizeof(struct control_hdr);
-	ret += sizeof(struct thread_spec) * maxks;
-	ret += sizeof(struct bundle_spec) * nr_bundles;
-	ret = align_up(ret, CACHE_LINE_SIZE);
-
-	// RX command queues (wb is not included)
-	q = sizeof(struct lrpc_msg) * COMMAND_QUEUE_MCOUNT;
-	q = align_up(q, CACHE_LINE_SIZE);
-	ret += q * maxks;
-
-	// TX command queues
-	q = sizeof(struct lrpc_msg) * COMMAND_QUEUE_MCOUNT;
-	q = align_up(q, CACHE_LINE_SIZE);
-	q += align_up(sizeof(uint32_t), CACHE_LINE_SIZE);
-	ret += q * maxks;
-
-	// Shared queue pointers for the iokernel to use to determine busyness
-	q = align_up(sizeof(struct q_ptrs), CACHE_LINE_SIZE);
-	ret += q * maxks;
-
-	q = align_up(sizeof(struct bundle_vars), CACHE_LINE_SIZE);
-	ret += q * nr_bundles;
-
-	ret = align_up(ret, PGSIZE_2MB);
-
-	ret += verbs_shm_space_needed(0, 0);
-
-	return ret;
-}
-
-static void ioqueue_alloc(struct shm_region *r, struct queue_spec *q,
-			  char **ptr, size_t msg_count, bool alloc_wb)
-{
-	q->msg_buf = ptr_to_shmptr(r, *ptr, sizeof(struct lrpc_msg) * msg_count);
-	*ptr += align_up(sizeof(struct lrpc_msg) * msg_count, CACHE_LINE_SIZE);
-
-	if (alloc_wb) {
-		q->wb = ptr_to_shmptr(r, *ptr, sizeof(uint32_t));
-		*ptr += align_up(sizeof(uint32_t), CACHE_LINE_SIZE);
+	spin_lock(&shmlock);
+	if (!iok.shared_region.base) {
+		r->base = mem_map_shm(iok.key, NULL, 2 * PGSIZE_2MB, PGSIZE_2MB, true);
+		r->len = PGSIZE_2MB * 2;
+		BUG_ON(r->base == MAP_FAILED);
 	}
 
-	q->msg_count = msg_count;
+	if (!alignment)
+		alignment = CACHE_LINE_SIZE;
+
+	allocated = align_up(allocated, alignment);
+	p = r->base + allocated;
+	allocated = align_up(allocated + size, CACHE_LINE_SIZE);
+
+	// TODO: it is difficult to support remapping of shared huge-pages
+	BUG_ON(allocated > iok.shared_region.len);
+
+	spin_unlock(&shmlock);
+
+	if (out)
+		*out = p;
+
+	return ptr_to_shmptr(r, p, size);
 }
 
-static void queue_pointers_alloc(struct shm_region *r,
-		struct thread_spec *tspec, char **ptr)
+static void ioqueue_alloc(struct queue_spec *q,
+			  size_t msg_count, bool alloc_wb)
+{
+	q->msg_buf = iok_shm_alloc(sizeof(struct lrpc_msg) * msg_count, 0, NULL);
+	q->msg_count = msg_count;
+
+	if (alloc_wb)
+		q->wb = iok_shm_alloc(sizeof(uint32_t), 0, NULL);
+}
+
+static void queue_pointers_alloc(struct thread_spec *tspec)
 {
 	/* set wb for rxcmdq */
-	tspec->rxcmdq.wb = ptr_to_shmptr(r, *ptr, sizeof(struct q_ptrs));
-
-	tspec->q_ptrs = ptr_to_shmptr(r, *ptr, sizeof(struct q_ptrs));
-	*((uint32_t *) *ptr) = 0;
-	*ptr += align_up(sizeof(struct q_ptrs), CACHE_LINE_SIZE);
+	tspec->rxcmdq.wb = iok_shm_alloc(sizeof(struct q_ptrs), 0, NULL);
+	tspec->q_ptrs = iok_shm_alloc(sizeof(struct q_ptrs), 0, NULL);
 }
 
 
 static int ioqueues_shm_setup(void)
 {
-	struct shm_region *r = &iok.shared_region;
-	char *ptr;
 	int i, ret;
-	size_t shm_len;
+	struct control_hdr *hdr;
 
 	ret = fill_random_bytes(&iok.key, sizeof(iok.key));
 	if (ret)
 		return ret;
 
-	/* map shared memory for control header, command queues, and egress pkts */
-	shm_len = calculate_shm_space();
-	r->len = shm_len;
-	r->base = mem_map_shm(iok.key, NULL, shm_len, PGSIZE_2MB, true);
-	if (r->base == MAP_FAILED) {
-		log_err("control_setup: mem_map_shm() failed");
-		return -1;
-	}
+	/* control header must be first in shm region */
+	iok_shm_alloc(sizeof(struct control_hdr), 0, (void **)&hdr);
+	BUG_ON(hdr != iok.shared_region.base);
 
-	/* set up queues in shared memory */
-	ptr = r->base;
-	ptr += sizeof(struct control_hdr);
-	iok.threads = (struct thread_spec *)ptr;
-	ptr += sizeof(struct thread_spec) * maxks;
-	iok.bundles = (struct bundle_spec *)ptr;
-	ptr += sizeof(struct bundle_spec) * nr_bundles;
-	ptr = (char *)align_up((uintptr_t)ptr, CACHE_LINE_SIZE);
+	iok_shm_alloc(sizeof(struct thread_spec) * maxks, 0, (void **)&iok.threads);
+	iok_shm_alloc(sizeof(struct bundle_spec) * nr_bundles, 0, (void **)&iok.bundles);
 
 	for (i = 0; i < maxks; i++) {
 		struct thread_spec *tspec = &iok.threads[i];
-		ioqueue_alloc(r, &tspec->rxcmdq, &ptr, COMMAND_QUEUE_MCOUNT, false);
-		ioqueue_alloc(r, &tspec->txcmdq, &ptr, COMMAND_QUEUE_MCOUNT, true);
+		ioqueue_alloc(&tspec->rxcmdq, COMMAND_QUEUE_MCOUNT, false);
+		ioqueue_alloc(&tspec->txcmdq, COMMAND_QUEUE_MCOUNT, true);
 
-		queue_pointers_alloc(r, tspec, &ptr);
+		queue_pointers_alloc(tspec);
 	}
 
 	for (i = 0; i < nr_bundles; i++) {
 		struct bundle_spec *bspec = &iok.bundles[i];
-		bspec->b_vars = ptr_to_shmptr(r, ptr, sizeof(struct bundle_vars));
-		bundles[i].b_vars = (struct bundle_vars *)ptr;
-		ptr += align_up(sizeof(struct bundle_vars), CACHE_LINE_SIZE);
+		bspec->b_vars = iok_shm_alloc(sizeof(struct bundle_vars), 0, (void **)&bundles[i].b_vars);
 	}
-
-	ptr = (char *)align_up((uintptr_t)ptr, PGSIZE_2MB);
-	iok.verbs_mem_len = verbs_shm_space_needed(0, 0); // FIXME
-	ptr_to_shmptr(r, ptr, iok.verbs_mem_len);
-	iok.verbs_mem = ptr;
 
 	return 0;
 }
@@ -221,10 +187,12 @@ int ioqueues_init_thread(void)
 	ts->tid = tid;
 
 	ret = shm_init_lrpc_in(r, &ts->rxcmdq, &myk()->rxcmdq);
-	BUG_ON(ret);
+	if (ret)
+		return ret;
 
 	ret = shm_init_lrpc_out(r, &ts->txcmdq, &myk()->txcmdq);
-	BUG_ON(ret);
+	if (ret)
+		return ret;
 
 	myk()->q_ptrs = (struct q_ptrs *) shmptr_to_ptr(r, ts->q_ptrs,
 			sizeof(uint32_t));

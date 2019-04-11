@@ -268,8 +268,6 @@ struct iokernel_control {
 	/* shared memory setup */
 	mem_key_t key;
 	struct shm_region	shared_region;
-	void *verbs_mem;
-	size_t verbs_mem_len;
 
 	/* threads + other queues register themselves here */
 	struct thread_spec *threads;
@@ -277,6 +275,8 @@ struct iokernel_control {
 };
 
 extern struct iokernel_control iok;
+extern shmptr_t iok_shm_alloc(size_t size, size_t alignment, void **out);
+
 
 
 /*
