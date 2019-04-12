@@ -37,7 +37,8 @@ static int cpu_siblings[NCPU];
 
 /* ksched interface */
 static int ksched_fd;
-static struct ksched_wake_req *wake_reqs;
+static struct ksched_preempt_req *preempt_reqs;
+static struct ksched_shm_percpu *ksched_shm;
 
 
 unsigned int get_nr_avail_cores(void)
@@ -69,6 +70,10 @@ struct core {
 	struct thread	*current;
 	struct thread	*prev;
 	struct thread	*next; /* if non-NULL, thread that preempted this core */
+
+	struct lrpc_chan_in cmdq_in;
+	struct lrpc_chan_out cmdq_out;
+	unsigned long cached_gen;
 };
 
 static struct core core_history[NCPU];
@@ -84,21 +89,23 @@ static inline bool core_is_preempting(unsigned int core)
 
 static void wake_single(struct thread *th, int core, bool preempt)
 {
-	struct ksched_wakeup *w = &wake_reqs->wakeups[wake_reqs->nr++];
-	assert(wake_reqs->nr <= NCPU);
-	w->next_tid = th->tid;
-	w->cpu = core;
-	w->preempt = preempt;
+
+	while (unlikely(!lrpc_send(&core_history[core].cmdq_out, KSCHED_RUN_NEXT, th->tid)))
+		WARN();
+	store_release(&ksched_shm[core].gen, ++core_history[core].cached_gen);
+
+	if (preempt)
+		preempt_reqs->cpus[preempt_reqs->nr++] = core;
 }
 
 void flush_wake_requests(void)
 {
-	if (!wake_reqs->nr)
+	if (!preempt_reqs->nr)
 		return;
 
-	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_WAKE, wake_reqs));
+	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_PREEMPT, preempt_reqs));
 
-	wake_reqs->nr = 0;
+	preempt_reqs->nr = 0;
 }
 
 
@@ -561,15 +568,10 @@ bool cores_park_kthread(struct thread *th, bool force)
 
 	assert(kthread < NCPU);
 
-	/* We missed an earlier park message, ignore this */
-	if (th->ooo_preempt > 0) {
-		th->ooo_preempt--;
-		return true;
-	}
-
 	/* make sure this core and kthread are currently reserved */
 	assert(!bitmap_test(avail_cores, core));
 	assert(!bitmap_test(p->available_threads, kthread));
+	assert(core_history[core].current == th);
 
 #if 0
 	/* check for race conditions with the runtime */
@@ -585,20 +587,8 @@ bool cores_park_kthread(struct thread *th, bool force)
 
 	thread_cede(th);
 	if (core_is_preempting(core)) {
-
-		/* We may receive the preemptee's park message before the preemptor's */
-		bool ooo_park_msg = (th == core_history[core].next);
 		core_finish_preempt(core);
-
-		if (!ooo_park_msg)
-			/* preemptor is now running on this core */
-			return true;
-
-		/* Next park message from preempted thread should have no effect */
-		core_history[core].prev->ooo_preempt++;
-
-		/* Mark preempted thread as usable as well */
-		thread_cede(core_history[core].prev);
+		return true;
 	}
 
 #if 0
@@ -851,6 +841,34 @@ static bool cores_is_proc_congested(struct proc *p)
 	return congested | bundle_congestion;
 }
 
+bool poll_core_queues(void)
+{
+	int cpu;
+	bool work_done = false;
+	uint64_t cmd;
+	unsigned long payload;
+
+	bitmap_for_each_set(online_cores, NCPU, cpu) {
+		while (lrpc_recv(&core_history[cpu].cmdq_in, &cmd, &payload)) {
+			struct thread *t = core_history[cpu].current;
+			switch (cmd) {
+				case TXCMD_PARKED:
+					/* notify another kthread if the park was involuntary */
+					if (cores_park_kthread(t, false))
+						rx_send_to_runtime(t->p, 0, RX_JOIN, payload);
+					break;
+				default:
+					BUG();
+			}
+			work_done = true;
+		}
+	}
+
+	flush_wake_requests();
+
+	return work_done;
+}
+
 /*
  * Rebalances the allocation of cores to runtimes. Grants more cores to
  * runtimes that would benefit from them.
@@ -896,7 +914,7 @@ void cores_adjust_assignments(void)
  */
 static int ksched_init(void)
 {
-	int ret;
+	int ret, cpu;
 
 	ksched_fd = open("/dev/ksched", O_RDWR);
 	if (ksched_fd < 0)
@@ -911,11 +929,36 @@ static int ksched_init(void)
 	if (ret)
 		return ret;
 
-	wake_reqs = malloc(sizeof(struct ksched_wake_req) + NCPU * sizeof(struct ksched_wakeup));
-	if (!wake_reqs)
+	ksched_shm = mmap(NULL, KSCHED_SHM_SIZE, PROT_READ|PROT_WRITE,
+		  MAP_SHARED, ksched_fd, 0);
+	if (ksched_shm == MAP_FAILED) {
+		log_err("ksched_init: map failed");
+		return -EINVAL;
+	}
+
+	bitmap_for_each_set(online_cores, NCPU, cpu) {
+		ret = lrpc_init_in(
+		    &core_history[cpu].cmdq_in,
+		    (struct lrpc_msg *)&ksched_shm[cpu].core_to_iok.tbl,
+		    KSCHED_PERCORE_TBL_SIZE, &ksched_shm[cpu].core_to_iok.wb);
+		if (ret)
+			return ret;
+
+		ret = lrpc_init_out(
+		    &core_history[cpu].cmdq_out,
+		    (struct lrpc_msg *)&ksched_shm[cpu].iok_to_core.tbl,
+		    KSCHED_PERCORE_TBL_SIZE, &ksched_shm[cpu].iok_to_core.wb);
+		if (ret)
+			return ret;
+
+		core_history[cpu].cached_gen = 0;
+	}
+
+	preempt_reqs = malloc(sizeof(struct ksched_preempt_req) + NCPU * sizeof(int));
+	if (!preempt_reqs)
 		return -ENOMEM;
 
-	wake_reqs->nr = 0;
+	preempt_reqs->nr = 0;
 
 	return 0;
 }

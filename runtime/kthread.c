@@ -178,7 +178,7 @@ found:
 /*
  * kthread_yield_to_iokernel - block on eventfd until iokernel wakes us up
  */
-static void kthread_yield_to_iokernel(void)
+static void kthread_yield_to_iokernel(struct ksched_park_args *args)
 {
 	struct kthread *k = myk();
 
@@ -188,7 +188,7 @@ static void kthread_yield_to_iokernel(void)
 	bitmap_atomic_clear(core_awake, last_core);
 	atomic64_inc(&kthread_gen);
 
-	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_PARK));
+	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_PARK, args));
 #if 0
 	while (ioctl(ksched_fd, KSCHED_IOC_PARK)) {
 		BUG_ON(errno != EINTR);
@@ -220,13 +220,15 @@ static void kthread_yield_to_iokernel(void)
 void kthread_park(bool voluntary)
 {
 	struct kthread *k = myk();
-	unsigned long payload = 0;
-	uint64_t cmd = TXCMD_PARKED;
+	struct ksched_park_args args = {
+		.cmd = TXCMD_PARKED,
+		.payload = 0,
+	};
 
 	if (!voluntary ||
 	    !mbufq_empty(&k->txpktq_overflow) ||
 	    !mbufq_empty(&k->txcmdq_overflow)) {
-		payload = (unsigned long)k;
+		args.payload = k->kthread_idx;
 	}
 
 	assert_spin_lock_held(&k->lock);
@@ -247,11 +249,7 @@ void kthread_park(bool voluntary)
 	STAT(PARKS)++;
 	spin_unlock(&k->lock);
 
-	/* signal to iokernel that we're about to park */
-	while (!lrpc_send(&k->txcmdq, cmd, payload))
-		cpu_relax();
-
-	kthread_yield_to_iokernel();
+	kthread_yield_to_iokernel(&args);
 
 	/* iokernel has unparked us */
 

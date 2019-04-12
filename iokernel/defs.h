@@ -19,7 +19,6 @@
  * Constant limits
  */
 #define IOKERNEL_MAX_PROC		1024
-#define IOKERNEL_CMD_BURST_SIZE		64
 #define IOKERNEL_CONTROL_BURST_SIZE	4
 
 #define CORES_ADJUST_INTERVAL_US	5
@@ -50,8 +49,6 @@ struct thread {
 	unsigned int		kthread_idx;
 	/* list link for when idle */
 	struct list_node	idle_link;
-
-	unsigned int ooo_preempt;
 };
 
 struct hwq {
@@ -276,7 +273,6 @@ extern int dp_clients_init();
  * other dataplane functions
  */
 extern void dp_clients_rx_control_lrpcs();
-extern bool commands_rx();
 
 /*
  * functions for manipulating core assignments
@@ -292,3 +288,4 @@ extern unsigned int get_nr_avail_cores(void);
 extern unsigned int get_total_cores(void);
 extern unsigned int get_available_cores(void);
 extern void flush_wake_requests(void);
+extern bool poll_core_queues(void);

@@ -76,7 +76,9 @@ void dataplane_loop()
 
 	/* run until quit or killed */
 	for (;;) {
-		work_done = false;
+
+		/* process a batch of commands from remote cores */
+		work_done = poll_core_queues();
 
 		/* handle control messages */
 		if (!work_done)
@@ -89,9 +91,6 @@ void dataplane_loop()
 			cores_adjust_assignments();
 			last_time = now;
 		}
-
-		/* process a batch of commands from runtimes */
-		work_done |= commands_rx();
 
 		STAT_INC(IOKERNEL_LOOPS, 1);
 
