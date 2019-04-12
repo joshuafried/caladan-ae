@@ -2,6 +2,9 @@
  * main.c - initialization and main dataplane loop for the iokernel
  */
 
+#include <sched.h>
+#include <stdio.h>
+
 #include <base/init.h>
 #include <base/log.h>
 #include <base/stddef.h>

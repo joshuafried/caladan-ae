@@ -8,7 +8,6 @@
 
 #include <base/limits.h>
 #include <iokernel/shm.h>
-#include <iokernel/verbs.h>
 #include <net/ethernet.h>
 
 /* The abstract namespace path for the control socket. */
@@ -21,19 +20,38 @@ struct q_ptrs {
 	uint32_t rq_tail;
 };
 
-/* describes an io bundle */
-struct bundle_spec {
-	shmptr_t rx_cq_buf;
-	uint32_t cqe_cnt;
-	shmptr_t b_vars;
+/* unused for now */
+enum {
+	HWQ_MLX5 = 0,
+	HWQ_MLX4,
+	HWQ_NVME,
+	NR_HWQ,
 };
 
-/* shared variables for an io bundle */
-struct bundle_vars {
-	uint32_t rx_cq_idx;
-	unsigned int timern;
-	uint64_t next_deadline_tsc;
+struct hardware_queue_spec {
+	shmptr_t descriptor_table;
+	shmptr_t consumer_idx;
+	uint32_t descriptor_size;
+	uint32_t nr_descriptors;
+	uint32_t parity_byte_offset;
+	uint32_t parity_bit_mask;
+	uint32_t hwq_type;
 };
+
+struct timer_spec {
+	shmptr_t timern;
+	shmptr_t next_deadline_tsc;
+};
+
+/* describes an io bundle aka affinity group */
+/* a bundle consists of a set of hardware queues and timer queues */
+struct bundle_spec {
+	uint32_t hwq_count;
+	uint32_t timer_count;
+	shmptr_t hwq_specs;
+	shmptr_t timer_specs;
+};
+
 
 /* describes a runtime kernel thread */
 struct thread_spec {
@@ -63,8 +81,8 @@ struct sched_spec {
 /* the main control header */
 struct control_hdr {
 	unsigned int		magic;
-	unsigned int		thread_count;
 	struct sched_spec	sched_cfg;
+	unsigned int		thread_count;
 	unsigned int		bundle_count;
 	shmptr_t		thread_specs;
 	shmptr_t		bundle_specs;

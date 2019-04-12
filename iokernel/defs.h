@@ -54,17 +54,33 @@ struct thread {
 	unsigned int ooo_preempt;
 };
 
-struct bundle {
-	/* shared variables from runtime */
-	struct bundle_vars *b_vars;
+struct hwq {
+	void *descriptor_table;
+	uint32_t *consumer_idx;
+	uint32_t descriptor_size;
+	uint32_t nr_descriptors;
+	uint32_t parity_byte_offset;
+	uint32_t parity_bit_mask;
+	uint32_t hwq_type;
 
-	/* mlx5 rx completion buffer */
-	void *rx_cq_buf;
-	uint32_t rx_cq_cnt;
-
-	/* mlx5 rx history */
 	uint32_t cq_idx;
 	bool cq_pending;
+};
+
+struct timer {
+	unsigned int *timern;
+	uint64_t *next_deadline_tsc;
+};
+
+#define MAX_HWQ 1
+#define MAX_TIMER 1
+
+struct bundle {
+	/* shared variables from runtime */
+	unsigned int hwq_count;
+	unsigned int timer_count;
+	struct hwq qs[MAX_HWQ];
+	struct timer timers[MAX_TIMER];
 };
 
 struct proc {

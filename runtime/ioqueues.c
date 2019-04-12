@@ -77,6 +77,7 @@ static void queue_pointers_alloc(struct thread_spec *tspec)
 static int ioqueues_shm_setup(void)
 {
 	int i, ret;
+	struct shm_region *r = &iok.shared_region;
 	struct control_hdr *hdr;
 
 	ret = fill_random_bytes(&iok.key, sizeof(iok.key));
@@ -99,8 +100,14 @@ static int ioqueues_shm_setup(void)
 	}
 
 	for (i = 0; i < nr_bundles; i++) {
-		struct bundle_spec *bspec = &iok.bundles[i];
-		bspec->b_vars = iok_shm_alloc(sizeof(struct bundle_vars), 0, (void **)&bundles[i].b_vars);
+		struct bundle_vars *bv;
+		iok_shm_alloc(sizeof(*bv), 0, (void **)&bv);
+		bundles[i].b_vars = bv;
+
+		struct timer_spec *s;
+		iok_shm_alloc(sizeof(*s), 0, (void **)&s);
+		s->timern = ptr_to_shmptr(r, &bv->timern, sizeof(bv->timern));
+		s->next_deadline_tsc = ptr_to_shmptr(r, &bv->next_deadline_tsc, sizeof(bv->next_deadline_tsc));
 	}
 
 	return 0;

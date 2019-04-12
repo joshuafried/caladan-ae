@@ -317,6 +317,9 @@ static int verbs_create_rx_queue(int index, struct io_bundle *b)
 {
 	int i, ret;
 	struct verbs_queue_rx *v = &b->rxq;
+	struct shm_region *r = &iok.shared_region;
+	struct bundle_spec *bs;
+	struct hardware_queue_spec *hs;
 
 	memset(v, 0, sizeof(*v));
 
@@ -389,9 +392,16 @@ static int verbs_create_rx_queue(int index, struct io_bundle *b)
 	b->b_vars->rx_cq_idx = 0;
 
 	/* send queue spec to iokernel */
-	struct bundle_spec *bs = &iok.bundles[index];
-	bs->rx_cq_buf = ptr_to_shmptr(&iok.shared_region, v->rx_cq_dv.buf,  v->rx_cq_dv.cqe_cnt * sizeof(struct mlx5_cqe64));
-	bs->cqe_cnt = v->rx_cq_dv.cqe_cnt;
+	bs = &iok.bundles[index];
+	bs->hwq_count = 1;
+	bs->hwq_specs = iok_shm_alloc(sizeof(struct hardware_queue_spec), 0, (void **)&hs);
+	hs->consumer_idx = ptr_to_shmptr(r, &b->b_vars->rx_cq_idx, sizeof(uint32_t));
+	hs->descriptor_size = sizeof(struct mlx5_cqe64);
+	hs->nr_descriptors = v->rx_cq_dv.cqe_cnt;
+	hs->descriptor_table = ptr_to_shmptr(r, v->rx_cq_dv.buf,  hs->descriptor_size * hs->nr_descriptors);
+	hs->parity_byte_offset = offsetof(struct mlx5_cqe64, op_own);
+	hs->parity_bit_mask = MLX5_CQE_OWNER_MASK;
+	hs->hwq_type = HWQ_MLX5;
 
 	/* set byte_count and lkey for all descriptors once */
 	struct mlx5dv_rwq *wq = &v->rx_wq_dv;

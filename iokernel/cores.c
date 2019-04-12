@@ -740,6 +740,19 @@ void cores_free_proc(struct proc *p)
 		cores_park_kthread(&p->threads[i], true);
 }
 
+static bool hwq_busy(struct hwq *h, uint32_t cq_idx)
+{
+	uint32_t idx, parity, hd_parity;
+	unsigned char *addr;
+
+	idx = cq_idx & (h->nr_descriptors - 1);
+	parity = !!(cq_idx & h->nr_descriptors);
+	addr = h->descriptor_table + (h->descriptor_size * idx) + h->parity_byte_offset;
+	hd_parity = !!(ACCESS_ONCE(*addr) & h->parity_bit_mask);
+
+	return parity == hd_parity;
+}
+
 static bool cores_is_proc_congested(struct proc *p)
 {
 	struct thread *th;
@@ -748,7 +761,7 @@ static bool cores_is_proc_congested(struct proc *p)
 	unsigned int timern;
 	uint64_t cur_tsc, next_deadline_tsc;
 	bool last_pending, congested = false, bundle_congestion = false, inflight_wakeup = false;
-	int i;
+	int i, j;
 
 	for (i = 0; i < p->active_thread_count; i++) {
 		th = p->active_threads[i];
@@ -792,39 +805,43 @@ static bool cores_is_proc_congested(struct proc *p)
 	for (i = 0; i < p->bundle_count; i++) {
 		b = &p->bundles[i];
 
-		/* check mlx5 rxq */
-		last_rxq_head = b->cq_idx;
-		b->cq_idx = ACCESS_ONCE(b->b_vars->rx_cq_idx);
+		for (j = 0; j < b->hwq_count; j++) {
+			struct hwq *h = &b->qs[j];
+			last_rxq_head = h->cq_idx;
+			h->cq_idx = ACCESS_ONCE(*h->consumer_idx);
+			last_pending = h->cq_pending;
+			h->cq_pending = hwq_busy(h, h->cq_idx);
 
-		timern = ACCESS_ONCE(b->b_vars->timern);
-		next_deadline_tsc = ACCESS_ONCE(b->b_vars->next_deadline_tsc);
+			/* fast path */
+			if (!p->active_thread_count && h->cq_pending) {
+				congested = true;
+				continue;
+			}
 
-		last_pending = b->cq_pending;
-		b->cq_pending = !cq_is_empty(b->rx_cq_buf, b->rx_cq_cnt, b->cq_idx);
-
-		/* fast path */
-		if (!p->active_thread_count && b->cq_pending) {
-			congested = true;
-			continue;
+			if (last_rxq_head == h->cq_idx && last_pending && h->cq_pending) {
+				bundle_congestion = true;
+				continue;
+			}
 		}
 
-		if (last_rxq_head == b->cq_idx && last_pending && b->cq_pending) {
-			bundle_congestion = true;
-			continue;
-		}
+		for (j = 0; j < b->timer_count; j++) {
+			struct timer *t = &b->timers[j];
+			timern = ACCESS_ONCE(*t->timern);
+			next_deadline_tsc = ACCESS_ONCE(*t->next_deadline_tsc);
 
-		/* check timer */
-		if (!timern || next_deadline_tsc > cur_tsc)
-			continue;
+			/* check timer */
+			if (!timern || next_deadline_tsc > cur_tsc)
+				continue;
 
-		if (!p->active_thread_count) {
-			congested = true;
-			continue;
-		}
+			if (!p->active_thread_count) {
+				congested = true;
+				continue;
+			}
 
-		if (next_deadline_tsc + CORES_ADJUST_INTERVAL_US * cycles_per_us < cur_tsc) {
-			bundle_congestion = true;
-			continue;
+			if (next_deadline_tsc + CORES_ADJUST_INTERVAL_US * cycles_per_us < cur_tsc) {
+				bundle_congestion = true;
+				continue;
+			}
 		}
 
 	}

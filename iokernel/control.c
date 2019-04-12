@@ -38,10 +38,12 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	struct shm_region reg;
 	size_t nr_pages;
 	struct proc *p;
-	struct thread_spec *threads;
-	struct bundle_spec *bundles;
+	struct thread_spec *threads, *threads_shm;
+	struct bundle_spec *bundles, *bundles_shm;
+	struct hardware_queue_spec *hwq_spec, *hwq_spec_shm;
+	struct timer_spec *timer_spec, *timer_spec_shm;
 	void *shbuf;
-	int i, ret;
+	int i, j, ret;
 
 	/* attach the shared memory region */
 	if (len < sizeof(hdr))
@@ -86,8 +88,11 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	p->thread_count = hdr.thread_count;
 	p->uniqid = rdtsc();
 
-	memcpy(threads, shmptr_to_ptr(&reg, hdr.thread_specs, sizeof(*threads) * hdr.thread_count),
-	       sizeof(*threads) * hdr.thread_count);
+	threads_shm = shmptr_to_ptr(&reg, hdr.thread_specs, sizeof(*threads) * hdr.thread_count);
+	if (!threads_shm)
+		goto fail_free_proc;
+
+	memcpy(threads, threads_shm, sizeof(*threads) * hdr.thread_count);
 
 	/* initialize the threads */
 	for (i = 0; i < hdr.thread_count; i++) {
@@ -119,26 +124,79 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 			goto fail_free_proc;
 	}
 
-	free(threads);
+	bundles_shm = shmptr_to_ptr(&reg, hdr.bundle_specs, sizeof(*bundles) * hdr.bundle_count);
+	if (!bundles_shm)
+		goto fail_free_proc;
 
 	bundles = malloc(sizeof(*bundles) * hdr.bundle_count);
 	if (!bundles)
-		goto fail_free_just_proc;
+		goto fail_free_proc;
 
-	memcpy(bundles, shmptr_to_ptr(&reg, hdr.bundle_specs, sizeof(*bundles) * hdr.bundle_count),
-	       sizeof(*bundles) * hdr.bundle_count);
+	memcpy(bundles, bundles_shm, sizeof(*bundles) * hdr.bundle_count);
 
 	for (i = 0; i < hdr.bundle_count; i++) {
 		struct bundle *b = &p->bundles[i];
+		b->hwq_count = bundles[i].hwq_count;
+		b->timer_count = bundles[i].timer_count;
 
-		b->b_vars = shmptr_to_ptr(&reg, bundles[i].b_vars, sizeof(b->b_vars));
-		b->rx_cq_buf = shmptr_to_ptr(&reg, bundles[i].rx_cq_buf, 0);
-		b->rx_cq_cnt = bundles[i].cqe_cnt;
+		if (b->hwq_count > MAX_HWQ || b->timer_count > MAX_TIMER)
+			goto fail_free_bundle;
 
-		b->cq_idx = 0;
-		b->cq_pending = false;
+		hwq_spec_shm = shmptr_to_ptr(&reg, bundles[i].hwq_specs, sizeof(*hwq_spec) * b->hwq_count);
+		if (!hwq_spec_shm)
+			goto fail_free_bundle;
+
+		hwq_spec = malloc(sizeof(*hwq_spec) * b->hwq_count);
+		if (!hwq_spec)
+			goto fail_free_bundle;
+
+		memcpy(hwq_spec, hwq_spec_shm, sizeof(*hwq_spec) * b->hwq_count);
+		for (j = 0; j < b->hwq_count; j++) {
+			b->qs[j].descriptor_table = shmptr_to_ptr(&reg,
+				  hwq_spec[j].descriptor_table,
+				  hwq_spec[j].descriptor_size * hwq_spec[j].nr_descriptors);
+			b->qs[j].consumer_idx = shmptr_to_ptr(&reg, hwq_spec[j].consumer_idx, sizeof(*b->qs[j].consumer_idx));
+			b->qs[j].descriptor_size = hwq_spec[j].descriptor_size;
+			b->qs[j].nr_descriptors = hwq_spec[j].nr_descriptors;
+			b->qs[j].parity_byte_offset = hwq_spec[j].parity_byte_offset;
+			b->qs[j].parity_bit_mask = hwq_spec[j].parity_bit_mask;
+			b->qs[j].hwq_type = hwq_spec[j].hwq_type;
+
+			if (!b->qs[j].descriptor_table || !b->qs[j].consumer_idx ||
+				  b->qs[j].parity_byte_offset > b->qs[j].descriptor_size ||
+				  b->qs[j].nr_descriptors & (b->qs[j].nr_descriptors - 1) ||
+				  b->qs[j].hwq_type >= NR_HWQ) {
+				free(hwq_spec);
+				goto fail_free_bundle;
+			}
+
+			b->qs[j].cq_idx = 0;
+			b->qs[j].cq_pending = false;
+		}
+		free(hwq_spec);
+
+		timer_spec_shm = shmptr_to_ptr(&reg, bundles[i].timer_specs, sizeof(*timer_spec) * b->timer_count);
+		if (!timer_spec_shm)
+			goto fail_free_bundle;
+
+		timer_spec = malloc(sizeof(*timer_spec) * b->timer_count);
+		if (!timer_spec)
+			goto fail_free_bundle;
+
+		memcpy(timer_spec, timer_spec_shm, sizeof(*timer_spec) * b->timer_count);
+		for (j = 0; j < b->timer_count; j++) {
+			b->timers[j].timern = shmptr_to_ptr(&reg, timer_spec[j].timern, sizeof(*b->timers[j].timern));
+			b->timers[j].next_deadline_tsc = shmptr_to_ptr(&reg, timer_spec[j].next_deadline_tsc, sizeof(*b->timers[j].next_deadline_tsc));
+
+			if (!b->timers[j].timern || !b->timers[j].next_deadline_tsc) {
+				free(timer_spec);
+				goto fail_free_bundle;
+			}
+
+		}
+		free(timer_spec);
 	}
-	free(bundles);
+
 	p->bundle_count = hdr.bundle_count;
 
 
@@ -146,10 +204,15 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	ret = mem_lookup_page_phys_addrs(p->region.base, p->region.len, PGSIZE_2MB,
 			p->page_paddrs);
 	if (ret)
-		goto fail_free_just_proc;
+		goto fail_free_bundle;
+
+	free(bundles);
+	free(threads);
 
 	return p;
 
+fail_free_bundle:
+	free(bundles);
 fail_free_proc:
 	free(threads);
 fail_free_just_proc:

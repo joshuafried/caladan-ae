@@ -277,7 +277,11 @@ struct iokernel_control {
 extern struct iokernel_control iok;
 extern shmptr_t iok_shm_alloc(size_t size, size_t alignment, void **out);
 
-
+struct bundle_vars {
+	uint32_t rx_cq_idx;
+	unsigned int timern;
+	uint64_t next_deadline_tsc;
+};
 
 /*
  * Per-kernel-thread State
