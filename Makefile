@@ -37,7 +37,7 @@ iokernel_obj = $(iokernel_src:.c=.o)
 iokernel_noht_obj = $(iokernel_src:.c=-noht.o)
 
 # runtime - a user-level threading and networking library
-runtime_src = $(wildcard runtime/*.c) $(wildcard runtime/net/*.c)
+runtime_src = $(wildcard runtime/*.c) $(wildcard runtime/net/*.c) $(wildcard runtime/net/drivers/*.c) $(wildcard runtime/net/drivers/*/*.c)
 runtime_asm = $(wildcard runtime/*.S)
 runtime_obj = $(runtime_src:.c=.o) $(runtime_asm:.S=.o)
 

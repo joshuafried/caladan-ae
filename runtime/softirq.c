@@ -9,9 +9,6 @@
 
 #include "defs.h"
 #include "net/defs.h"
-#include "net/verbs.h"
-
-DECLARE_PERTHREAD(struct tcache_perthread, thread_pt);
 
 struct softirq_work {
 	unsigned int recv_cnt, join_cnt, timeout_cnt;
@@ -49,13 +46,13 @@ static unsigned int poll_bundle(struct softirq_work *w, struct io_bundle *b, uns
 	if (unlikely(!budget))
 		return 0;
 
-	if (unlikely(!verbs_has_rx_packets(&b->rxq) && !timer_needed(b)))
+	if (unlikely(!rx_pending(b->rxq) && !timer_needed(b)))
 		return 0;
 
 	if (unlikely(!spin_try_lock(&b->lock)))
 		return 0;
 
-	recv_cnt = verbs_gather_rx(w->recv_reqs + w->recv_cnt, b, budget);
+	recv_cnt = netcfg.ops.rx_batch(b->rxq, w->recv_reqs + w->recv_cnt, budget);
 	timeout_cnt = timer_gather(b, budget - recv_cnt, w->timeouts + w->timeout_cnt);
 
 	spin_unlock(&b->lock);
@@ -107,14 +104,14 @@ static void softirq_gather_bundles(struct softirq_work *w, struct kthread *k,
 		if (!budget_left)
 			break;
 
-		qidx = (j + k->pos_vq_rx) & (nr_bundles - 1);
+		qidx = (j + k->next_rx_poll) & (nr_bundles - 1);
 		if (ACCESS_ONCE(bundle_assignments[qidx]) != id)
 			continue;
 
 		budget_left -= poll_bundle(w, &bundles[qidx], budget_left);
 	}
 
-	k->pos_vq_rx += j;
+	k->next_rx_poll += j;
 }
 
 

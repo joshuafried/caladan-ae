@@ -15,7 +15,6 @@
 #include <runtime/net.h>
 #include <runtime/smalloc.h>
 
-#include "verbs.h"
 #include "defs.h"
 
 #define IP_ID_SEED	0x42345323
@@ -24,12 +23,59 @@
 /* important global state */
 struct net_cfg netcfg __aligned(CACHE_LINE_SIZE);
 
+/* RX buffer allocation */
+struct mempool net_rx_buf_mp;
+static struct tcache *net_rx_buf_tcache;
+DEFINE_PERTHREAD(struct tcache_perthread, net_rx_buf_pt);
+
 /* TX buffer allocation */
 struct mempool net_tx_buf_mp;
 static struct tcache *net_tx_buf_tcache;
 static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 
 #define MBUF_RESERVED (align_up(sizeof(struct mbuf), CACHE_LINE_SIZE))
+
+unsigned char rss_key[40] = {
+	0x82, 0x19, 0xFA, 0x80, 0xA4, 0x31, 0x06, 0x59, 0x3E, 0x3F, 0x9A,
+	0xAC, 0x3D, 0xAE, 0xD6, 0xD9, 0xF5, 0xFC, 0x0C, 0x63, 0x94, 0xBF,
+	0x8F, 0xDE, 0xD2, 0xC5, 0xE2, 0x04, 0xB1, 0xCF, 0xB1, 0xB1, 0xA1,
+	0x0D, 0x6D, 0x86, 0xBA, 0x61, 0x78, 0xEB};
+
+
+/* copied from dpdk/lib/librte_hash/rte_thash.h */
+static inline uint32_t
+rte_softrss(uint32_t *input_tuple, uint32_t input_len,
+    const uint8_t *rss_key)
+{
+	uint32_t i, j, map, ret = 0;
+
+	for (j = 0; j < input_len; j++) {
+		for (map = input_tuple[j]; map;	map &= (map - 1)) {
+			i = (uint32_t)__builtin_ctz(map);
+			ret ^= hton32(((const uint32_t *)rss_key)[j]) << (31 - i) |
+					(uint32_t)((uint64_t)(hton32(((const uint32_t *)rss_key)[j + 1])) >>
+					(i + 1));
+		}
+	}
+	return ret;
+}
+
+/**
+ * compute_rss_hash - compute rss hash for incoming packets
+ * @local_port: the local port number
+ * @remote: the remote network address
+ *
+ * Returns the 32 bit hash
+ */
+uint32_t compute_rss_hash(uint16_t local_port, struct netaddr remote)
+{
+	uint32_t input_tuple[] = {
+		remote.ip, netcfg.addr, local_port | remote.port << 16
+	};
+
+	return rte_softrss(input_tuple, ARRAY_SIZE(input_tuple), rss_key);
+}
+
 
 /*
  * RX Networking Functions
@@ -45,7 +91,7 @@ static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 
 	if (unlikely(!m)) {
 		log_warn_ratelimited("rx: out of mbufs!");
-		verbs_rx_completion(hdr->completion_data);
+		netcfg.ops.rx_completion(hdr->completion_data);
 		return NULL;
 	}
 
@@ -60,7 +106,7 @@ static struct mbuf *net_rx_alloc_mbuf(struct rx_net_hdr *hdr)
 	m->csum = hdr->csum;
 	m->rss_hash = hdr->rss_hash;
 
-	verbs_rx_completion(hdr->completion_data);
+	netcfg.ops.rx_completion(hdr->completion_data);
 
 	m->release = (void (*)(struct mbuf *))sfree;
 	return m;
@@ -261,7 +307,7 @@ void __noinline net_tx_drain_overflow(void)
 	/* drain TX packets */
 	while (unlikely(!mbufq_empty(&k->txpktq_overflow))) {
 		m = mbufq_peak_head(&k->txpktq_overflow);
-		if (verbs_transmit_one(&k->vq_tx, m))
+		if (netcfg.ops.tx_single(k->txq, m))
 			break;
 		mbufq_pop_head(&k->txpktq_overflow);
 		if (unlikely(preempt_needed()))
@@ -282,7 +328,7 @@ static void net_tx_raw(struct mbuf *m)
 	STAT(TX_PACKETS)++;
 	STAT(TX_BYTES) += len;
 
-	if (unlikely(verbs_transmit_one(&k->vq_tx, m)))
+	if (unlikely(netcfg.ops.tx_single(k->txq, m)))
 		mbufq_push_tail(&k->txpktq_overflow, m);
 
 	putk();
@@ -485,7 +531,7 @@ int str_to_netaddr(const char *str, struct netaddr *addr)
 int net_init_thread(void)
 {
 	tcache_init_perthread(net_tx_buf_tcache, &perthread_get(net_tx_buf_pt));
-
+	tcache_init_perthread(net_rx_buf_tcache, &perthread_get(net_rx_buf_pt));
 	return 0;
 }
 
@@ -511,8 +557,8 @@ static void net_dump_config(void)
 int net_init(void)
 {
 	int ret;
-	size_t tx_len;
-	void *tx_buf;
+	size_t tx_len, rx_len;
+	void *tx_buf, *rx_buf;
 
 	if (!netcfg.mac.addr[0]) {
 		ret = fill_random_bytes(&netcfg.mac, sizeof(netcfg.mac));
@@ -535,6 +581,21 @@ int net_init(void)
 	net_tx_buf_tcache = mempool_create_tcache(&net_tx_buf_mp,
 		"runtime_tx_bufs", NET_TX_BUF_TC_MAG);
 	if (!net_tx_buf_tcache)
+		return -ENOMEM;
+
+	rx_len = RX_BUF_BOOL_SZ(nr_bundles);
+	rx_buf = mem_map_anom(NULL, rx_len, PGSIZE_2MB, 0);
+	if (rx_buf == MAP_FAILED)
+		return -ENOMEM;
+
+	ret = mempool_create(&net_rx_buf_mp, rx_buf, rx_len,
+			     PGSIZE_2MB, MBUF_DEFAULT_LEN);
+	if (ret)
+		return ret;
+
+	net_rx_buf_tcache = mempool_create_tcache(&net_rx_buf_mp,
+		"runtime_rx_bufs", NET_RX_BUF_TC_MAG);
+	if (!net_rx_buf_tcache)
 		return -ENOMEM;
 
 	log_info("net: started network stack");

@@ -20,7 +20,7 @@
 #include <runtime/rcu.h>
 #include <runtime/preempt.h>
 
-#include "net/verbs.h"
+#include "net/drivers/common.h"
 
 
 /*
@@ -49,7 +49,7 @@
 
 BUILD_ASSERT(SQ_CLEAN_THRESH <= SQ_NUM_DESC);
 
-#define VERBS_RX_BUF_TC_MAG		RUNTIME_SOFTIRQ_BUDGET * 2
+#define NET_RX_BUF_TC_MAG		RUNTIME_SOFTIRQ_BUDGET * 2
 #define RUNTIME_SMALLOC_MAG_SIZE	RUNTIME_SOFTIRQ_BUDGET * 8
 #define NET_TX_BUF_TC_MAG		RUNTIME_SOFTIRQ_BUDGET * 16
 
@@ -75,7 +75,7 @@ struct io_bundle {
 	struct bundle_vars *b_vars;
 
 	/* ingress network queue */
-	struct verbs_queue_rx rxq;
+	struct rx_queue		*rxq;
 
 	/* timer wheel */
 	unsigned int			timern;
@@ -330,7 +330,6 @@ enum {
 };
 
 struct timer_idx;
-struct verbs_queue;
 
 struct kthread {
 	/* 1st cache-line */
@@ -355,14 +354,12 @@ struct kthread {
 
 	/* 3rd cache-line */
 	struct lrpc_chan_out	txcmdq;
-	unsigned long pad4[4];
+	struct tx_queue		*txq;
+	unsigned int		next_rx_poll;
+	unsigned int		pad4[5];
 
 	/* 4th-7th cache-line */
 	thread_t		*rq[RUNTIME_RQ_SIZE];
-
-	struct verbs_queue_tx vq_tx __aligned(CACHE_LINE_SIZE);
-	unsigned int pos_vq_rx;
-	unsigned long		pad3[3];
 
 	/* 9th cache-line, statistics counters */
 	uint64_t		stats[STAT_NR] __aligned(CACHE_LINE_SIZE);
@@ -468,11 +465,12 @@ extern void softirq_run(unsigned int budget);
  */
 
 struct net_cfg {
+	struct net_driver_ops		ops;
 	uint32_t		addr;
 	uint32_t		netmask;
 	uint32_t		gateway;
 	struct eth_addr		mac;
-	uint8_t			pad[14 + 32];
+	uint8_t			pad[22];
 } __packed;
 
 BUILD_ASSERT(sizeof(struct net_cfg) == CACHE_LINE_SIZE);
@@ -570,7 +568,7 @@ extern int stack_init_thread(void);
 extern int sched_init_thread(void);
 extern int net_init_thread(void);
 extern int smalloc_init_thread(void);
-extern int verbs_init_thread(void);
+extern int ethdev_init_thread(void);
 
 /* global initialization */
 extern int ioqueues_init(void);
@@ -582,7 +580,7 @@ extern int arp_init(void);
 extern int trans_init(void);
 extern int smalloc_init(void);
 extern int kthread_init(void);
-extern int verbs_init(void);
+extern int ethdev_init(void);
 extern int timer_init(void);
 
 /* late initialization */

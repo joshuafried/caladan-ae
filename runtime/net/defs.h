@@ -22,7 +22,11 @@ struct rx_net_hdr {
 	char	     payload[];	/* packet data */
 };
 
+extern unsigned char rss_key[40];
+
 extern struct mempool net_tx_buf_mp;
+extern struct mempool net_rx_buf_mp;
+extern DEFINE_PERTHREAD(struct tcache_perthread, net_rx_buf_pt);
 
 /*
  * Network Error Reporting Functions
