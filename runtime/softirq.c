@@ -82,8 +82,8 @@ static unsigned int poll_lrpc(struct softirq_work *w, struct kthread *k,
 
 		budget_left--;
 		BUG_ON(cmd != RX_JOIN);
-		BUG_ON(payload >= maxks);
-		w->join_reqs[join_cnt++] = allks[payload];
+		BUG_ON(payload - 1 >= maxks);
+		w->join_reqs[join_cnt++] = allks[payload - 1];
 	}
 	w->join_cnt = join_cnt;
 	return join_cnt;

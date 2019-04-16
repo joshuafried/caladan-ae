@@ -240,7 +240,7 @@ enum {
 	RX_GRANT,
 
 	ADJUSTS,
-
+	PREEMPTS,
 	NR_STATS,
 
 };

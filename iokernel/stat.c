@@ -18,6 +18,7 @@ static const char *stat_names[] = {
 	"RQ_GRANT",
 	"RX_GRANT",
 	"ADJUSTS",
+	"PREEMPTS",
 };
 
 BUILD_ASSERT(ARRAY_SIZE(stat_names) == NR_STATS);

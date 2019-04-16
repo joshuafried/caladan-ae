@@ -228,7 +228,7 @@ void kthread_park(bool voluntary)
 	if (!voluntary ||
 	    !mbufq_empty(&k->txpktq_overflow) ||
 	    !mbufq_empty(&k->txcmdq_overflow)) {
-		args.payload = k->kthread_idx;
+		args.payload = k->kthread_idx + 1;
 	}
 
 	assert_spin_lock_held(&k->lock);

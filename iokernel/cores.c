@@ -103,6 +103,7 @@ void flush_wake_requests(void)
 	if (!preempt_reqs->nr)
 		return;
 
+	STAT_INC(PREEMPTS, preempt_reqs->nr);
 	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_PREEMPT, preempt_reqs));
 
 	preempt_reqs->nr = 0;
@@ -854,7 +855,7 @@ bool poll_core_queues(void)
 			switch (cmd) {
 				case TXCMD_PARKED:
 					/* notify another kthread if the park was involuntary */
-					if (cores_park_kthread(t, false))
+					if (cores_park_kthread(t, false) && payload != 0)
 						rx_send_to_runtime(t->p, 0, RX_JOIN, payload);
 					break;
 				default:
