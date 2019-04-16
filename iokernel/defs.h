@@ -111,10 +111,6 @@ struct proc {
 
 	/* Unique identifier -- never recycled across runtimes*/
 	uintptr_t		uniqid;
-
-	/* table of physical addresses for shared memory */
-	physaddr_t		page_paddrs[];
-
 };
 
 extern void proc_release(struct ref *r);
@@ -280,7 +276,7 @@ extern void dp_clients_rx_control_lrpcs();
 extern void cores_init_proc(struct proc *p);
 extern void cores_free_proc(struct proc *p);
 extern int cores_pin_thread(pid_t tid, int core);
-extern bool cores_park_kthread(struct thread *t, bool force);
+extern void cores_park_kthread(struct thread *t, bool force);
 extern struct thread *cores_add_core(struct proc *p);
 extern void cores_adjust_assignments();
 extern void proc_set_overloaded(struct proc *p);

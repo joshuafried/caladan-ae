@@ -558,9 +558,8 @@ chose_proc:
  * @th: thread to park
  * @force: true if this kthread should be parked regardless of pending tx pkts
  *
- * Returns true if the kthread is to remain parked
  */
-bool cores_park_kthread(struct thread *th, bool force)
+void cores_park_kthread(struct thread *th, bool force)
 {
 	struct proc *p = th->p;
 	unsigned int core = th->core;
@@ -574,34 +573,11 @@ bool cores_park_kthread(struct thread *th, bool force)
 	assert(!bitmap_test(p->available_threads, kthread));
 	assert(core_history[core].current == th);
 
-#if 0
-	/* check for race conditions with the runtime */
-	if (!core_is_preempting(core) && !force) {
-		lrpc_poll_send_tail(&th->rxq);
-		if (unlikely(lrpc_get_cached_length(&th->rxq) > 0)) {
-			/* the runtime parked while packets were in flight */
-			wake_single(th, th->core, false);
-			return false;
-		}
-	}
-#endif
-
 	thread_cede(th);
 	if (core_is_preempting(core)) {
 		core_finish_preempt(core);
-		return true;
+		return;
 	}
-
-#if 0
-	/* move the kthread to the linux core */
-	int ret = cores_pin_thread(th->tid, core_assign.linux_core);
-	if (ret < 0 && ret != -ESRCH) {
-		/* pinning failed for reason other than tid doesn't exist */
-		log_err("cores: failed to pin tid %d to linux core %d",
-			th->tid, core_assign.linux_core);
-		/* continue running but performance is unpredictable */
-	}
-#endif
 
 	/* mark core as available */
 	core_cede(core);
@@ -612,8 +588,6 @@ bool cores_park_kthread(struct thread *th, bool force)
 		thread_reserve(th_new, core);
 		core_wake_idle(core, th_new);
 	}
-
-	return true;
 }
 
 /**
@@ -686,7 +660,7 @@ int cores_pin_thread(pid_t tid, int core)
  */
 void cores_init_proc(struct proc *p)
 {
-	int i, ret;
+	int i;
 
 	/* all threads are initially pinned to the linux core and will park
 	 * themselves immediately */
@@ -695,13 +669,6 @@ void cores_init_proc(struct proc *p)
 	list_head_init(&p->idle_threads);
 	p->inflight_preempts = 0;
 	for (i = 0; i < p->thread_count; i++) {
-		ret = cores_pin_thread(p->threads[i].tid, core_assign.linux_core);
-		if (ret < 0) {
-			log_err("cores: failed to pin thread %d in cores_init_proc",
-					p->threads[i].tid);
-			/* continue running but performance is unpredictable */
-		}
-
 		/* init core to 0 - this will result in incorrect cache locality
 		 * decisions at first but saves us from always checking if this thread
 		 * has run yet */
@@ -727,6 +694,7 @@ void cores_free_proc(struct proc *p)
 	proc_clear_bursting(p);
 	proc_clear_overloaded(p);
 
+	// FIXME: this needs to interact with ksched in a reasonable way
 	bitmap_for_each_cleared(p->available_threads, p->thread_count, i)
 		cores_park_kthread(&p->threads[i], true);
 }
@@ -854,8 +822,9 @@ bool poll_core_queues(void)
 			struct thread *t = core_history[cpu].current;
 			switch (cmd) {
 				case TXCMD_PARKED:
+					cores_park_kthread(t, false);
 					/* notify another kthread if the park was involuntary */
-					if (cores_park_kthread(t, false) && payload != 0)
+					if (payload != 0)
 						rx_send_to_runtime(t->p, 0, RX_JOIN, payload);
 					break;
 				default:

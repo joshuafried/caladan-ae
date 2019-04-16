@@ -36,7 +36,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 {
 	struct control_hdr hdr;
 	struct shm_region reg;
-	size_t nr_pages;
 	struct proc *p;
 	struct thread_spec *threads, *threads_shm;
 	struct bundle_spec *bundles, *bundles_shm;
@@ -68,8 +67,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	nr_guaranteed += hdr.sched_cfg.guaranteed_cores;
 
 	/* create the process */
-	nr_pages = div_up(len, PGSIZE_2MB);
-	p = malloc(sizeof(*p) + nr_pages * sizeof(physaddr_t));
+	p = malloc(sizeof(*p));
 	if (!p)
 		goto fail_unmap;
 
@@ -198,13 +196,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 	}
 
 	p->bundle_count = hdr.bundle_count;
-
-
-	/* initialize the table of physical page addresses */
-	ret = mem_lookup_page_phys_addrs(p->region.base, p->region.len, PGSIZE_2MB,
-			p->page_paddrs);
-	if (ret)
-		goto fail_free_bundle;
 
 	free(bundles);
 	free(threads);
