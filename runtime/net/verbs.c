@@ -421,6 +421,13 @@ static int verbs_create_rx_queue(int index, struct io_bundle *b)
 		v->wq_head++;
 	}
 
+	/* set ownership of cqes to "hardware" */
+	struct mlx5dv_cq *cq = &v->rx_cq_dv;
+	for (i = 0; i < cq->cqe_cnt; i++) {
+		struct mlx5_cqe64 *cqe = cq->buf + i * cq->cqe_size;
+		mlx5dv_set_cqe_owner(cqe, 1);
+	}
+
 	udma_to_device_barrier();
 	wq->dbrec[0] = htobe32(v->wq_head & 0xffff);
 
