@@ -6,33 +6,56 @@
 #include "runtime/tcp.h"
 #include "runtime/thread.h"
 
-#include "storage_service.h"
+// #include "storage_service.h"
+#include "reflex.h"
+
+#define STORAGE_SERVICE_PORT 5000
+#define SECTOR_SIZE 512 
 
 static void server_worker(void *arg)
 {
     tcpconn_t *c = (tcpconn_t *)arg;
-    struct storage_cmd cmd;
+    binary_header_blk_t header;
     ssize_t ret;
 
     while (true) {
-        ret = tcp_read(c, &cmd, sizeof(cmd));
-        log_info("received: %ld bytes", ret);
-        if (ret <= 0 || ret < sizeof(cmd)) {
+        ret = tcp_read(c, &header, sizeof(header));
+        // log_info("received: %ld bytes", ret);
+        if (ret <= 0 || ret < sizeof(header)) {
             break;
         }
 
-        log_info("received command");
-        BUG_ON((cmd.cmd != CMD_READ) && (cmd.cmd != CMD_WRITE));
-        char *buf = storage_zmalloc(BUF_SIZE);
-        if (cmd.cmd == CMD_READ) {
-            log_info("read");
-            storage_read(buf, cmd.lba, cmd.lba_count);
-            tcp_write(c, buf, BUF_SIZE);
+        // log_info("received command");
+        // log_info("magic: %u, lba: %lu, lba_count: %u", header.magic, header.lba, header.lba_count);
+
+        // BUG_ON(header.magic != sizeof(binary_header_blk_t));
+        // BUG_ON((header.opcode != CMD_GET) && (header.opcode != CMD_SET));
+        //
+        if(header.magic != sizeof(binary_header_blk_t)) {
+            // printf("skipped\n");
+            // printf("%s\n", (char*)&header);
+            continue;
         }
-        if (cmd.cmd == CMD_WRITE) {
-            log_info("write: %s", cmd.data);
-            memcpy(buf, cmd.data, BUF_SIZE);
-            storage_write(buf, cmd.lba, cmd.lba_count);
+        uint32_t len = header.lba_count * SECTOR_SIZE;
+        char *buf = storage_zmalloc(len);
+        if (header.opcode == CMD_GET) {
+            // log_info("get");
+            storage_read(buf, header.lba, header.lba_count);
+            tcp_write(c, &header, sizeof(header));
+            tcp_write(c, buf, len);
+        }
+        if (header.opcode == CMD_SET) {
+            // log_info("set");
+            uint32_t read = 0;
+            // log_info("set len: %u", len);
+            do {
+                ret = tcp_read(c, buf+read, len-read);
+                read += ret;
+                // log_info("ret: %lu", ret);
+            } while(ret > 0 && len > read);
+            // log_info("set data: %s", buf);
+            storage_write(buf, header.lba, header.lba_count);
+            tcp_write(c, &header, sizeof(header));
         }
         storage_free(buf);
     }
@@ -55,7 +78,7 @@ static void main_handler(void *arg)
         tcpconn_t *c;
 
         ret = tcp_accept(q, &c);
-        log_info("accepted connection");
+        // log_info("accepted connection");
         BUG_ON(ret);
         ret = thread_spawn(server_worker, c);
         BUG_ON(ret);
