@@ -18,6 +18,8 @@ static void server_worker(void *arg)
     binary_header_blk_t header;
     ssize_t ret;
 
+    char *buf = storage_zmalloc(SECTOR_SIZE);
+
     while (true) {
         ret = tcp_read(c, &header, sizeof(header));
         // log_info("received: %ld bytes", ret);
@@ -36,16 +38,16 @@ static void server_worker(void *arg)
             // printf("%s\n", (char*)&header);
             continue;
         }
+        BUG_ON(header.lba_count != 1);
         uint32_t len = header.lba_count * SECTOR_SIZE;
-        char *buf = storage_zmalloc(len);
         if (header.opcode == CMD_GET) {
-            // log_info("get");
+            log_info("get");
             storage_read(buf, header.lba, header.lba_count);
             tcp_write(c, &header, sizeof(header));
             tcp_write(c, buf, len);
         }
         if (header.opcode == CMD_SET) {
-            // log_info("set");
+            log_info("set");
             uint32_t read = 0;
             // log_info("set len: %u", len);
             do {
@@ -57,8 +59,8 @@ static void server_worker(void *arg)
             storage_write(buf, header.lba, header.lba_count);
             tcp_write(c, &header, sizeof(header));
         }
-        storage_free(buf);
     }
+    storage_free(buf);
 }
 
 static void main_handler(void *arg)
@@ -78,7 +80,7 @@ static void main_handler(void *arg)
         tcpconn_t *c;
 
         ret = tcp_accept(q, &c);
-        // log_info("accepted connection");
+        log_info("accepted connection");
         BUG_ON(ret);
         ret = thread_spawn(server_worker, c);
         BUG_ON(ret);
