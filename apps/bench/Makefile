@@ -18,6 +18,8 @@ else
 CXXFLAGS += -DNDEBUG -O3
 endif
 
+RDMA_CORE_LIBS = -libverbs -lmlx5 -lmlx4
+
 # handy for debugging
 print-%  : ; @echo $* = $($*)
 
@@ -63,7 +65,7 @@ fanout_obj = $(fanout_src:.cc=.o)
 linux_mech_bench_src = linux_mech_bench.cc
 linux_mech_bench_obj = $(linux_mech_bench_src:.cc=.o)
 
-librt_libs = $(CXXPATH)/librt++.a $(BASEPATH)/libruntime.a $(BASEPATH)/libnet.a $(BASEPATH)/libbase.a -libverbs -lmlx5
+librt_libs = $(CXXPATH)/librt++.a $(BASEPATH)/libruntime.a $(BASEPATH)/libnet.a $(BASEPATH)/libbase.a $(RDMA_CORE_LIBS)
 
 # must be first
 all: tbench callibrate stress efficiency efficiency_linux \

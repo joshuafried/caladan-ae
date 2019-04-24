@@ -13,6 +13,8 @@ else
 CXXFLAGS += -DNDEBUG -O3
 endif
 
+RDMA_CORE_LIBS = -libverbs -lmlx5 -lmlx4
+
 # handy for debugging
 print-%  : ; @echo $* = $($*)
 
@@ -31,7 +33,7 @@ librt++.a: $(rt_obj)
 
 test: $(test_obj) librt++.a ../../libruntime.a ../../libnet.a ../../libbase.a
 	$(LD) $(LDFLAGS) -o $@ $(test_obj) librt++.a ../../libruntime.a \
-	../../libnet.a ../../libbase.a -lpthread -libverbs -lmlx5
+	../../libnet.a ../../libbase.a -lpthread $(RDMA_CORE_LIBS)
 
 # general build rules for all targets
 src = $(rt_src) $(test_src)

@@ -1,5 +1,5 @@
-/*
- * verbs.c - Verbs driver for Shenango's network statck
+ /*
+ * mlx4.c - MLX4 driver for Shenango's network statck
  */
 
 #include <fcntl.h>
@@ -19,7 +19,7 @@
 #include "../../../defs.h"
 #include "../../defs.h"
 #include "../common.h"
-#include "mlx5.h"
+#include "mlx4.h"
 
 #define PORT_NUM 1 // TODO: make this dynamic
 
@@ -31,214 +31,199 @@ static struct ibv_pd *pd;
 static struct ibv_mr *mr_tx;
 static struct ibv_mr *mr_rx;
 
-static struct mlx5_rxq rxqs[MAX_BUNDLES];
-static struct mlx5_txq txqs[NCPU];
+static struct mlx4_rxq rxqs[MAX_BUNDLES];
+static struct mlx4_txq txqs[NCPU];
 
-void mlx5_rx_completion(unsigned long completion_data)
+void mlx4_rx_completion(unsigned long completion_data)
 {
 	preempt_disable();
 	tcache_free(&perthread_get(net_rx_buf_pt), (void *)completion_data);
 	preempt_enable();
 }
 
-static inline unsigned char *mlx5_rx_alloc_buf(void)
+static inline unsigned char *mlx4_rx_alloc_buf(void)
 {
 	return tcache_alloc(&perthread_get(net_rx_buf_pt));
 }
 
 
 /*
- * mlx5_refill_rxqueue - replenish RX queue with nrdesc bufs
+ * mlx4_refill_rxqueue - replenish RX queue with nrdesc bufs
  * @vq: queue to refill
  * @nrdesc: number of buffers to fill
  *
  * WARNING: nrdesc must not exceed the number of free slots in the RXq
  * returns 0 on success, errno on error
  */
-static inline int mlx5_refill_rxqueue(struct mlx5_rxq *vq, int nrdesc)
+
+static inline int mlx4_refill_rxqueue(struct mlx4_rxq *vq, int nrdesc)
 {
 	unsigned int i;
 	uint32_t index;
 	unsigned char *buf;
-	struct mlx5_wqe_data_seg *seg;
+	struct mlx4_wqe_data_seg *seg;
 
-	struct mlx5dv_rwq *wq = &vq->rx_wq_dv;
+	struct mlx4dv_rwq *wq = &vq->rx_wq_dv;
 
-	assert(nrdesc + vq->wq_head >= vq->rxq.consumer_idx + wq->wqe_cnt);
+	assert(nrdesc + vq->wq_head >= vq->rxq.consumer_idx + wq->rq.wqe_cnt);
 
 	for (i = 0; i < nrdesc; i++) {
-		buf = mlx5_rx_alloc_buf();
+		buf = mlx4_rx_alloc_buf();
 		if (unlikely(!buf))
 			return -ENOMEM;
 
-		index = vq->wq_head++ & (wq->wqe_cnt - 1);
-		seg = wq->buf + (index << vq->rx_wq_log_stride);
+		index = vq->wq_head++ & (wq->rq.wqe_cnt - 1);
+		seg = wq->buf.buf + wq->rq.offset + (index << wq->rq.wqe_shift);
 		seg->addr = htobe64((unsigned long)buf + RX_BUF_RESERVED);
 		vq->buffers[index] = buf;
 	}
 
 	udma_to_device_barrier();
-	wq->dbrec[0] = htobe32(vq->wq_head & 0xffff);
+	*wq->rdb = htobe32(vq->wq_head & 0xffff);
 
 	return 0;
-
 }
 
-static void mlx5_init_tx_segment(struct mlx5_txq *v, unsigned int idx)
+static void mlx4_init_tx_segment(struct mlx4_txq *v, unsigned int idx)
 {
-	int size;
-	struct mlx5_wqe_ctrl_seg *ctrl;
-	struct mlx5_wqe_eth_seg *eseg;
-	struct mlx5_wqe_data_seg *dpseg;
+	struct mlx4dv_qp *qp = &v->tx_qp_dv;
+	struct mlx4_wqe_ctrl_seg *ctrl;
+	struct mlx4_wqe_data_seg *dpseg;
 	void *segment;
 
-	segment = v->tx_qp_dv.sq.buf + idx * v->tx_qp_dv.sq.stride;
+	segment = qp->buf.buf + qp->sq.offset + (idx << qp->sq.wqe_shift);
 	ctrl = segment;
-	eseg = segment + sizeof(*ctrl);
-	dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
+	dpseg = segment + sizeof(*ctrl);
 
-	size = (sizeof(*ctrl) / 16) +
-	       (offsetof(struct mlx5_wqe_eth_seg, inline_hdr)) / 16 +
-	       sizeof(struct mlx5_wqe_data_seg) / 16;
+	ctrl->srcrb_flags = htobe32(MLX4_WQE_CTRL_CQ_UPDATE);
+	/* For raw eth, the MLX4_WQE_CTRL_SOLICIT flag is used
+	 * to indicate that no icrc should be calculated */
+	ctrl->srcrb_flags |= htobe32(MLX4_WQE_CTRL_SOLICIT);
 
-	/* set ctrl segment */
-	*(uint32_t *)(segment + 8) = 0;
+	ctrl->srcrb_flags |= htobe32(MLX4_WQE_CTRL_IP_HDR_CSUM |
+							   MLX4_WQE_CTRL_TCP_UDP_CSUM);
 	ctrl->imm = 0;
-	ctrl->fm_ce_se = MLX5_WQE_CTRL_CQ_UPDATE;
-	ctrl->qpn_ds = htobe32(size | (v->tx_qp->qp_num << 8));
-
-	/* set eseg */
-	memset(eseg, 0, sizeof(struct mlx5_wqe_eth_seg));
-	eseg->cs_flags |= MLX5_ETH_WQE_L3_CSUM | MLX5_ETH_WQE_L4_CSUM;
-
-	/* set dpseg */
 	dpseg->lkey = htobe32(mr_tx->lkey);
+	ctrl->fence_size = (sizeof(*ctrl) + sizeof(*dpseg)) / 16;
 }
 
 /*
- * mlx5_gather_completions - collect up to budget received packets and completions
+ * mlx4_gather_completions - collect up to budget received packets and completions
  */
-static int mlx5_gather_completions(struct mbuf **mbufs, struct mlx5_txq *v, unsigned int budget)
+static int mlx4_gather_completions(struct mbuf **mbufs, struct mlx4_txq *v, unsigned int budget)
 {
-	struct mlx5dv_cq *cq = &v->tx_cq_dv;
-	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
+	struct mlx4dv_cq *cq = &v->tx_cq_dv;
+	struct mlx4_cqe *cqe, *cqes = cq->buf.buf;
 
 	unsigned int compl_cnt;
-	uint8_t opcode;
 	uint16_t wqe_idx;
 
 	for (compl_cnt = 0; compl_cnt < budget; compl_cnt++, v->cq_head++) {
-		cqe = &cqes[v->cq_head & (cq->cqe_cnt - 1)];
-		opcode = cqe_status(cqe, cq->cqe_cnt, v->cq_head);
+		cqe = &cqes[2 * (v->cq_head & (cq->cqe_cnt - 1))] + 1;
 
-		if (opcode == MLX5_CQE_INVALID)
+		if (!!(ACCESS_ONCE(cqe->owner_sr_opcode) & MLX4_CQE_OWNER_MASK) ^ !!(v->cq_head & cq->cqe_cnt))
 			break;
 
-		BUG_ON(opcode != MLX5_CQE_REQ);
+		BUG_ON(mlx4dv_get_cqe_opcode(cqe) == MLX4_CQE_OPCODE_ERROR);
 
-		assert(mlx5_get_cqe_format(cqe) != 0x3);
-
-		wqe_idx = be16toh(cqe->wqe_counter) & (v->tx_qp_dv.sq.wqe_cnt - 1);
-		mbufs[compl_cnt] = load_acquire(&v->buffers[wqe_idx]);
+		wqe_idx = be16toh(cqe->wqe_index) & (v->tx_qp_dv.sq.wqe_cnt - 1);
+		mbufs[compl_cnt] = v->buffers[wqe_idx];
 	}
 
-	cq->dbrec[0] = htobe32(v->cq_head & 0xffffff);
+	*cq->set_ci_db = htobe32(v->cq_head  & 0xffffff);
 
 	return compl_cnt;
 }
 
 /*
- * verbs_transmit_one - send one mbuf
- * @v: queue to use
+ * mlx4_transmit_one - send one mbuf
+ * @t: queue to use
  * @m: mbuf to send
  *
  * returns 0 on success, errno on error
  */
-static int mlx5_transmit_one(struct tx_queue *t, struct mbuf *m)
+static int mlx4_transmit_one(struct tx_queue *t, struct mbuf *m)
 {
 	int i, compl = 0;
-	struct mlx5_txq *v = container_of(t, struct mlx5_txq, txq);
-	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
 	struct mbuf *mbs[SQ_CLEAN_MAX];
-	struct mlx5_wqe_ctrl_seg *ctrl;
-	struct mlx5_wqe_eth_seg *eseg;
-	struct mlx5_wqe_data_seg *dpseg;
-	void *segment;
+	struct mlx4_txq *v = container_of(t, struct mlx4_txq, txq);
+	struct mlx4dv_qp *qp = &v->tx_qp_dv;
+
+	struct mlx4_wqe_ctrl_seg *ctrl;
+	struct mlx4_wqe_data_seg *dpseg;
+
+	uint32_t idx = v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1);
 
 	if (nr_inflight_tx(v) >= SQ_CLEAN_THRESH) {
-		compl = mlx5_gather_completions(mbs, v, SQ_CLEAN_MAX);
+		compl = mlx4_gather_completions(mbs, v, SQ_CLEAN_MAX);
 		for (i = 0; i < compl; i++)
 			mbuf_free(mbs[i]);
-		if (unlikely(nr_inflight_tx(v) >= v->tx_qp_dv.sq.wqe_cnt)) {
+		if (unlikely(nr_inflight_tx(v) >= qp->sq.wqe_cnt)) {
 			log_warn_ratelimited("txq full");
 			return 1;
 		}
 	}
 
-	segment = v->tx_qp_dv.sq.buf + (idx << v->tx_sq_log_stride);
-	ctrl = segment;
-	eseg = segment + sizeof(*ctrl);
-	dpseg = (void *)eseg + (offsetof(struct mlx5_wqe_eth_seg, inline_hdr) & ~0xf);
+	ctrl = qp->buf.buf + qp->sq.offset + (idx << qp->sq.wqe_shift);
+	dpseg = (void *)ctrl + sizeof(*ctrl);
 
-	ctrl->opmod_idx_opcode = htobe32(((v->sq_head & 0xffff) << 8) |
-					       MLX5_OPCODE_SEND);
+	/* mac address goes into descriptor for loopback */
+	ctrl->srcrb_flags16[0] = *(__be16 *)(uintptr_t)mbuf_data(m);
+	ctrl->imm = *(__be32 *)((uintptr_t)(mbuf_data(m)) + 2);
 
-
-	dpseg->byte_count = htobe32(mbuf_length(m));
 	dpseg->addr = htobe64((uint64_t)mbuf_data(m));
 
-	/* record buffer */
-	store_release(&v->buffers[v->sq_head & (v->tx_qp_dv.sq.wqe_cnt - 1)], m);
-	v->sq_head++;
+	// assuming we dont straddle cache lines
+	BUILD_ASSERT(sizeof(*ctrl) + sizeof(*dpseg) <= CACHE_LINE_SIZE);
 
-	/* write doorbell record */
+	dpseg->byte_count = htobe32(mbuf_length(m));
+
 	udma_to_device_barrier();
-	v->tx_qp_dv.dbrec[MLX5_SND_DBR] = htobe32(v->sq_head & 0xffff);
 
-	/* ring bf doorbell */
-	mmio_wc_start();
-	mmio_write64_be(v->tx_qp_dv.bf.reg, *(__be64 *)ctrl);
-	mmio_flush_writes();
+	ctrl->owner_opcode = htobe32(MLX4_OPCODE_SEND) |
+			(v->sq_head & qp->sq.wqe_cnt ? htobe32(1 << 31) : 0);
 
+	udma_to_device_barrier();
+
+	mmio_write32_be(qp->sdb, qp->doorbell_qpn);
+	v->buffers[v->sq_head++ & (v->tx_qp_dv.sq.wqe_cnt - 1)] = m;
 	return 0;
-
 }
 
-static int mlx5_gather_rx(struct rx_queue *rxq, struct rx_net_hdr **hdrs, unsigned int budget)
+static inline bool mlx4_csum_ok(struct mlx4_cqe *cqe)
 {
-	uint8_t opcode;
+	return (cqe->status & htobe32(MLX4_CQE_STATUS_IPV4_CSUM_OK)) ==
+				 htobe32(MLX4_CQE_STATUS_IPV4_CSUM_OK);
+}
+
+static int mlx4_gather_rx(struct rx_queue *rxq, struct rx_net_hdr **hdrs, unsigned int budget)
+{
 	uint16_t wqe_idx;
 	int rx_cnt;
 
-	struct mlx5_rxq *v = container_of(rxq, struct mlx5_rxq, rxq);
-	struct mlx5dv_rwq *wq = &v->rx_wq_dv;
-	struct mlx5dv_cq *cq = &v->rx_cq_dv;
+	struct mlx4_rxq *v = container_of(rxq, struct mlx4_rxq, rxq);
+	struct mlx4dv_rwq *wq = &v->rx_wq_dv;
+	struct mlx4dv_cq *cq = &v->rx_cq_dv;
 
-	struct mlx5_cqe64 *cqe, *cqes = cq->buf;
+	struct mlx4_cqe *cqe, *cqes = cq->buf.buf;
 	unsigned char *buf;
 	struct rx_net_hdr *hdr;
 
 	for (rx_cnt = 0; rx_cnt < budget; rx_cnt++, v->rxq.consumer_idx++) {
-		cqe = &cqes[v->rxq.consumer_idx & (cq->cqe_cnt - 1)];
-		opcode = cqe_status(cqe, cq->cqe_cnt, v->rxq.consumer_idx);
+		cqe = &cqes[2 * (v->rxq.consumer_idx & (cq->cqe_cnt - 1))] + 1;
 
-		if (opcode == MLX5_CQE_INVALID)
+		if (!!(ACCESS_ONCE(cqe->owner_sr_opcode) & MLX4_CQE_OWNER_MASK) ^ !!(v->rxq.consumer_idx & cq->cqe_cnt))
 			break;
 
-		if (unlikely(opcode != MLX5_CQE_RESP_SEND)) {
-			log_err("got opcode %02X", opcode);
-			BUG();
-		}
+		BUG_ON(mlx4dv_get_cqe_opcode(cqe) == MLX4_CQE_OPCODE_ERROR);
 
-		assert(mlx5_get_cqe_format(cqe) != 0x3); // not compressed
-
-		wqe_idx = be16toh(cqe->wqe_counter) & (wq->wqe_cnt - 1);
+		wqe_idx = be16toh(cqe->wqe_index) & (wq->rq.wqe_cnt - 1);
 		buf = v->buffers[wqe_idx];
 		hdr = (struct rx_net_hdr *)(buf + RX_BUF_RESERVED - sizeof(*hdr));
 		hdr->completion_data = (unsigned long)buf;
 		hdr->len = be32toh(cqe->byte_cnt);
-		hdr->csum_type = mlx5_csum_ok(cqe);
-		hdr->rss_hash = mlx5_get_rss_result(cqe);
+		hdr->csum_type = mlx4_csum_ok(cqe);
+		hdr->rss_hash = cqe->immed_rss_invalid;
 		hdrs[rx_cnt] = hdr;
 	}
 
@@ -247,16 +232,15 @@ static int mlx5_gather_rx(struct rx_queue *rxq, struct rx_net_hdr **hdrs, unsign
 
 	ACCESS_ONCE(*rxq->shadow_tail) = v->rxq.consumer_idx;
 
-	cq->dbrec[0] = htobe32(v->rxq.consumer_idx & 0xffffff);
-	BUG_ON(mlx5_refill_rxqueue(v, rx_cnt));
+	*cq->set_ci_db = htobe32(v->rxq.consumer_idx  & 0xffffff);
+	BUG_ON(mlx4_refill_rxqueue(v, rx_cnt));
 
 	return rx_cnt;
-
 }
 
 
 /*
- * simple_alloc - simple memory allocator for internal MLX5 structures
+ * simple_alloc - simple memory allocator for internal MLX4 structures
  */
 static void *simple_alloc(size_t size, void *priv_data)
 {
@@ -267,15 +251,20 @@ static void *simple_alloc(size_t size, void *priv_data)
 
 static void simple_free(void *ptr, void *priv_data) {}
 
-static struct mlx5dv_ctx_allocators dv_allocators = {
+static struct mlx4dv_ctx_allocators dv_allocators = {
 	.alloc = simple_alloc,
 	.free = simple_free,
 };
 
-static int mlx5_create_rxq(int index, struct mlx5_rxq *v)
+static int mlx4_create_rxq(int index, int rwq_wqn_alignment)
 {
-	int i, ret;
+	int i, ret, rwq_discard = 0;
 	unsigned char *buf;
+	struct mlx4_rxq *v = &rxqs[index];
+	struct mlx4dv_rwq *wq;
+	struct mlx4_wqe_data_seg *seg;
+	struct ibv_wq *to_free[rwq_wqn_alignment];
+	struct ibv_wq_attr wq_attr;
 
 	v->rxq.id = index;
 
@@ -288,10 +277,7 @@ static int mlx5_create_rxq(int index, struct mlx5_rxq *v)
 		.comp_mask = IBV_CQ_INIT_ATTR_MASK_FLAGS,
 		.flags = IBV_CREATE_CQ_ATTR_SINGLE_THREADED,
 	};
-	struct mlx5dv_cq_init_attr dv_cq_attr = {
-		.comp_mask = 0,
-	};
-	v->rx_cq = mlx5dv_create_cq(context, &cq_attr, &dv_cq_attr);
+	v->rx_cq = ibv_create_cq_ex(context, &cq_attr);
 	if (!v->rx_cq)
 		return -errno;
 
@@ -302,13 +288,22 @@ static int mlx5_create_rxq(int index, struct mlx5_rxq *v)
 		.max_sge = 1,
 		.pd = pd,
 		.cq = ibv_cq_ex_to_cq(v->rx_cq),
-		.comp_mask = IBV_WQ_INIT_ATTR_FLAGS,
-		.create_flags = IBV_WQ_FLAGS_DELAY_DROP,
-	};
-	struct mlx5dv_wq_init_attr dv_wq_attr = {
 		.comp_mask = 0,
 	};
-	v->rx_wq = mlx5dv_create_wq(context, &wq_init_attr, &dv_wq_attr);
+	v->rx_wq = ibv_create_wq(context, &wq_init_attr);
+
+	/* mlx4 wants the wqn to be aligned with the size of the RSS table */
+	/* keep creating WQs until the alignment matches */
+	if (rwq_wqn_alignment) {
+		while (v->rx_wq && v->rx_wq->wq_num % rwq_wqn_alignment != 0) {
+			to_free[rwq_discard++] = v->rx_wq;
+			v->rx_wq = ibv_create_wq(context, &wq_init_attr);
+		}
+
+		for (i = 0; i < rwq_discard; i++)
+			ibv_destroy_wq(to_free[i]);
+	}
+
 	if (!v->rx_wq)
 		return -errno;
 
@@ -316,7 +311,6 @@ static int mlx5_create_rxq(int index, struct mlx5_rxq *v)
 		log_warn("Ring size is larger than anticipated");
 
 	/* Set the WQ state to ready */
-	struct ibv_wq_attr wq_attr;
 	memset(&wq_attr, 0, sizeof(wq_attr));
 	wq_attr.attr_mask = IBV_WQ_ATTR_STATE;
 	wq_attr.wq_state = IBV_WQS_RDY;
@@ -325,7 +319,7 @@ static int mlx5_create_rxq(int index, struct mlx5_rxq *v)
 		return -ret;
 
 	/* expose direct verbs objects */
-	struct mlx5dv_obj obj = {
+	struct mlx4dv_obj obj = {
 		.cq = {
 			.in = ibv_cq_ex_to_cq(v->rx_cq),
 			.out = &v->rx_cq_dv,
@@ -335,31 +329,28 @@ static int mlx5_create_rxq(int index, struct mlx5_rxq *v)
 			.out = &v->rx_wq_dv,
 		},
 	};
-	ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ | MLX5DV_OBJ_RWQ);
+	ret = mlx4dv_init_obj(&obj, MLX4DV_OBJ_CQ | MLX4DV_OBJ_RWQ);
 	if (ret)
 		return -ret;
 
-	BUG_ON(!is_power_of_two(v->rx_wq_dv.stride));
-	BUG_ON(!is_power_of_two(v->rx_cq_dv.cqe_size));
-	v->rx_wq_log_stride = __builtin_ctz(v->rx_wq_dv.stride);
-	v->rx_cq_log_stride = __builtin_ctz(v->rx_cq_dv.cqe_size);
+	BUG_ON(v->rx_cq_dv.cqe_size != 64);
 
 	/* allocate list of posted buffers */
-	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->rx_wq_dv.wqe_cnt * sizeof(void *));
+	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->rx_wq_dv.rq.wqe_cnt * sizeof(void *));
 	if (!v->buffers)
 		return -ENOMEM;
 
-	v->rxq.descriptor_table = v->rx_cq_dv.buf;
+	v->rxq.descriptor_table = v->rx_cq_dv.buf.buf;
 	v->rxq.nr_descriptors = v->rx_cq_dv.cqe_cnt;
-	v->rxq.descriptor_log_size = __builtin_ctz(sizeof(struct mlx5_cqe64));
-	v->rxq.parity_byte_offset = offsetof(struct mlx5_cqe64, op_own);
-	v->rxq.parity_bit_mask = MLX5_CQE_OWNER_MASK;
-	v->rxq.hwq_type = HWQ_MLX5;
+	v->rxq.descriptor_log_size = __builtin_ctz(v->rx_cq_dv.cqe_size);
+	v->rxq.parity_byte_offset = sizeof(struct mlx4_cqe) + offsetof(struct mlx4_cqe, owner_sr_opcode);
+	v->rxq.parity_bit_mask = MLX4_CQE_OWNER_MASK;
+	v->rxq.hwq_type = HWQ_MLX4;
 
 	/* set byte_count and lkey for all descriptors once */
-	struct mlx5dv_rwq *wq = &v->rx_wq_dv;
-	for (i = 0; i < wq->wqe_cnt; i++) {
-		struct mlx5_wqe_data_seg *seg = wq->buf + i * wq->stride;
+	wq = &v->rx_wq_dv;
+	for (i = 0; i < wq->rq.wqe_cnt; i++) {
+		seg = wq->buf.buf + wq->rq.offset + (i << wq->rq.wqe_shift);
 		seg->byte_count =  htobe32(MBUF_DEFAULT_LEN - RX_BUF_RESERVED);
 		seg->lkey = htobe32(mr_rx->lkey);
 
@@ -373,20 +364,13 @@ static int mlx5_create_rxq(int index, struct mlx5_rxq *v)
 		v->wq_head++;
 	}
 
-	/* set ownership of cqes to "hardware" */
-	struct mlx5dv_cq *cq = &v->rx_cq_dv;
-	for (i = 0; i < cq->cqe_cnt; i++) {
-		struct mlx5_cqe64 *cqe = cq->buf + i * cq->cqe_size;
-		mlx5dv_set_cqe_owner(cqe, 1);
-	}
-
 	udma_to_device_barrier();
-	wq->dbrec[0] = htobe32(v->wq_head & 0xffff);
+	*wq->rdb = htobe32(v->wq_head & 0xffff);
 
 	return 0;
 }
 
-static int mlx5_init_txq(int index, struct mlx5_txq *v)
+static int mlx4_init_txq(int index, struct mlx4_txq *v)
 {
 	int i, ret;
 
@@ -401,10 +385,7 @@ static int mlx5_init_txq(int index, struct mlx5_txq *v)
 		.comp_mask = IBV_CQ_INIT_ATTR_MASK_FLAGS,
 		.flags = IBV_CREATE_CQ_ATTR_SINGLE_THREADED,
 	};
-	struct mlx5dv_cq_init_attr dv_cq_attr = {
-		.comp_mask = 0,
-	};
-	v->tx_cq = mlx5dv_create_cq(context, &cq_attr, &dv_cq_attr);
+	v->tx_cq = ibv_create_cq_ex(context, &cq_attr);
 	if (!v->tx_cq)
 		return -errno;
 
@@ -423,10 +404,10 @@ static int mlx5_init_txq(int index, struct mlx5_txq *v)
 		.pd = pd,
 		.comp_mask = IBV_QP_INIT_ATTR_PD
 	};
-	struct mlx5dv_qp_init_attr dv_qp_attr = {
+	struct mlx4dv_qp_init_attr dv_qp_attr = {
 		.comp_mask = 0,
 	};
-	v->tx_qp = mlx5dv_create_qp(context, &qp_init_attr, &dv_qp_attr);
+	v->tx_qp = mlx4dv_create_qp(context, &qp_init_attr, &dv_qp_attr);
 	if (!v->tx_qp)
 		return -errno;
 
@@ -451,7 +432,7 @@ static int mlx5_init_txq(int index, struct mlx5_txq *v)
 	if (ret)
 		return -ret;
 
-	struct mlx5dv_obj obj = {
+	struct mlx4dv_obj obj = {
 		.cq = {
 			.in = ibv_cq_ex_to_cq(v->tx_cq),
 			.out = &v->tx_cq_dv,
@@ -461,14 +442,11 @@ static int mlx5_init_txq(int index, struct mlx5_txq *v)
 			.out = &v->tx_qp_dv,
 		},
 	};
-	ret = mlx5dv_init_obj(&obj, MLX5DV_OBJ_CQ | MLX5DV_OBJ_QP);
+	ret = mlx4dv_init_obj(&obj, MLX4DV_OBJ_CQ | MLX4DV_OBJ_QP);
 	if (ret)
 		return -ret;
 
-	BUG_ON(!is_power_of_two(v->tx_cq_dv.cqe_size));
-	BUG_ON(!is_power_of_two(v->tx_qp_dv.sq.stride));
-	v->tx_sq_log_stride = __builtin_ctz(v->tx_qp_dv.sq.stride);
-	v->tx_cq_log_stride = __builtin_ctz(v->tx_cq_dv.cqe_size);
+	BUG_ON(v->tx_cq_dv.cqe_size != 64);
 
 	/* allocate list of posted buffers */
 	v->buffers = aligned_alloc(CACHE_LINE_SIZE, v->tx_qp_dv.sq.wqe_cnt * sizeof(*v->buffers));
@@ -476,22 +454,22 @@ static int mlx5_init_txq(int index, struct mlx5_txq *v)
 		return -ENOMEM;
 
 	for (i = 0; i < v->tx_qp_dv.sq.wqe_cnt; i++)
-		mlx5_init_tx_segment(v, i);
+		mlx4_init_tx_segment(v, i);
 
 	return 0;
 }
 
 
-struct net_driver_ops mlx5_ops = {
-	.rx_batch = mlx5_gather_rx,
-	.tx_single = mlx5_transmit_one,
-	.rx_completion = mlx5_rx_completion,
+struct net_driver_ops mlx4_ops = {
+	.rx_batch = mlx4_gather_rx,
+	.tx_single = mlx4_transmit_one,
+	.rx_completion = mlx4_rx_completion,
 };
 
 /*
- * mlx5_init - intialize all TX/RX queues
+ * mlx4_init - intialize all TX/RX queues
  */
-int mlx5_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
+int mlx4_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
 	             unsigned int nr_rxq, unsigned int nr_txq)
 {
 	int i, ret;
@@ -499,6 +477,7 @@ int mlx5_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
 	struct ibv_device **dev_list;
 	struct ibv_device *ib_dev;
 	struct ibv_qp *qp;
+	struct ibv_qp_attr qp_attr;
 	struct ibv_rwq_ind_table *rwq_ind_table;
 	struct ibv_wq *ind_tbl[MAX_BUNDLES];
 	struct ibv_flow *eth_flow;
@@ -514,57 +493,58 @@ int mlx5_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
 
 	i = 0;
 	while ((ib_dev = dev_list[i])) {
-		if (strncmp(ibv_get_device_name(ib_dev), "mlx5", 4) == 0)
+		if (strncmp(ibv_get_device_name(ib_dev), "mlx4", 4) == 0)
 			break;
 		i++;
 	}
 
 	if (!ib_dev) {
-		log_err("mlx5_init: IB device not found");
+		log_err("mlx4_init: IB device not found");
 		return -1;
 	}
 
-	struct mlx5dv_context_attr attr;
-	memset(&attr, 0, sizeof(attr));
-	context = mlx5dv_open_device(ib_dev, &attr);
+	context = ibv_open_device(ib_dev);
+
 	if (!context) {
-		log_err("mlx5_init: Couldn't get context for %s",
-			ibv_get_device_name(ib_dev));
+		log_err("mlx4_init: Couldn't get context for %s: errno = %d",
+			ibv_get_device_name(ib_dev), errno);
 		return -1;
 	}
 
 	ibv_free_device_list(dev_list);
 
-	ret = mlx5dv_set_context_attr(context,
-		  MLX5DV_CTX_ATTR_BUF_ALLOCATORS, &dv_allocators);
+	ret = mlx4dv_set_context_attr(context,
+		  MLX4DV_SET_CTX_ATTR_BUF_ALLOCATORS, &dv_allocators);
 	if (ret) {
-		log_err("mlx5_init: error setting memory allocator");
+		log_err("mlx4_init: error setting memory allocator");
 		return -1;
 	}
 
 	pd = ibv_alloc_pd(context);
 	if (!pd) {
-		log_err("mlx5_init: Couldn't allocate PD");
+		log_err("mlx4_init: Couldn't allocate PD");
 		return -1;
 	}
 
 	/* Register memory for TX buffers */
 	mr_tx = ibv_reg_mr(pd, net_tx_buf_mp.buf, net_tx_buf_mp.len, IBV_ACCESS_LOCAL_WRITE);
 	if (!mr_tx) {
-		log_err("mlx5_init: Couldn't register mr");
+		log_err("mlx4_init: Couldn't register mr");
 		return -1;
 	}
 
 	mr_rx = ibv_reg_mr(pd, net_rx_buf_mp.buf, net_rx_buf_mp.len, IBV_ACCESS_LOCAL_WRITE);
 	if (!mr_rx) {
-		log_err("mlx5_init: Couldn't register mr");
+		log_err("mlx4_init: Couldn't register mr");
 		return -1;
 	}
 
 	for (i = 0; i < nr_rxq; i++) {
-		ret = mlx5_create_rxq(i, &rxqs[i]);
-		if (ret)
+		ret = mlx4_create_rxq(i, i ? 0 : nr_rxq);
+		if (ret) {
+			log_err("mlx4_init: failed to create rxq");
 			return ret;
+		}
 
 		rxq_out[i] = &rxqs[i].rxq;
 		ind_tbl[i] = rxqs[i].rx_wq;
@@ -585,28 +565,41 @@ int mlx5_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
 		.rx_hash_function = IBV_RX_HASH_FUNC_TOEPLITZ,
 		.rx_hash_key_len = ARRAY_SIZE(rss_key),
 		.rx_hash_key = rss_key,
-
-#ifdef MLX5_TCP_RSS
+#ifdef MLX4_TCP_RSS
 		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_TCP | IBV_RX_HASH_DST_PORT_TCP,
 #else
 		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_UDP | IBV_RX_HASH_DST_PORT_UDP,
 #endif
 	};
+
 	struct ibv_qp_init_attr_ex qp_ex_attr = {
 		.qp_type = IBV_QPT_RAW_PACKET,
-		.comp_mask =  IBV_QP_INIT_ATTR_IND_TABLE | IBV_QP_INIT_ATTR_RX_HASH | IBV_QP_INIT_ATTR_PD,
+		.comp_mask = IBV_QP_INIT_ATTR_IND_TABLE | IBV_QP_INIT_ATTR_RX_HASH | IBV_QP_INIT_ATTR_PD,
 		.pd = pd,
 		.rwq_ind_tbl = rwq_ind_table,
 		.rx_hash_conf = rss_cnf,
 	};
-
-	struct mlx5dv_qp_init_attr dv_qp_attr = {
+	struct mlx4dv_qp_init_attr dv_qp_attr = {
 		.comp_mask = 0,
 	};
 
-	qp = mlx5dv_create_qp(context, &qp_ex_attr, &dv_qp_attr);
+	qp = mlx4dv_create_qp(context, &qp_ex_attr, &dv_qp_attr);
 	if (!qp)
 		return -errno;
+
+	/* Turn on QP in 2 steps */
+	memset(&qp_attr, 0, sizeof(qp_attr));
+	qp_attr.qp_state = IBV_QPS_INIT;
+	qp_attr.port_num = 1;
+	ret = ibv_modify_qp(qp, &qp_attr, IBV_QP_STATE | IBV_QP_PORT);
+	if (ret)
+		return -ret;
+
+	memset(&qp_attr, 0, sizeof(qp_attr));
+	qp_attr.qp_state = IBV_QPS_RTR;
+	ret = ibv_modify_qp(qp, &qp_attr, IBV_QP_STATE);
+	if (ret)
+		return -ret;
 
 	/* Route packets for our MAC address to our set of RX work queues */
 	struct raw_eth_flow_attr {
@@ -643,29 +636,21 @@ int mlx5_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
 	if (!eth_flow)
 		return -errno;
 
-	/* Route multicast traffic to our RX queues */
-	struct ibv_flow_attr mc_attr = {
-		.comp_mask = 0,
-		.type = IBV_FLOW_ATTR_MC_DEFAULT,
-		.size = sizeof(mc_attr),
-		.priority = 0,
-		.num_of_specs = 0,
-		.port = PORT_NUM,
-		.flags = 0,
-	};
-	eth_flow = ibv_create_flow(qp, &mc_attr);
+	/* Route broadcst packets to our set of RX work queues */
+	memcpy(&flow_attr.spec_eth.val.dst_mac, &flow_attr.spec_eth.mask.dst_mac, 6);
+	eth_flow = ibv_create_flow(qp, &flow_attr.attr);
 	if (!eth_flow)
 		return -errno;
 
 	for (i = 0; i < nr_txq; i++) {
-		ret = mlx5_init_txq(i, &txqs[i]);
+		ret = mlx4_init_txq(i, &txqs[i]);
 		if (ret)
 			return ret;
 
 		txq_out[i] = &txqs[i].txq;
 	}
 
-	netcfg.ops = mlx5_ops;
+	netcfg.ops = mlx4_ops;
 
 	return 0;
 }

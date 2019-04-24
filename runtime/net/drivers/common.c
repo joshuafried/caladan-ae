@@ -1,4 +1,6 @@
 
+#include <base/log.h>
+
 #include "common.h"
 #include "../../defs.h"
 
@@ -6,6 +8,8 @@ static struct rx_queue *rxq_out[MAX_BUNDLES];
 static struct tx_queue *txq_out[NCPU];
 
 int mlx5_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
+	             unsigned int nr_rxq, unsigned int nr_txq);
+int mlx4_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
 	             unsigned int nr_rxq, unsigned int nr_txq);
 
 int ethdev_init(void)
@@ -15,7 +19,14 @@ int ethdev_init(void)
 	struct bundle_spec *bs;
 	struct hardware_queue_spec *hs;
 
+	log_info("Creating %u rx queues", nr_bundles);
+
+	/* try initializing mlx5 */
 	ret = mlx5_init(rxq_out, txq_out, nr_bundles, maxks);
+	if (ret)
+		/* if that fails, try mlx4 */
+		ret = mlx4_init(rxq_out, txq_out, nr_bundles, maxks);
+
 	if (ret)
 		return ret;
 
