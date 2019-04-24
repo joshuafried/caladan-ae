@@ -13,6 +13,8 @@
 /* The abstract namespace path for the control socket. */
 #define CONTROL_SOCK_PATH	"\0/control/iokernel.sock"
 
+#define IOK_ONLINE_CORE_PATH "/run/iokernel_managed_cores"
+
 /* describes a queue */
 struct q_ptrs {
 	uint32_t rxq_wb; /* must be first */

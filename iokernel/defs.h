@@ -264,6 +264,7 @@ extern bool rx_send_to_runtime(struct proc *p, uint32_t hash, uint64_t cmd,
 extern int cores_init(void);
 extern int control_init(void);
 extern int dp_clients_init();
+extern int report_online_cores(void);
 
 extern bool allowed_cpus_supplied;
 extern DEFINE_BITMAP(allowed_cpus, NCPU);

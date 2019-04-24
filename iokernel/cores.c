@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdio.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -1022,5 +1023,36 @@ int cores_init(void)
 		 core_assign.linux_core, core_assign.ctrl_core,
 		 core_assign.dp_core);
 
+	report_online_cores();
+
 	return 0;
+}
+
+/*
+ * Publish set of online managed cores to a globally readable file.
+ */
+int report_online_cores(void)
+{
+	int fd, cpu, ret, pos = 0;
+	ssize_t wret;
+	char buf[4096];
+
+	bitmap_for_each_set(online_cores, NCPU, cpu) {
+		ret = snprintf(buf + pos, 4096 - pos, "%d,", cpu);
+		if (ret <= 0)
+			return -1;
+		pos += ret;
+	}
+	buf[pos-1] = '\n';
+
+	fd = open(IOK_ONLINE_CORE_PATH, O_CREAT | O_TRUNC | O_WRONLY, 00644);
+	if (fd < 0)
+		return -errno;
+
+	wret = write(fd, buf, pos);
+	ret = (wret == pos) ? 0 : -1;
+
+	close(fd);
+	return ret;
+
 }

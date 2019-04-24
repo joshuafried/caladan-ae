@@ -2,6 +2,7 @@
  * kthread.c - support for adding and removing kernel threads
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -45,6 +46,8 @@ __thread unsigned int curr_cpu;
 __thread unsigned int curr_phys_cpu;
 
 static __thread int ksched_fd;
+
+static DEFINE_BITMAP(possible_cores, NCPU);
 
 DEFINE_BITMAP(core_awake, NCPU);
 atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
@@ -258,34 +261,58 @@ void kthread_wait_to_attach(void)
 	atomic_inc(&runningks);
 }
 
-int kthread_init(void)
+static int discover_cpus(void)
 {
-	int i, j, ret;
+	int ret;
+	char buf[4096];
+	FILE *f;
 
-	unsigned char rands[nr_bundles];
+	f = fopen(IOK_ONLINE_CORE_PATH, "r");
+	if (f == NULL)
+		return -errno;
 
-	for (i = 0; i < cpu_count; i++) {
-		if (bitmap_find_next_set(cpu_info_tbl[i].thread_siblings_mask,
-			  cpu_count, 0) < i)
-			continue;
-
-		ret = fill_random_bytes(rands, nr_bundles);
-		if (ret)
-			return ret;
-
-		for (j = 0; j < nr_bundles; j++)
-			preference_table[i][j] = j;
-
-		for (j = nr_bundles - 1; j >= 1; j--)
-			swapvars(preference_table[i][j], preference_table[i][rands[j] % j]);
+	if (!fgets(buf, 4096, f)) {
+		ret = -errno;
+		goto done;
 	}
 
+	buf[strlen(buf) - 1] = 0;
+
+	ret = string_to_bitmap(buf, possible_cores, NCPU);
+
+done:
+	fclose(f);
+	return ret;
+}
+
+int kthread_init(void)
+{
+	int i, j, sibling, core, ret, total = 0;
+
+	ret = discover_cpus();
+	if (ret)
+		return ret;
+
+	bitmap_for_each_set(possible_cores, NCPU, i) {
+		sibling = bitmap_find_next_set(cpu_info_tbl[i].thread_siblings_mask,
+			  cpu_count, 0);
+
+		if (sibling < i && bitmap_test(possible_cores, sibling))
+			continue;
+
+		core = min(i, sibling);
+
+		for (j = 0; j < nr_bundles; j++)
+			preference_table[core][j] = (total + j) % nr_bundles;
+
+		total++;
+	}
 	return 0;
 }
 
 void __update_assignments(void)
 {
-	int i, q, phys_id, n = 0;
+	int i, q = 0, phys_id, n = 0;
 	uint64_t cur_gen;
 
 	DEFINE_BITMAP(q_done, nr_bundles);
