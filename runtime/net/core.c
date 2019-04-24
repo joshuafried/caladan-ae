@@ -3,6 +3,7 @@
  */
 
 #include <stdio.h>
+#include <sys/mman.h>
 
 #include <base/hash.h>
 #include <base/log.h>
@@ -573,6 +574,10 @@ int net_init(void)
 	if (tx_buf == MAP_FAILED)
 		return -ENOMEM;
 
+	ret = mlock(tx_buf, tx_len);
+	if (ret)
+		return ret;
+
 	ret = mempool_create(&net_tx_buf_mp, tx_buf, tx_len,
 			     PGSIZE_2MB, MBUF_DEFAULT_LEN);
 	if (ret)
@@ -587,6 +592,10 @@ int net_init(void)
 	rx_buf = mem_map_anom(NULL, rx_len, PGSIZE_2MB, 0);
 	if (rx_buf == MAP_FAILED)
 		return -ENOMEM;
+
+	ret = mlock(rx_buf, rx_len);
+	if (ret)
+		return ret;
 
 	ret = mempool_create(&net_rx_buf_mp, rx_buf, rx_len,
 			     PGSIZE_2MB, MBUF_DEFAULT_LEN);
