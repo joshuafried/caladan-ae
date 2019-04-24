@@ -235,7 +235,6 @@ static __noreturn __noinline void schedule(void)
 	struct kthread *r = NULL, *l = myk();
 	uint64_t start_tsc, end_tsc;
 	thread_t *th = NULL;
-	unsigned int last_nrks;
 	unsigned int iters = 0;
 	int i, sibling;
 
@@ -290,8 +289,6 @@ again:
 		goto done;
 	}
 
-	last_nrks = load_acquire(&nrks);
-
 	/* then try to steal from a sibling kthread */
 	sibling = cpu_map[l->curr_cpu].sibling_core;
 	r = cpu_map[sibling].recent_kthread;
@@ -299,22 +296,22 @@ again:
 		goto done;
 
 	/* then try to steal from a random kthread */
-	r = ks[rand_crc32c((uintptr_t)l) % last_nrks];
+	r = allks[rand_crc32c((uintptr_t)l) % maxks];
 	if (r != l && steal_work(l, r))
 		goto done;
 
-	/* try to steal from every kthread */
-	for (i = 0; i < last_nrks; i++) {
-		int pos = (i + l->kthread_idx) % last_nrks;
-		if (ks[pos] != l && steal_work(l, ks[pos]))
+	/* then try to steal from the runqueues of active kthreads */
+	bitmap_for_each_set(core_awake, cpu_count, i) {
+		r = cpu_map[i].recent_kthread;
+		if (r && r != l && steal_work(l, r))
 			goto done;
 	}
 
-	/* try to steal from every bundle */
-	for (i = 0; i < last_nrks; i++) {
-		int pos = (i + l->kthread_idx) % last_nrks;
-		if (ks[pos] != l) {
-			th = softirq_steal_bundle(ks[pos], RUNTIME_SOFTIRQ_BUDGET);
+	/* finally try to steal from each bundle */
+	bitmap_for_each_set(core_awake, cpu_count, i) {
+		r = cpu_map[i].recent_kthread;
+		if (r && r != l) {
+			th = softirq_steal_bundle(r, RUNTIME_SOFTIRQ_BUDGET);
 			if (th) {
 				STAT(SOFTIRQS_STOLEN)++;
 				goto done;

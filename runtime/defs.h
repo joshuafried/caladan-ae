@@ -409,8 +409,6 @@ DECLARE_SPINLOCK(klock);
 extern unsigned int maxks;
 extern unsigned int spinks;
 extern unsigned int guaranteedks;
-extern unsigned int nrks;
-extern struct kthread *ks[NCPU];
 extern struct kthread *allks[NCPU];
 
 extern void kthread_detach(struct kthread *r);
@@ -558,6 +556,8 @@ static inline struct io_bundle *get_first_bundle(struct kthread *k)
 	id = get_core_id(k);
 	return &bundles[preference_table[id][0]];
 }
+
+extern DEFINE_BITMAP(core_awake, NCPU);
 
 /*
  * Init

@@ -27,8 +27,6 @@
 DEFINE_SPINLOCK(klock);
 /* the maximum number of kthreads */
 unsigned int maxks;
-/* the total number of attached kthreads (i.e. the size of @ks) */
-unsigned int nrks;
 /* the number of busy spinning kthreads (threads that don't park) */
 unsigned int spinks;
 /* the number of guaranteed kthreads (we can always have this many if we want,
@@ -36,8 +34,6 @@ unsigned int spinks;
 unsigned int guaranteedks = 1;
 /* the number of active kthreads */
 static atomic_t runningks;
-/* an array of attached kthreads (@nrks in total) */
-struct kthread *ks[NCPU];
 /* an array of all kthreads, attached or detached (@maxks in total) */
 struct kthread *allks[NCPU];
 /* kernel thread-local data */
@@ -50,7 +46,7 @@ __thread unsigned int curr_phys_cpu;
 
 static __thread int ksched_fd;
 
-static DEFINE_BITMAP(core_awake, NCPU);
+DEFINE_BITMAP(core_awake, NCPU);
 atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
 
 static DEFINE_SPINLOCK(kthread_assignment_lock);
@@ -116,12 +112,6 @@ static void kthread_attach(void)
 	assert(k->detached == true);
 
 	k->detached = false;
-
-	spin_lock(&klock);
-	assert(nrks < maxks);
-	ks[nrks] = k;
-	store_release(&nrks, nrks + 1);
-	spin_unlock(&klock);
 }
 
 /**
@@ -136,30 +126,11 @@ static void kthread_attach(void)
 void kthread_detach(struct kthread *r)
 {
 	struct kthread *k = myk();
-	int i;
 
 	assert_spin_lock_held(&r->lock);
 	assert(r != k);
 	assert(r->parked == true);
 	assert(r->detached == false);
-
-	/* make sure the park rxcmd was processed */
-	lrpc_poll_send_tail(&r->txcmdq);
-	if (unlikely(lrpc_get_cached_length(&r->txcmdq) > 0))
-		return;
-
-
-	spin_lock(&klock);
-	assert(r != k);
-	assert(nrks > 0);
-	for (i = 0; i < nrks; i++)
-		if (ks[i] == r)
-			goto found;
-	BUG();
-
-found:
-	ks[i] = ks[--nrks];
-	spin_unlock(&klock);
 
 	/* steal all overflow packets and completions */
 	mbufq_merge_to_tail(&k->txpktq_overflow, &r->txpktq_overflow);
@@ -200,6 +171,7 @@ static void kthread_yield_to_iokernel(struct ksched_park_args *args)
 	k->curr_cpu = curr_cpu = sched_getcpu();
 	curr_phys_cpu = min(curr_cpu, cpu_map[curr_cpu].sibling_core);
 
+	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
 	bitmap_atomic_set(core_awake, k->curr_cpu);
 	atomic64_inc(&kthread_gen);
 
@@ -207,7 +179,7 @@ static void kthread_yield_to_iokernel(struct ksched_park_args *args)
 
 	if (k->curr_cpu != last_core)
 		STAT(CORE_MIGRATIONS)++;
-	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
+
 }
 
 /*
