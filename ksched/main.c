@@ -189,6 +189,8 @@ static int ksched_waiter_thread(void *arg)
 		if (run_next())
 			deschedule();
 
+		smp_store_release(&p->running_pid, 0);
+
 		mwait(&shm[cpu].gen, p->last_gen);
 
 		if (!lrpc_empty(&p->cmdq_in))
@@ -251,7 +253,7 @@ static long ksched_park(struct ksched_park_args __user *uargs)
 	}
 
 out:
-	p->running_pid = 0;
+	smp_store_release(&p->running_pid, 0);
 	rcu_read_lock();
 	ts = rcu_dereference(p->waiter_thread);
 	if (ts)
