@@ -566,6 +566,11 @@ static int __init ksched_init(void)
 {
 	int ret;
 
+	if (!cpu_has(&boot_cpu_data, X86_FEATURE_MWAIT)) {
+		printk(KERN_ERR "ksched: mwait support is required");
+		return -ENOTSUPP;
+	}
+
 	ret = alloc_chrdev_region(&devno, 0, 1, "ksched");
 	if (ret) {
 		printk(KERN_ERR "ksched: failed to reserve char dev region\n");
