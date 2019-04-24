@@ -30,7 +30,7 @@ MODULE_LICENSE("GPL");
 static struct cdev ksched_cdev;
 static dev_t devno;
 
-#define IOKERNEL_MAGIC ((void *)0x123)
+#define IOKERNEL_MAGIC ((void *)~0UL)
 static bool iokernel_running;
 static cpumask_var_t managed_cores;
 
@@ -508,13 +508,47 @@ ksched_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 static int ksched_open(struct inode *inode, struct file *filp)
 {
+	/* associate this file with this thread */
+	filp->private_data = (void *)(uintptr_t)current->pid;
+
+	/* ensure no conflict between a possible pid and IOKERNEL_MAGIC */
+	BUILD_BUG_ON(sizeof(current->pid) >= sizeof(filp->private_data));
+	BUILD_BUG_ON(sizeof(IOKERNEL_MAGIC) != sizeof(filp->private_data));
+
 	return 0;
+}
+
+/* FIXME: this is a rather crude way of cleaning up. */
+static void ksched_core_release(pid_t pid)
+{
+	int cpu;
+	struct ksched_percpu *p;
+	struct task_struct *ts;
+
+	for_each_cpu(cpu, managed_cores) {
+		p = per_cpu_ptr(&kp, cpu);
+		/* rescue a core that was running this pid */
+		if (smp_load_acquire(&p->running_pid) == pid) {
+				rcu_read_lock();
+				ts = rcu_dereference(p->waiter_thread);
+				if (ts)
+					get_task_struct(ts);
+				rcu_read_unlock();
+
+				if (ts) {
+					wake_up_process(ts);
+					put_task_struct(ts);
+				}
+		}
+	}
 }
 
 static int ksched_release(struct inode *inode, struct file *filp)
 {
 	if (filp->private_data == IOKERNEL_MAGIC)
 		ksched_cleanup();
+	else
+		ksched_core_release((pid_t)(uintptr_t)filp->private_data);
 	return 0;
 }
 
