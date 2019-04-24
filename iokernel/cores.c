@@ -25,7 +25,6 @@
 
 static unsigned int nr_avail_cores;
 static unsigned int total_cores;
-static DEFINE_BITMAP(online_cores, NCPU);
 static DEFINE_BITMAP(avail_cores, NCPU);
 static DEFINE_BITMAP(online_cores, NCPU);
 struct core_assignments core_assign;
@@ -200,6 +199,11 @@ static inline void core_init(unsigned int core)
 	core_history[core].current = NULL;
 	core_history[core].prev = NULL;
 	core_history[core].next = NULL;
+}
+
+static inline bool core_online(unsigned int core)
+{
+	return bitmap_test(online_cores, core);
 }
 
 /**
@@ -456,6 +460,9 @@ static int pick_core_for_proc(struct proc *p)
 		t = p->active_threads[i];
 		buddy_core = cpu_to_sibling_cpu(t->core);
 
+		if (!core_online(buddy_core))
+			continue;
+
 		if (core_available(buddy_core))
 			return buddy_core;
 
@@ -531,7 +538,7 @@ static struct thread *pick_thread_for_core(int core)
 #ifndef CORES_NOHT
 	/* try to allocate to the process running on the hyperthread pair core */
 	buddy_core = cpu_to_sibling_cpu(core);
-	if (core_history[buddy_core].current) {
+	if (core_online(buddy_core) && core_history[buddy_core].current) {
 		p = core_history[buddy_core].current->p;
 		if (!p->removed && proc_is_overloaded(p))
 			goto chose_proc;
@@ -998,6 +1005,9 @@ int cores_init(void)
 		if (i != j)
 			continue;
 #endif
+
+		if (allowed_cpus_supplied && !bitmap_test(allowed_cpus, i))
+			continue;
 
 		if (cpu_info_tbl[i].package == 0)
 			core_init(i);

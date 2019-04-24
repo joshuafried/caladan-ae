@@ -265,6 +265,9 @@ extern int cores_init(void);
 extern int control_init(void);
 extern int dp_clients_init();
 
+extern bool allowed_cpus_supplied;
+extern DEFINE_BITMAP(allowed_cpus, NCPU);
+
 /*
  * other dataplane functions
  */

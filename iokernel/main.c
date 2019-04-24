@@ -14,6 +14,9 @@
 #define LOG_INTERVAL_US		(1000UL * 1000UL)
 struct dataplane dp;
 
+bool allowed_cpus_supplied;
+DEFINE_BITMAP(allowed_cpus, NCPU);
+
 struct init_entry {
 	const char *name;
 	int (*init)(void);
@@ -106,6 +109,16 @@ void dataplane_loop()
 int main(int argc, char *argv[])
 {
 	int ret;
+
+	if (argc > 1) {
+		allowed_cpus_supplied = true;
+		ret = string_to_bitmap(argv[1], allowed_cpus, NCPU);
+		if (ret) {
+			fprintf(stderr, "invalid cpu list: %s\n", argv[1]);
+			fprintf(stderr, "example list: 0-24,26-48:2,49-255\n");
+			return ret;
+		}
+	}
 
 	ret = run_init_handlers("iokernel", iok_init_handlers,
 			ARRAY_SIZE(iok_init_handlers));
