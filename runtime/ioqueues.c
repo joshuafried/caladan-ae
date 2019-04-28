@@ -105,7 +105,8 @@ static int ioqueues_shm_setup(void)
 		bundles[i].b_vars = bv;
 
 		struct timer_spec *s;
-		iok_shm_alloc(sizeof(*s), 0, (void **)&s);
+		iok.bundles[i].timer_count = 1;
+		iok.bundles[i].timer_specs = iok_shm_alloc(sizeof(*s), 0, (void **)&s);
 		s->timern = ptr_to_shmptr(r, &bv->timern, sizeof(bv->timern));
 		s->next_deadline_tsc = ptr_to_shmptr(r, &bv->next_deadline_tsc, sizeof(bv->next_deadline_tsc));
 	}
