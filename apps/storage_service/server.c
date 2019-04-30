@@ -16,9 +16,9 @@ static void server_worker(void *arg) {
     ssize_t ret;
 
     binary_header_blk_t header;
-    char *buf = storage_zmalloc(SECTOR_SIZE);
+    char *buf = malloc(SECTOR_SIZE);
     if (buf == NULL) {
-        log_err("storage_zmalloc: out of memory!");
+        log_err("malloc: out of memory!");
         return;
     }
 
@@ -42,8 +42,11 @@ static void server_worker(void *arg) {
 
         uint32_t len = header.lba_count * SECTOR_SIZE;
         if (header.opcode == CMD_GET) {
-            if (storage_read(buf, header.lba, header.lba_count)) {
-                log_err("storage_read failed");
+            ret = storage_read(buf, header.lba, header.lba_count);
+            if (ret < 0) {
+                log_err("enomem %d", ENOMEM);
+                log_err("eio %d", EIO);
+                log_err("storage_read failed: %ld", ret);
                 break;
             }
             ret = tcp_writev(c, response, 2);
@@ -61,8 +64,8 @@ static void server_worker(void *arg) {
             if (ret < 0) {
                 log_err("tcp_read failed");
             }
-
-            if (storage_write(buf, header.lba, header.lba_count)) {
+            ret = storage_write(buf, header.lba, header.lba_count);
+            if (ret < 0) {
                 log_err("storage_write failed");
                 break;
             }
@@ -73,7 +76,7 @@ static void server_worker(void *arg) {
             }
         }
     }
-    storage_free(buf);
+    free(buf);
     tcp_close(c);
 }
 

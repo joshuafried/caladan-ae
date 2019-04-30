@@ -1,6 +1,6 @@
 BASEPATH = ../..
 SPDK_PATH = $(BASEPATH)/spdk
-INC     = -I../../inc
+INC     = -I../../inc -I $(SPDK_PATH)/include
 CFLAGS  = -g -Wall -std=gnu11 -D_GNU_SOURCE $(INC) -mssse3
 LDFLAGS = -T../../base/base.ld -no-pie
 LD	= gcc
