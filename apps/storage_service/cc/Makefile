@@ -1,17 +1,18 @@
-BASEPATH = ../..
+BASEPATH = ../../..
+CXXPATH = ../../../bindings/cc
 SPDK_PATH = $(BASEPATH)/spdk
-INC     = -I../../inc -I $(SPDK_PATH)/include
-CFLAGS  = -g -Wall -std=gnu11 -D_GNU_SOURCE $(INC) -mssse3
-LDFLAGS = -T../../base/base.ld -no-pie
-LD	= gcc
-CC	= gcc
+INC     = -I../../../inc -I../../../bindings/cc -I$(SPDK_PATH)/include
+CXXFLAGS  = -g -Wall -std=gnu++11 -D_GNU_SOURCE $(INC) -mssse3
+LDFLAGS = -T../../../base/base.ld -no-pie
+LD	= g++
+CC	= g++
 AR	= ar
 
 ifneq ($(DEBUG),)
-CFLAGS += -DDEBUG -DCCAN_LIST_DEBUG -rdynamic -O0 -ggdb
+CXXFLAGS += -DDEBUG -DCCAN_LIST_DEBUG -rdynamic -O0 -ggdb
 LDFLAGS += -rdynamic
 else
-CFLAGS += -DNDEBUG -O3
+CXXFLAGS += -DNDEBUG -O3
 endif
 
 SPDK_LIBS= -L$(SPDK_PATH)/build/lib -L$(SPDK_PATH)/dpdk/build/lib
@@ -35,24 +36,21 @@ SPDK_LIBS += -lrte_pci
 SPDK_LIBS += -lrte_ring
 SPDK_LIBS += -lrt -luuid -lcrypto -lnuma -ldl
 
-librt_libs = $(BASEPATH)/libruntime.a $(BASEPATH)/libnet.a $(BASEPATH)/libbase.a
+librt_libs = $(CXXPATH)/librt++.a $(BASEPATH)/libruntime.a $(BASEPATH)/libnet.a $(BASEPATH)/libbase.a
 
-src = server.c test-shenango-tcp.c
-obj = $(src:.c=.o)
+src = server.cc
+obj = $(src:.cc=.o)
 
-all: test server
+all: server
 
-%.o: %.c
-	$(CC) $(CFLAGS) -c $< -o $@
+%.o: %.cc
+	$(CC) $(CXXFLAGS) -c $< -o $@
 %.d: %.S
-	@$(CC) $(CFLAGS) $< -MM -MT $(@:.d=.o) >$@
+	@$(CC) $(CXXFLAGS) $< -MM -MT $(@:.d=.o) >$@
 %.o: %.S
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CXXFLAGS) -c $< -o $@
 
 server: server.o
-	$(LD) $(LDFLAGS) -o $@ $< $(librt_libs) $(SPDK_LIBS) -lpthread
-
-test: test-shenango-tcp.o 
 	$(LD) $(LDFLAGS) -o $@ $< $(librt_libs) $(SPDK_LIBS) -lpthread
 
 clean:
