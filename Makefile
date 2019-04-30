@@ -5,7 +5,7 @@ SPDK_PATH = spdk
 INC += -I$(SPDK_PATH)/include
 endif
 CFLAGS  = -g -Wall -std=gnu11 -D_GNU_SOURCE $(INC) -mssse3
-LDFLAGS = -T base/base.ld -no-pie -L $(RDMA_CORE_PATH)/build/lib -Wl,-rpath=$(RDMA_CORE_PATH)/build/lib/
+LDFLAGS = -T base/base.ld -L $(RDMA_CORE_PATH)/build/lib -Wl,-rpath=$(RDMA_CORE_PATH)/build/lib/
 LD	= gcc
 CC	= gcc
 AR	= ar

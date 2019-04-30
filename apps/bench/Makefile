@@ -6,7 +6,7 @@ SPDK_PATH = $(BASEPATH)/spdk
 INC     = -I../../inc -I../../bindings/cc -I$(SPDK_PATH)/include
 CXXFLAGS  = -g -Wall -std=gnu++11 -D_GNU_SOURCE $(INC) -mssse3
 RDMA_CORE = $(dir $(realpath $(firstword $(MAKEFILE_LIST))))/../../rdma-core
-LDFLAGS = -T../../base/base.ld -no-pie -L $(RDMA_CORE)/build/lib -Wl,-rpath $(RDMA_CORE)/build/lib
+LDFLAGS = -T../../base/base.ld -L $(RDMA_CORE)/build/lib -Wl,-rpath $(RDMA_CORE)/build/lib
 
 LD	= g++
 CC	= g++
