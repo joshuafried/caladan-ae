@@ -122,6 +122,17 @@ class TcpConn : public NetConn {
     return tcp_writev(c_, iov, iovcnt);
   }
 
+  // Writes a vector to the TCP stream.
+  ssize_t WritevFull(const iovec *iov, int iovcnt) {
+    size_t sent = 0;
+    for (ssize_t i = 0; i < iovcnt; i++) {
+        ssize_t ret = WriteFull(iov[i].iov_base, iov[i].iov_len);
+        if (ret <= 0) return ret;
+        sent += ret;
+    }
+    return sent;
+  }
+
   // Reads exactly @len bytes from the TCP stream.
   ssize_t ReadFull(void *buf, size_t len) {
     char *pos = reinterpret_cast<char*>(buf);

@@ -22,7 +22,7 @@ extern "C" {
 static int sector_size;
 static int payload_size;
 constexpr uint64_t kStorageServicePort = 5000;
-constexpr uint64_t kNumSectorsPerPayload = 1;
+constexpr uint64_t kNumSectorsPerPayload = 8;
 
 void ServerWorker(std::unique_ptr<rt::TcpConn> c, int my_worker_num)
 {
@@ -65,7 +65,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c, int my_worker_num)
                 log_err("storage_read failed");
                 break;
             }
-            ret = c->Writev(response, 2);
+            ret = c->WritevFull(response, 2);
             if (ret != static_cast<ssize_t>(sizeof(header) + payload_size)) {
                 log_err("tcp_writev failed");
                 break;
@@ -82,7 +82,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c, int my_worker_num)
                 log_err("storage_write failed");
                 break;
             }
-            ret = c->Write(&header, sizeof(header));
+            ret = c->WriteFull(&header, sizeof(header));
             if (ret != static_cast<ssize_t>(sizeof(header))) {
                 log_err("tcp_write failed");
                 break;
