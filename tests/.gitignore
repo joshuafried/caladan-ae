@@ -7,6 +7,7 @@ test_kthread_attach
 test_kthread_wakeup
 test_many_threads
 test_multiple_runtimes
+test_pagefault
 test_ping
 test_runtime_smalloc
 test_runtime_threads

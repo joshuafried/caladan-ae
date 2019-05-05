@@ -20,7 +20,7 @@ static void main_handler(void *arg)
 	log_info("num blocks: %d", storage_num_blocks());
 	log_info("block size: %d", block_size);
 	log_info("writing 'hello world' to device...");
-	buf = malloc(block_size);
+	buf = (char *)malloc(block_size);
 	sprintf(buf, "hello world");
 	ret = storage_write(buf, 0, 1);
 	if (ret) {
