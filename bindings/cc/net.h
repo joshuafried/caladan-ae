@@ -123,14 +123,32 @@ class TcpConn : public NetConn {
   }
 
   // Writes a vector to the TCP stream.
-  ssize_t WritevFull(const iovec *iov, int iovcnt) {
-    size_t sent = 0;
-    for (ssize_t i = 0; i < iovcnt; i++) {
-        ssize_t ret = WriteFull(iov[i].iov_base, iov[i].iov_len);
-        if (ret <= 0) return ret;
-        sent += ret;
-    }
-    return sent;
+  // ssize_t WritevFull(const iovec *iov, int iovcnt) {
+  //   size_t sent = 0;
+  //   for (ssize_t i = 0; i < iovcnt; i++) {
+  //       ssize_t ret = WriteFull(iov[i].iov_base, iov[i].iov_len);
+  //       if (ret <= 0) return ret;
+  //       sent += ret;
+  //   }
+  //   return sent;
+  // }
+  // 
+  ssize_t WritevFull(struct iovec *iov, int iovcnt) {
+      size_t sent = 0;
+      while (iovcnt) {
+          ssize_t ret = tcp_writev(c_, iov, iovcnt);
+          if (ret <= 0) return ret;
+          sent += ret;
+          while (iovcnt && ret >= static_cast<ssize_t>(iov->iov_len)) {
+              ret -= iov->iov_len;
+              iov++; iovcnt--;
+          }
+          if (ret) {
+              iov->iov_base = static_cast<void *>((static_cast<char *>(iov->iov_base) + ret));
+              iov->iov_len -= ret;
+          }
+      }
+      return sent;
   }
 
   // Reads exactly @len bytes from the TCP stream.

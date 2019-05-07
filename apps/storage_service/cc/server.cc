@@ -35,12 +35,6 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c, int my_worker_num)
         return;
     }
 
-    struct iovec response[2];
-    response[0].iov_base = &header;
-    response[0].iov_len = sizeof(header);
-    response[1].iov_base = buf.get();
-    response[1].iov_len = payload_size;
-
     while (true)
     {
         // Receive a work request.
@@ -65,16 +59,23 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c, int my_worker_num)
                 log_err("storage_read failed");
                 break;
             }
+
+            struct iovec response[2];
+            response[0].iov_base = &header;
+            response[0].iov_len = sizeof(header);
+            response[1].iov_base = buf.get();
+            response[1].iov_len = payload_size;
+
             ret = c->WritevFull(response, 2);
             if (ret != static_cast<ssize_t>(sizeof(header) + payload_size)) {
-                log_err("tcp_writev failed");
+                log_err("tcp_writev failed, ret = %ld", ret);
                 break;
             }
         }
         else if (header.opcode == CMD_SET) {
             ret = c->ReadFull(buf.get(), payload_size);
             if (ret != payload_size) {
-                log_err("tcp_read failed");
+                log_err("tcp_read failed, ret = %ld", ret);
                 break;
             }
             ret = storage_write(buf.get(), header.lba, header.lba_count);
@@ -84,7 +85,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c, int my_worker_num)
             }
             ret = c->WriteFull(&header, sizeof(header));
             if (ret != static_cast<ssize_t>(sizeof(header))) {
-                log_err("tcp_write failed");
+                log_err("tcp_write failed, ret = %ld", ret);
                 break;
             }
         }
