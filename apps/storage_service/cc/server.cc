@@ -2,7 +2,7 @@ extern "C" {
 #include <base/log.h>
 #include <net/ip.h>
 #include <unistd.h>
-
+#include <runtime/smalloc.h>
 #include <runtime/storage.h>
 }
 #undef min
@@ -24,22 +24,93 @@ static int payload_size;
 constexpr uint64_t kStorageServicePort = 5000;
 constexpr uint64_t kNumSectorsPerPayload = 8;
 
-void ServerWorker(std::unique_ptr<rt::TcpConn> c, int my_worker_num)
-{
-    binary_header_blk_t header;
-
-    std::unique_ptr<char[]> buf(new (std::nothrow) char [payload_size]);
-    if (buf.get() == nullptr) 
-    {
-        log_err("error allocating buffer");
-        return;
+class SharedTcp;
+class RequestContext {
+public:
+    RequestContext(std::shared_ptr<SharedTcp> conn) : conn_(conn) {}
+    binary_header_blk_t header_;
+    std::shared_ptr<SharedTcp> conn_;
+    char buf_[4096];
+    void * operator new(size_t size) {
+        return smalloc(size);
     }
+    void operator delete(void * p) {
+        sfree(p);
+    }
+};
+
+class SharedTcp {
+public:
+    SharedTcp(std::shared_ptr<rt::TcpConn> c) : c_(c) {}
+    ssize_t Write(const void *buf, size_t len) {
+         rt::ScopedLock<rt::Mutex> lock(&sendMutex_);
+         return c_->WriteFull(buf, len);
+    }
+    ssize_t Writev(const iovec *iov, int iovcnt) {
+         rt::ScopedLock<rt::Mutex> lock(&sendMutex_);
+         return c_->Writev(iov, iovcnt);
+    }
+private:
+    std::shared_ptr<rt::TcpConn> c_;
+    rt::Mutex sendMutex_;
+};
+
+void HandleRequest(RequestContext *ctx)
+{
+    ssize_t ret;
+    if (ctx->header_.opcode == CMD_GET) {
+        ret = storage_read(ctx->buf_, ctx->header_.lba, ctx->header_.lba_count);
+        if (ret < 0) {
+            log_err("storage_read failed");
+            return;
+        }
+        struct iovec response[2];
+        response[0].iov_base = &ctx->header_;
+        response[0].iov_len = sizeof(ctx->header_);
+        response[1].iov_base = ctx->buf_;
+        response[1].iov_len = payload_size;
+        
+        
+        ret = ctx->conn_->Writev(response, 2);
+        if (ret != static_cast<ssize_t>(sizeof(ctx->header_) + payload_size)) {
+            BUG();
+            log_err("tcp_writev failed");
+            return;
+        }
+    }
+
+    else {
+        
+        ret = storage_write(ctx->buf_, ctx->header_.lba, ctx->header_.lba_count);
+        if (ret < 0) {
+            log_err("storage_write failed");
+            return;
+        }
+        
+        ret = ctx->conn_->Write(&ctx->header_, sizeof(ctx->header_));
+        if (ret != static_cast<ssize_t>(sizeof(ctx->header_))) {
+            if (ret == -EPIPE || ret == -ECONNRESET) return;
+            BUG();
+            log_err("tcp_write failed");
+            return;
+        }       
+    }
+}
+
+
+void ServerWorker(std::shared_ptr<rt::TcpConn> c, int my_worker_num)
+{
+
+    auto resp = std::make_shared<SharedTcp>(c);
 
     while (true)
     {
+        /* allocate context */
+        auto ctx = new RequestContext(resp);
+
         // Receive a work request.
-        ssize_t ret = c->ReadFull(&header, sizeof(header));
-        if (ret != static_cast<ssize_t>(sizeof(header)))
+        ssize_t ret = c->ReadFull(&ctx->header_, sizeof(ctx->header_));
+        if (ret != static_cast<ssize_t>(sizeof(ctx->header_)))
         {
             if (ret == 0 || ret == -ECONNRESET)
                 break;
@@ -47,48 +118,22 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c, int my_worker_num)
             break;
         }
 
-        BUG_ON(header.magic != sizeof(binary_header_blk_t));
-        BUG_ON((header.opcode != CMD_GET) && (header.opcode != CMD_SET));
+        BUG_ON(ctx->header_.magic != sizeof(binary_header_blk_t));
+        BUG_ON((ctx->header_.opcode != CMD_GET) && (ctx->header_.opcode != CMD_SET));
 
         // currently only handling workloads where lba_count = kNumSectorsPerPayload
-        BUG_ON(header.lba_count != kNumSectorsPerPayload);
+        BUG_ON(ctx->header_.lba_count != kNumSectorsPerPayload);
 
-        if (header.opcode == CMD_GET) {
-            ret = storage_read(buf.get(), header.lba, header.lba_count);
-            if (ret < 0) {
-                log_err("storage_read failed");
-                break;
-            }
-
-            struct iovec response[2];
-            response[0].iov_base = &header;
-            response[0].iov_len = sizeof(header);
-            response[1].iov_base = buf.get();
-            response[1].iov_len = payload_size;
-
-            ret = c->WritevFull(response, 2);
-            if (ret != static_cast<ssize_t>(sizeof(header) + payload_size)) {
-                log_err("tcp_writev failed, ret = %ld", ret);
-                break;
-            }
-        }
-        else if (header.opcode == CMD_SET) {
-            ret = c->ReadFull(buf.get(), payload_size);
+        if (ctx->header_.opcode == CMD_SET) {
+            ret = c->ReadFull(ctx->buf_, payload_size);
             if (ret != payload_size) {
                 log_err("tcp_read failed, ret = %ld", ret);
                 break;
             }
-            ret = storage_write(buf.get(), header.lba, header.lba_count);
-            if (ret < 0) {
-                log_err("storage_write failed");
-                break;
-            }
-            ret = c->WriteFull(&header, sizeof(header));
-            if (ret != static_cast<ssize_t>(sizeof(header))) {
-                log_err("tcp_write failed, ret = %ld", ret);
-                break;
-            }
         }
+
+        rt::Thread([=] {HandleRequest(ctx); delete ctx; }).Detach(); // /*HandleRequest(ctx); }).Detach();
+
     }
 }
 
@@ -108,7 +153,7 @@ void MainHandler(void *arg) {
         if (c == nullptr)
             panic("couldn't accept a connection");
         int my_worker_num = worker_num++;
-        rt::Thread([=] { ServerWorker(std::unique_ptr<rt::TcpConn>(c), my_worker_num); }).Detach();
+        rt::Thread([=] { ServerWorker(std::shared_ptr<rt::TcpConn>(c), my_worker_num); }).Detach();
     }
 }
 
