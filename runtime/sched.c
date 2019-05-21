@@ -599,6 +599,7 @@ thread_t *thread_create(thread_fn_t fn, void *arg)
 	th->tf.rbp = (uint64_t)0; /* just in case base pointers are enabled */
 	th->tf.rip = (uint64_t)fn;
 	th->stack_busy = false;
+	th->last_cpu = myk()->curr_cpu;
 	return th;
 }
 
@@ -642,6 +643,7 @@ thread_t *thread_create_with_buf(thread_fn_t fn, void **buf, size_t buf_len)
 	th->tf.rbp = (uint64_t)0; /* just in case base pointers are enabled */
 	th->tf.rip = (uint64_t)fn;
 	th->stack_busy = false;
+	th->last_cpu = myk()->curr_cpu;
 	*buf = ptr;
 	return th;
 }
