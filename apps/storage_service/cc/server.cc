@@ -46,9 +46,9 @@ public:
          rt::ScopedLock<rt::Mutex> lock(&sendMutex_);
          return c_->WriteFull(buf, len);
     }
-    ssize_t Writev(const iovec *iov, int iovcnt) {
+    ssize_t Writev(struct iovec *iov, int iovcnt) {
          rt::ScopedLock<rt::Mutex> lock(&sendMutex_);
-         return c_->Writev(iov, iovcnt);
+         return c_->WritevFull(iov, iovcnt);
     }
 private:
     std::shared_ptr<rt::TcpConn> c_;
