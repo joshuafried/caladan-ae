@@ -275,7 +275,6 @@ struct iokernel_control {
 	struct thread_spec *threads;
 	struct bundle_spec *bundles;
 
-	unsigned int spdk_shm_id;
 };
 
 extern struct iokernel_control iok;

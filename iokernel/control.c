@@ -33,50 +33,6 @@ static struct lrpc_chan_out lrpc_control_to_data;
 static struct lrpc_chan_in lrpc_data_to_control;
 static int nr_guaranteed;
 
-static uint64_t spdk_map_idx;
-static int map_spdk_hugepages(struct shm_region *reg, unsigned int shm_id)
-{
-	int page_no, fd;
-	uint64_t offset;
-	char buffer[50];
-
-	reg->base = (void *)SPDK_BASE_ADDR +
-		SPDK_BASE_ADDR_OFFSET * spdk_map_idx;
-	reg->len = 0;
-
-	for (page_no = 0; page_no < SPDK_NUM_PAGES_MAPPED; page_no++) {
-		offset = PGSIZE_2MB * (page_no + 1);
-		sprintf(buffer, "/dev/hugepages/spdk%umap_%d", shm_id, page_no);
-		fd = open(buffer, O_RDONLY);
-		if (fd == -1) {
-			if (errno == 2) {
-				close(fd);
-				break;
-			} else {
-				log_err("error opening spdk page, errno=%d", errno);
-				close(fd);
-				goto spdk_unmap;
-			}
-		}
-		if ((void *)-1 == mmap(reg->base + offset, PGSIZE_2MB, PROT_READ,
-					MAP_SHARED | MAP_FIXED | MAP_POPULATE, fd, 0)) {
-			log_err("error mapping spdk page, errno=%d", errno);
-			close(fd);
-			goto spdk_unmap;
-		}
-		reg->len += PGSIZE_2MB;
-		close(fd);
-	}
-	spdk_map_idx++;
-	return 0;
-
-spdk_unmap:
-	if (-1 == munmap(reg->base, reg->len)) {
-		log_err("error unmapping spdk pages, errno=%d", errno);
-	}
-	return -1;
-}
-
 static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 {
 	struct control_hdr hdr;
@@ -168,10 +124,6 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 			goto fail_free_proc;
 	}
 
-	if (hdr.spdk_shm_id >= 0) {
-		if (map_spdk_hugepages(&p->spdk_reg, hdr.spdk_shm_id))
-			goto fail_free_proc;
-	}
 
 	bundles_shm = shmptr_to_ptr(&reg, hdr.bundle_specs, sizeof(*bundles) * hdr.bundle_count);
 	if (!bundles_shm)
@@ -201,15 +153,10 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid)
 
 		memcpy(hwq_spec, hwq_spec_shm, sizeof(*hwq_spec) * b->hwq_count);
 		for (j = 0; j < b->hwq_count; j++) {
-			struct shm_region *r;
-			if (hwq_spec[j].hwq_type == HWQ_SPDK_NVME)
-				r = &p->spdk_reg;
-			else
-				r = &reg;
-			b->qs[j].descriptor_table = shmptr_to_ptr(r,
+			b->qs[j].descriptor_table = shmptr_to_ptr(&reg,
 				  hwq_spec[j].descriptor_table,
 				  hwq_spec[j].descriptor_size * hwq_spec[j].nr_descriptors);
-			b->qs[j].consumer_idx = shmptr_to_ptr(r, hwq_spec[j].consumer_idx, sizeof(*b->qs[j].consumer_idx));
+			b->qs[j].consumer_idx = shmptr_to_ptr(&reg, hwq_spec[j].consumer_idx, sizeof(*b->qs[j].consumer_idx));
 			b->qs[j].descriptor_size = hwq_spec[j].descriptor_size;
 			b->qs[j].nr_descriptors = hwq_spec[j].nr_descriptors;
 			b->qs[j].parity_byte_offset = hwq_spec[j].parity_byte_offset;
@@ -263,8 +210,6 @@ fail_free_bundle:
 fail_free_proc:
 	free(threads);
 fail_free_just_proc:
-	if (p->spdk_reg.len)
-		munmap(p->spdk_reg.base, p->spdk_reg.len);
 	free(p);
 fail_unmap:
 	mem_unmap_shm(shbuf);
@@ -277,8 +222,6 @@ static void control_destroy_proc(struct proc *p)
 {
 	nr_guaranteed -= p->sched_cfg.guaranteed_cores;
 	mem_unmap_shm(p->region.base);
-	if (p->spdk_reg.len)
-		munmap(p->spdk_reg.base, p->spdk_reg.len);
 	free(p);
 }
 

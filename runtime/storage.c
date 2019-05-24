@@ -70,6 +70,17 @@ attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 	num_blocks = (int)spdk_nvme_ns_get_num_sectors(namespace);
 }
 
+static void *spdk_custom_allocator(size_t size, size_t align, uint64_t *physaddr_out) {
+	void *out;
+	iok_shm_alloc(size, align, &out);
+
+	if (out && physaddr_out)
+		mem_lookup_page_phys_addr(out, PGSIZE_2MB, physaddr_out);
+
+	return out;
+}
+
+
 static int storage_init_bundle(int bundle_idx);
 /**
  * storage_init - initializes storage
@@ -77,14 +88,13 @@ static int storage_init_bundle(int bundle_idx);
  */
 int storage_init(void)
 {
-	int i, shm_id, rc;
+	int i, rc;
 	struct spdk_env_opts opts;
 
 	spdk_env_opts_init(&opts);
 	opts.name = "shenango runtime";
-	shm_id = rand_crc32c((uintptr_t)myk());
-	if (shm_id < 0) shm_id = -shm_id;
-	opts.shm_id = shm_id;
+
+	spdk_nvme_allocator_hook = spdk_custom_allocator;
 
 	if (spdk_env_init(&opts) < 0) {
 		log_err("Unable to initialize SPDK env");
@@ -101,8 +111,6 @@ int storage_init(void)
 		log_err("no NVMe controllers found");
 		return 1;
 	}
-
-	iok.spdk_shm_id = shm_id;
 
 	for (i = 0; i < nr_bundles; i++) {
 		rc = storage_init_bundle(i);
@@ -126,10 +134,6 @@ static int storage_init_bundle(int bundle_idx)
 	struct hardware_queue_spec *hs;
 
 	struct spdk_nvme_io_qpair_opts opts;
-	struct shm_region r = {
-		.base = (void *)SPDK_BASE_ADDR,
-		.len = SPDK_BASE_ADDR_OFFSET,
-	};
 
 	spdk_nvme_ctrlr_get_default_io_qpair_opts(controller,
 			&opts, sizeof(opts));
@@ -164,11 +168,11 @@ static int storage_init_bundle(int bundle_idx)
 
 	hs->descriptor_size = sizeof(struct spdk_nvme_cpl);
 	hs->nr_descriptors = b->sq.queue_depth;
-	hs->descriptor_table = ptr_to_shmptr(&r, b->sq.cpl, hs->descriptor_size * hs->nr_descriptors);
+	hs->descriptor_table = ptr_to_shmptr(&iok.shared_region, b->sq.cpl, hs->descriptor_size * hs->nr_descriptors);
 	hs->parity_byte_offset = offsetof(struct spdk_nvme_cpl, status);
 	hs->parity_bit_mask = 0x1;
 	hs->hwq_type = HWQ_SPDK_NVME;
-	hs->consumer_idx = ptr_to_shmptr(&r, b->sq.cq_head, sizeof(uint32_t));
+	hs->consumer_idx = ptr_to_shmptr(&iok.shared_region, b->sq.cq_head, sizeof(uint32_t));
 
 	return 0;
 }
@@ -295,7 +299,6 @@ int storage_num_blocks()
 
 int storage_init(void)
 {
-	iok.spdk_shm_id = -1;
 	return 0;
 }
 

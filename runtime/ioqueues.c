@@ -33,8 +33,8 @@ shmptr_t iok_shm_alloc(size_t size, size_t alignment, void **out)
 
 	spin_lock(&shmlock);
 	if (!iok.shared_region.base) {
-		r->base = mem_map_shm(iok.key, NULL, 2 * PGSIZE_2MB, PGSIZE_2MB, true);
-		r->len = PGSIZE_2MB * 2;
+		r->base = mem_map_shm(iok.key, NULL, 12 * PGSIZE_2MB, PGSIZE_2MB, true);
+		r->len = PGSIZE_2MB * 12;
 		BUG_ON(r->base == MAP_FAILED);
 	}
 
@@ -140,7 +140,6 @@ int ioqueues_register_iokernel(void)
 	hdr->magic = CONTROL_HDR_MAGIC;
 	hdr->thread_count = maxks;
 	hdr->bundle_count = nr_bundles;
-	hdr->spdk_shm_id = iok.spdk_shm_id;
 
 	hdr->sched_cfg.priority = SCHED_PRIORITY_NORMAL;
 	hdr->sched_cfg.max_cores = maxks;

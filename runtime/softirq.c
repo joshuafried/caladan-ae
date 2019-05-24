@@ -57,7 +57,7 @@ static unsigned int poll_bundle(struct softirq_work *w, struct io_bundle *b, uns
 	if (unlikely(!spin_try_lock(&b->lock)))
 		return 0;
 
-	storage_cnt = storage_proc_completions(b, budget, w->storage_threads);
+	storage_cnt = storage_proc_completions(b, budget, w->storage_threads + w->storage_cnt);
 	budget -= storage_cnt;
 
 	recv_cnt = netcfg.ops.rx_batch(b->rxq, w->recv_reqs + w->recv_cnt, budget);

@@ -83,7 +83,6 @@ struct sched_spec {
 /* the main control header */
 struct control_hdr {
 	unsigned int		magic;
-	int			spdk_shm_id;
 	struct sched_spec	sched_cfg;
 	unsigned int		thread_count;
 	unsigned int		bundle_count;

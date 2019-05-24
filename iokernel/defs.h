@@ -112,7 +112,6 @@ struct proc {
 	/* Unique identifier -- never recycled across runtimes*/
 	uintptr_t		uniqid;
 
-	struct shm_region spdk_reg;
 };
 
 extern void proc_release(struct ref *r);
