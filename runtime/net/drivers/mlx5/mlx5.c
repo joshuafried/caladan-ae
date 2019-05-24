@@ -1,5 +1,5 @@
 /*
- * verbs.c - Verbs driver for Shenango's network statck
+ * mlx5.c - MLX5 driver for Shenango's network statck
  */
 
 #include <fcntl.h>
@@ -20,16 +20,12 @@
 #include "../../defs.h"
 #include "../common.h"
 #include "mlx5.h"
+#include "../verbs.h"
 
 #define PORT_NUM 1 // TODO: make this dynamic
 
 #define RX_BUF_RESERVED \
  (align_up(sizeof(struct rx_net_hdr), CACHE_LINE_SIZE))
-
-static struct ibv_context *context;
-static struct ibv_pd *pd;
-static struct ibv_mr *mr_tx;
-static struct ibv_mr *mr_rx;
 
 static struct mlx5_rxq rxqs[MAX_BUNDLES];
 static struct mlx5_txq txqs[NCPU];
@@ -498,10 +494,7 @@ int mlx5_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
 
 	struct ibv_device **dev_list;
 	struct ibv_device *ib_dev;
-	struct ibv_qp *qp;
-	struct ibv_rwq_ind_table *rwq_ind_table;
 	struct ibv_wq *ind_tbl[MAX_BUNDLES];
-	struct ibv_flow *eth_flow;
 
 	if (!is_power_of_two(nr_rxq) || nr_rxq > MAX_BUNDLES)
 		return -EINVAL;
@@ -570,92 +563,11 @@ int mlx5_init(struct rx_queue **rxq_out, struct tx_queue **txq_out,
 		ind_tbl[i] = rxqs[i].rx_wq;
 	}
 
-	/* Create Receive Work Queue Indirection Table */
-	struct ibv_rwq_ind_table_init_attr rwq_attr = {
-		.log_ind_tbl_size = __builtin_ctz(nr_bundles),
-		.ind_tbl = ind_tbl,
-		.comp_mask = 0,
-	};
-	rwq_ind_table = ibv_create_rwq_ind_table(context, &rwq_attr);
-	if (!rwq_ind_table)
-		return -errno;
-
-	/* Create the main RX QP using the indirection table */
-	struct ibv_rx_hash_conf rss_cnf = {
-		.rx_hash_function = IBV_RX_HASH_FUNC_TOEPLITZ,
-		.rx_hash_key_len = ARRAY_SIZE(rss_key),
-		.rx_hash_key = rss_key,
-
-#ifdef MLX5_TCP_RSS
-		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_TCP | IBV_RX_HASH_DST_PORT_TCP,
-#else
-		.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_UDP | IBV_RX_HASH_DST_PORT_UDP,
-#endif
-	};
-	struct ibv_qp_init_attr_ex qp_ex_attr = {
-		.qp_type = IBV_QPT_RAW_PACKET,
-		.comp_mask =  IBV_QP_INIT_ATTR_IND_TABLE | IBV_QP_INIT_ATTR_RX_HASH | IBV_QP_INIT_ATTR_PD,
-		.pd = pd,
-		.rwq_ind_tbl = rwq_ind_table,
-		.rx_hash_conf = rss_cnf,
-	};
-
-	struct mlx5dv_qp_init_attr dv_qp_attr = {
-		.comp_mask = 0,
-	};
-
-	qp = mlx5dv_create_qp(context, &qp_ex_attr, &dv_qp_attr);
-	if (!qp)
-		return -errno;
-
-	/* Route packets for our MAC address to our set of RX work queues */
-	struct raw_eth_flow_attr {
-		struct ibv_flow_attr attr;
-		struct ibv_flow_spec_eth spec_eth;
-	} __attribute__((packed)) flow_attr = {
-		.attr = {
-			.comp_mask = 0,
-			.type = IBV_FLOW_ATTR_NORMAL,
-			.size = sizeof(flow_attr),
-			.priority = 0,
-			.num_of_specs = 1,
-			.port = PORT_NUM,
-			.flags = 0,
-		},
-		.spec_eth = {
-			.type = IBV_FLOW_SPEC_ETH,
-			.size = sizeof(struct ibv_flow_spec_eth),
-			.val = {
-				.src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-				.ether_type = 0,
-				.vlan_tag = 0,
-			},
-			.mask = {
-				.dst_mac = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
-				.src_mac = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-				.ether_type = 0,
-				.vlan_tag = 0,
-			}
-		}
-	};
-	memcpy(&flow_attr.spec_eth.val.dst_mac, netcfg.mac.addr, 6);
-	eth_flow = ibv_create_flow(qp, &flow_attr.attr);
-	if (!eth_flow)
-		return -errno;
-
-	/* Route multicast traffic to our RX queues */
-	struct ibv_flow_attr mc_attr = {
-		.comp_mask = 0,
-		.type = IBV_FLOW_ATTR_MC_DEFAULT,
-		.size = sizeof(mc_attr),
-		.priority = 0,
-		.num_of_specs = 0,
-		.port = PORT_NUM,
-		.flags = 0,
-	};
-	eth_flow = ibv_create_flow(qp, &mc_attr);
-	if (!eth_flow)
-		return -errno;
+	ret = verbs_create_rss_qps(ind_tbl, nr_bundles);
+	if (ret) {
+	  log_err("mlx5_init: verbs_create_rss_qps returned %d", ret);
+	  return ret;
+	}
 
 	for (i = 0; i < nr_txq; i++) {
 		ret = mlx5_init_txq(i, &txqs[i]);
