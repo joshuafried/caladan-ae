@@ -47,9 +47,11 @@ __thread unsigned int curr_phys_cpu;
 
 static __thread int ksched_fd;
 
+#if 0
 static DEFINE_BITMAP(possible_cores, NCPU);
+#endif
 
-DEFINE_BITMAP(core_awake, NCPU);
+DEFINE_BITMAP(kthread_awake, NCPU);
 atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
 
 static DEFINE_SPINLOCK(kthread_assignment_lock);
@@ -159,7 +161,7 @@ static void kthread_yield_to_iokernel(struct ksched_park_args *args)
 	clear_preempt_needed();
 	uint64_t last_core = k->curr_cpu;
 
-	bitmap_atomic_clear(core_awake, last_core);
+	bitmap_atomic_clear(kthread_awake, k->kthread_idx);
 	atomic64_inc(&kthread_gen);
 
 	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_PARK, args));
@@ -175,7 +177,7 @@ static void kthread_yield_to_iokernel(struct ksched_park_args *args)
 	curr_phys_cpu = min(curr_cpu, cpu_map[curr_cpu].sibling_core);
 
 	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
-	bitmap_atomic_set(core_awake, k->curr_cpu);
+	bitmap_atomic_set(kthread_awake, k->kthread_idx);
 	atomic64_inc(&kthread_gen);
 
 	__update_assignments();
@@ -252,7 +254,7 @@ void kthread_wait_to_attach(void)
 	k->curr_cpu = curr_cpu = sched_getcpu();
 	curr_phys_cpu = min(curr_cpu, cpu_map[curr_cpu].sibling_core);
 	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
-	bitmap_atomic_set(core_awake, k->curr_cpu);
+	bitmap_atomic_set(kthread_awake, k->kthread_idx);
 	atomic64_inc(&kthread_gen);
 	__update_assignments();
 
@@ -261,6 +263,7 @@ void kthread_wait_to_attach(void)
 	atomic_inc(&runningks);
 }
 
+#if 0
 static int discover_cpus(void)
 {
 	int ret;
@@ -284,42 +287,32 @@ done:
 	fclose(f);
 	return ret;
 }
+#endif
 
 int kthread_init(void)
 {
-	int i, j, sibling, core, ret, total = 0;
+	int i, j;
 
-	ret = discover_cpus();
-	if (ret)
-		return ret;
-
-	bitmap_for_each_set(possible_cores, NCPU, i) {
-		sibling = bitmap_find_next_set(cpu_info_tbl[i].thread_siblings_mask,
-			  cpu_count, 0);
-
-		if (sibling < i && bitmap_test(possible_cores, sibling))
-			continue;
-
-		core = min(i, sibling);
-
+	for (i = 0; i < maxks; i++)
 		for (j = 0; j < nr_bundles; j++)
-			preference_table[core][j] = (total + j) % nr_bundles;
+			preference_table[i][j] = (i + j) % nr_bundles;
 
-		total++;
-	}
 	return 0;
+}
+
+static inline unsigned long kthread_id_to_phys(unsigned long kid)
+{
+	unsigned int logical_core = allks[kid]->curr_cpu;
+	return min(logical_core, cpu_map[logical_core].sibling_core);
 }
 
 void __update_assignments(void)
 {
-	int i, q = 0, phys_id, n = 0;
+	int i, q = 0, idx, n = 0;
 	uint64_t cur_gen;
 
 	DEFINE_BITMAP(q_done, nr_bundles);
-	DEFINE_BITMAP(phys_awake, cpu_count);
-
 	bitmap_init(q_done, nr_bundles, false);
-	bitmap_init(phys_awake, cpu_count, false);
 
 	if (!spin_try_lock_np(&kthread_assignment_lock))
 		return;
@@ -333,29 +326,29 @@ void __update_assignments(void)
 
 	store_release(&kthread_assignment_gen, cur_gen);
 
-	bitmap_for_each_set(core_awake, cpu_count, i) {
-		phys_id = min(i, cpu_map[i].sibling_core);
-		bitmap_set(phys_awake, phys_id);
+	/* assign "identity" queues to awake kthreads */
+	bitmap_for_each_set(kthread_awake, maxks, idx) {
+		ACCESS_ONCE(bundle_assignments[idx]) = kthread_id_to_phys(idx);
+		bitmap_set(q_done, idx);
+		n++;
 	}
 
-	while (true) {
-		bitmap_for_each_set(phys_awake, cpu_count, phys_id) {
-#ifdef RANDOM_ASSIGN
-			q = (n + cur_gen) & (nr_bundles - 1);
-#else
+	while (n < nr_bundles) {
+		bitmap_for_each_set(kthread_awake, maxks, idx) {
 			for (i = 0; i < nr_bundles; i++) {
-				q = preference_table[phys_id][i];
+				q = preference_table[idx][i];
 				if (!bitmap_test(q_done, q))
 					break;
 			}
-			assert(i < nr_bundles);
+			BUG_ON(i == nr_bundles);
 			bitmap_set(q_done, q);
-#endif
-			ACCESS_ONCE(bundle_assignments[q]) = phys_id;
+			ACCESS_ONCE(bundle_assignments[q]) = kthread_id_to_phys(idx);
 			if (++n == nr_bundles) {
-				spin_unlock_np(&kthread_assignment_lock);
-				return;
+				goto out;
 			}
 		}
 	}
+out:
+	spin_unlock_np(&kthread_assignment_lock);
+	return;
 }

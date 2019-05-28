@@ -63,7 +63,7 @@ BUILD_ASSERT(SQ_CLEAN_THRESH <= SQ_NUM_DESC);
  (align_up(nrqs * RQ_NUM_DESC * 2UL * MBUF_DEFAULT_LEN, PGSIZE_2MB))
 #define POW_TWO_ROUND_UP(x) \
  ((x) <= 1UL ? 1UL : 1UL << (64 - __builtin_clzl((x) - 1)))
-#define NR_BUNDLES(maxks, guaranteedks) (POW_TWO_ROUND_UP(maxks) / 2)
+#define NR_BUNDLES(maxks, guaranteedks) (POW_TWO_ROUND_UP(maxks))
 
 #define MLX5_TCP_RSS 1
 
@@ -342,9 +342,8 @@ struct kthread {
 	uint32_t		rq_tail;
 	struct list_head	rq_overflow;
 	struct lrpc_chan_in	rxcmdq;
-	unsigned int		parked:1;
-	unsigned int		detached:1;
-	int pad1;
+	unsigned int		parked;
+	unsigned int		detached;
 
 	/* 2nd cache-line */
 	struct q_ptrs		*q_ptrs;
@@ -558,7 +557,7 @@ static inline struct io_bundle *get_first_bundle(struct kthread *k)
 	return &bundles[preference_table[id][0]];
 }
 
-extern DEFINE_BITMAP(core_awake, NCPU);
+extern DEFINE_BITMAP(kthread_awake, NCPU);
 
 /*
  * Init

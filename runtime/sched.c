@@ -302,15 +302,15 @@ again:
 		goto done;
 
 	/* then try to steal from the runqueues of active kthreads */
-	bitmap_for_each_set(core_awake, cpu_count, i) {
-		r = cpu_map[i].recent_kthread;
+	bitmap_for_each_set(kthread_awake, maxks, i) {
+		r = allks[i];
 		if (r && r != l && steal_work(l, r))
 			goto done;
 	}
 
 	/* finally try to steal from each bundle */
-	bitmap_for_each_set(core_awake, cpu_count, i) {
-		r = cpu_map[i].recent_kthread;
+	bitmap_for_each_set(kthread_awake, maxks, i) {
+		r = allks[i];
 		if (r && r != l) {
 			th = softirq_steal_bundle(r, RUNTIME_SOFTIRQ_BUDGET);
 			if (th) {
