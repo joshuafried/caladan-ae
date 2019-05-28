@@ -65,8 +65,6 @@ BUILD_ASSERT(SQ_CLEAN_THRESH <= SQ_NUM_DESC);
  ((x) <= 1UL ? 1UL : 1UL << (64 - __builtin_clzl((x) - 1)))
 #define NR_BUNDLES(maxks, guaranteedks) (POW_TWO_ROUND_UP(maxks))
 
-#define MLX5_TCP_RSS 1
-
 
 struct io_bundle {
 

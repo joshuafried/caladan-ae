@@ -64,6 +64,12 @@ int verbs_create_rss_qps(struct ibv_wq **ind_tbl, unsigned int rss_tbl_sz)
 	if (!tcp_qp)
 		return -errno;
 
+	rss_cnf.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_UDP | IBV_RX_HASH_DST_PORT_UDP,
+	qp_ex_attr.rx_hash_conf = rss_cnf;
+	other_qp = ibv_create_qp_ex(context, &qp_ex_attr);
+	if (!other_qp)
+		return -errno;
+
 	/* Turn on QP in 2 steps */
 	// this only matters for mlx4. mlx5 returns ENOSYS
 	struct ibv_qp_attr qp_attr = {0};
@@ -74,17 +80,23 @@ int verbs_create_rss_qps(struct ibv_wq **ind_tbl, unsigned int rss_tbl_sz)
 		return -ret;
 
 	memset(&qp_attr, 0, sizeof(qp_attr));
+	qp_attr.qp_state = IBV_QPS_INIT;
+	qp_attr.port_num = 1;
+	ret = ibv_modify_qp(other_qp, &qp_attr, IBV_QP_STATE | IBV_QP_PORT);
+	if (ret && ret != ENOSYS)
+		return -ret;
+
+	memset(&qp_attr, 0, sizeof(qp_attr));
 	qp_attr.qp_state = IBV_QPS_RTR;
 	ret = ibv_modify_qp(tcp_qp, &qp_attr, IBV_QP_STATE);
 	if (ret && ret != ENOSYS)
 		return -ret;
 
-
-	rss_cnf.rx_hash_fields_mask = IBV_RX_HASH_SRC_IPV4 | IBV_RX_HASH_DST_IPV4 | IBV_RX_HASH_SRC_PORT_UDP | IBV_RX_HASH_DST_PORT_UDP,
-	qp_ex_attr.rx_hash_conf = rss_cnf;
-	other_qp = ibv_create_qp_ex(context, &qp_ex_attr);
-	if (!other_qp)
-		return -errno;
+	memset(&qp_attr, 0, sizeof(qp_attr));
+	qp_attr.qp_state = IBV_QPS_RTR;
+	ret = ibv_modify_qp(other_qp, &qp_attr, IBV_QP_STATE);
+	if (ret && ret != ENOSYS)
+		return -ret;
 
 	/* Route TCP packets for our MAC address to the QP with TCP RSS configuration */
 	struct raw_eth_flow_attr {
