@@ -569,6 +569,7 @@ extern int sched_init_thread(void);
 extern int net_init_thread(void);
 extern int smalloc_init_thread(void);
 extern int ethdev_init_thread(void);
+extern int storage_init_thread(void);
 
 /* global initialization */
 extern int ioqueues_init(void);

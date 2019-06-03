@@ -9,10 +9,10 @@
 
 #if __has_include("spdk/nvme.h")
 
-extern int storage_write(const void *payload, int lba, int lba_count);
-extern int storage_read(void *dest, int lba, int lba_count);
-extern int storage_block_size();
-extern int storage_num_blocks();
+extern int storage_write(const void *payload, uint64_t lba, uint32_t lba_count);
+extern int storage_read(void *dest, uint64_t lba, uint32_t lba_count);
+extern unsigned int storage_block_size(void);
+extern unsigned int storage_num_blocks(void);
 
 #else
 
@@ -21,18 +21,20 @@ int storage_write(const void *payload,
 {
 	return -1;
 }
-int storage_read(void *dest,
-		uint64_t lba, uint32_t lba_count)
+
+int storage_read(void *dest, uint64_t lba, uint32_t lba_count)
 {
 	return -1;
 }
-int storage_block_size()
+
+unsigned int storage_block_size(void)
 {
-	return -1;
+	return 0;
 }
-int storage_num_blocks()
+
+unsigned int storage_num_blocks(void)
 {
-	return -1;
+	return 0;
 }
 
 #endif

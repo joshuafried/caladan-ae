@@ -65,6 +65,9 @@ static const struct init_entry thread_init_handlers[] = {
 	/* network stack */
 	THREAD_INITIALIZER(net),
 	THREAD_INITIALIZER(ethdev),
+
+	/* storage */
+	THREAD_INITIALIZER(storage),
 };
 
 #define LATE_INITIALIZER(name) \

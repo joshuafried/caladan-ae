@@ -75,7 +75,7 @@ public:
 void HandleGetRequest(RequestContext *ctx) {
   ssize_t ret = storage_read(ctx->buf, ctx->header.lba, ctx->header.lba_count);
   if (ret < 0) {
-    log_err("storage_read failed");
+    log_err_ratelimited("storage_read failed");
     return;
   }
   size_t payload_size = kSectorSize * ctx->header.lba_count;
@@ -92,7 +92,7 @@ void HandleGetRequest(RequestContext *ctx) {
   ret = ctx->conn->WritevFull(response, 2);
   if (ret != static_cast<ssize_t>(sizeof(ctx->header) + payload_size)) {
     if (ret != -EPIPE && ret != -ECONNRESET)
-      log_err("WritevFull failed: ret = %ld", ret);
+      log_err_ratelimited("WritevFull failed: ret = %ld", ret);
   }
 }
 
@@ -100,7 +100,7 @@ void HandleSetRequest(RequestContext *ctx) {
   ssize_t ret = storage_write(ctx->buf, ctx->header.lba,
       ctx->header.lba_count);
   if (ret < 0) {
-    log_err("storage_write failed");
+    log_err_ratelimited("storage_write failed");
     return;
   }
 

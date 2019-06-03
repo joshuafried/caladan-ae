@@ -33,8 +33,8 @@ shmptr_t iok_shm_alloc(size_t size, size_t alignment, void **out)
 
 	spin_lock(&shmlock);
 	if (!iok.shared_region.base) {
-		r->base = mem_map_shm(iok.key, NULL, 12 * PGSIZE_2MB, PGSIZE_2MB, true);
-		r->len = PGSIZE_2MB * 12;
+		r->base = mem_map_shm(iok.key, NULL, 24 * PGSIZE_2MB, PGSIZE_2MB, true);
+		r->len = PGSIZE_2MB * 24;
 		BUG_ON(r->base == MAP_FAILED);
 	}
 
