@@ -410,10 +410,12 @@ static __noinline void __tcp_rx_conn(tcpconn_t *c, struct mbuf *m, uint32_t ack,
 	if (wraps_lt(c->pcb.snd_wl1, seq) ||
 	    (c->pcb.snd_wl1 == seq &&
 	     wraps_lte(c->pcb.snd_wl2, ack))) {
+		uint32_t old_wnd = c->pcb.snd_wnd;
 		c->pcb.snd_wnd = win > 1 ? win - 2 : 0; // reserve 1 byte for FIN and one byte for the sequence number on an RST packet
 		c->pcb.snd_wl1 = seq;
 		c->pcb.snd_wl2 = ack;
-		c->rep_acks = 0;
+		if (c->pcb.snd_wnd != old_wnd)
+			c->rep_acks = 0;
 	}
 	if (snd_was_full && !is_snd_full(c))
 		waitq_release_start(&c->tx_wq, &waiters);
