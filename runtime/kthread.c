@@ -44,6 +44,7 @@ struct cpu_record cpu_map[NCPU] __attribute__((aligned(CACHE_LINE_SIZE)));
 /* tracks current cpu id */
 __thread unsigned int curr_cpu;
 __thread unsigned int curr_phys_cpu;
+__thread unsigned int kthread_id;
 
 static __thread int ksched_fd;
 
@@ -96,6 +97,7 @@ int kthread_init_thread(void)
 
 	spin_lock_np(&klock);
 	mykthread->kthread_idx = allksn;
+	kthread_id = allksn;
 	allks[allksn++] = mykthread;
 	assert(allksn <= maxks);
 	spin_unlock_np(&klock);

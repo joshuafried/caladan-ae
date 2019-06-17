@@ -51,9 +51,8 @@ inline int get_maxks(void)
 
 static inline int get_current_affinity(void)
 {
-	extern __thread unsigned int curr_phys_cpu;
-	extern unsigned int preference_table[NCPU][NCPU];
-	return preference_table[curr_phys_cpu][0];
+	extern __thread unsigned int kthread_id;
+	return kthread_id;
 }
 
 /* main initialization */

@@ -11,3 +11,5 @@ netbench_udp
 netbench_linux
 netperf
 linux_mech_bench
+flash_client
+memcached_router

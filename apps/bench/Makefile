@@ -63,6 +63,12 @@ netperf_obj = $(netperf_src:.cc=.o)
 fanout_src = fanout.cc
 fanout_obj = $(fanout_src:.cc=.o)
 
+flash_client_src = flash_client.cc RpcManager.cc
+flash_client_obj = $(flash_client_src:.cc=.o)
+
+memcached_router_src = memcached_router.cc RpcManager.cc
+memcached_router_obj = $(memcached_router_src:.cc=.o)
+
 linux_mech_bench_src = linux_mech_bench.cc
 linux_mech_bench_obj = $(linux_mech_bench_src:.cc=.o)
 
@@ -80,7 +86,7 @@ librt_libs = $(CXXPATH)/librt++.a $(BASEPATH)/libruntime.a $(BASEPATH)/libnet.a 
 # must be first
 all: tbench callibrate stress efficiency efficiency_linux \
      netbench netbench2 netbench_udp netbench_linux netperf linux_mech_bench \
-     stress_linux fanout
+     stress_linux fanout flash_client memcached_router
 
 tbench: $(tbench_obj) $(librt_libs)
 	$(LD) -o $@ $(LDFLAGS) $(tbench_obj) $(librt_libs) $(SPDK_LIBS) -lpthread
@@ -111,6 +117,12 @@ netbench2: $(netbench2_obj) $(fake_worker_obj) $(librt_libs)
 fanout: $(fanout_obj) $(librt_libs)
 	$(LD) -o $@ $(LDFLAGS) $(fanout_obj)  $(librt_libs) -lpthread
 
+flash_client: $(flash_client_obj) $(fake_worker_obj) $(librt_libs)
+	$(LD) -o $@ $(LDFLAGS) $(flash_client_obj) $(fake_worker_obj) $(librt_libs) $(SPDK_LIBS) -lpthread
+
+memcached_router: $(memcached_router_obj) $(librt_libs)
+	$(LD) -o $@ $(LDFLAGS) $(memcached_router_obj) $(librt_libs) $(SPDK_LIBS) -lpthread
+
 netbench_udp: $(netbench_udp_obj) $(fake_worker_obj) $(librt_libs)
 	$(LD) -o $@ $(LDFLAGS) $(fake_worker_obj) $(netbench_udp_obj) $(librt_libs) $(SPDK_LIBS) -lpthread
 
@@ -124,8 +136,8 @@ linux_mech_bench: $(linux_mech_bench_obj) $(librt_libs)
 	$(LD) -o $@ $(LDFLAGS) $(linux_mech_bench_obj) $(librt_libs) $(SPDK_LIBS) -lpthread
 
 # general build rules for all targets
-src = $(fake_worker_src) $(tbench_src) $(callibrate_src) $(fanout_obj)
-src += $(stress_src) $(efficiency_src) $(efficiency_linux_src) $(netbench_src)
+src = $(fake_worker_src) $(tbench_src) $(callibrate_src) $(fanout_src) $(flash_client_src)
+src += $(stress_src) $(efficiency_src) $(efficiency_linux_src) $(netbench_src) $(memcached_router_src)
 src += $(netbench2_src) $(netbench_udp_src) $(netbench_linux_src) $(netperf_src)
 src += $(linux_mech_bench_src)
 obj = $(src:.cc=.o)
@@ -146,4 +158,4 @@ endif
 clean:
 	rm -f $(obj) $(dep) tbench callibrate stress efficiency \
 	efficiency_linux netbench netbench2 netbench_udp netbench_linux \
-	netperf linux_mech_bench stress_linux fanout
+	netperf linux_mech_bench stress_linux fanout flash_client memcached_router
