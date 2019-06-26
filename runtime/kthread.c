@@ -41,6 +41,8 @@ struct kthread *allks[NCPU];
 __thread struct kthread *mykthread;
 /* Map of cpu to kthread */
 struct cpu_record cpu_map[NCPU] __attribute__((aligned(CACHE_LINE_SIZE)));
+/* Map of cpu to sibling */
+unsigned long cpu_sibling[NCPU];
 /* tracks current cpu id */
 __thread unsigned int curr_cpu;
 __thread unsigned int curr_phys_cpu;
@@ -176,7 +178,7 @@ static void kthread_yield_to_iokernel(struct ksched_park_args *args)
 #endif
 
 	k->curr_cpu = curr_cpu = sched_getcpu();
-	curr_phys_cpu = min(curr_cpu, cpu_map[curr_cpu].sibling_core);
+	curr_phys_cpu = get_core_id(k);
 
 	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
 	bitmap_atomic_set(kthread_awake, k->kthread_idx);
@@ -254,7 +256,7 @@ void kthread_wait_to_attach(void)
 
 	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_START));
 	k->curr_cpu = curr_cpu = sched_getcpu();
-	curr_phys_cpu = min(curr_cpu, cpu_map[curr_cpu].sibling_core);
+	curr_phys_cpu = get_core_id(k);
 	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
 	bitmap_atomic_set(kthread_awake, k->kthread_idx);
 	atomic64_inc(&kthread_gen);
@@ -305,7 +307,7 @@ int kthread_init(void)
 static inline unsigned long kthread_id_to_phys(unsigned long kid)
 {
 	unsigned int logical_core = allks[kid]->curr_cpu;
-	return min(logical_core, cpu_map[logical_core].sibling_core);
+	return min(logical_core, cpu_sibling[logical_core]);
 }
 
 void __update_assignments(void)

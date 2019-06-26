@@ -291,7 +291,7 @@ again:
 	}
 
 	/* then try to steal from a sibling kthread */
-	sibling = cpu_map[l->curr_cpu].sibling_core;
+	sibling = cpu_sibling[l->curr_cpu];
 	r = cpu_map[sibling].recent_kthread;
 	if (r && r != l && steal_work(l, r))
 		goto done;
@@ -843,7 +843,7 @@ int sched_init(void)
 			if (i == j)
 				continue;
 			BUG_ON(siblings++);
-			cpu_map[i].sibling_core = j;
+			cpu_sibling[i] = j;
 		}
 	}
 

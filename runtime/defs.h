@@ -414,13 +414,13 @@ extern void kthread_wait_to_attach(void);
 
 struct cpu_record {
 	struct kthread *recent_kthread;
-	unsigned long sibling_core;
-	unsigned long pad[6];
+	unsigned long pad[7];
 };
 
 BUILD_ASSERT(sizeof(struct cpu_record) == CACHE_LINE_SIZE);
 
 extern struct cpu_record cpu_map[NCPU];
+extern unsigned long cpu_sibling[NCPU];
 
 /**
  * cores_have_affinity - returns true if two cores have cache affinity
@@ -429,8 +429,7 @@ extern struct cpu_record cpu_map[NCPU];
  */
 static inline bool cores_have_affinity(unsigned int cpua, unsigned int cpub)
 {
-	return cpua == cpub ||
-	       cpu_map[cpua].sibling_core == cpub;
+	return cpua == cpub || cpu_sibling[cpua] == cpub;
 }
 
 /**
@@ -525,7 +524,7 @@ extern unsigned int preference_table[NCPU][MAX_BUNDLES];
  */
 static inline unsigned int get_core_id(struct kthread *k)
 {
-	return min(k->curr_cpu, cpu_map[k->curr_cpu].sibling_core);
+	return min(k->curr_cpu, cpu_sibling[k->curr_cpu]);
 }
 
 /**
