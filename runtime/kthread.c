@@ -43,9 +43,7 @@ __thread struct kthread *mykthread;
 struct cpu_record cpu_map[NCPU] __attribute__((aligned(CACHE_LINE_SIZE)));
 /* Map of cpu to sibling */
 unsigned long cpu_sibling[NCPU];
-/* tracks current cpu id */
-__thread unsigned int curr_cpu;
-__thread unsigned int curr_phys_cpu;
+/* tracks current kthread id */
 __thread unsigned int kthread_id;
 
 static __thread int ksched_fd;
@@ -60,7 +58,7 @@ atomic64_t kthread_gen __aligned(CACHE_LINE_SIZE);
 static DEFINE_SPINLOCK(kthread_assignment_lock);
 /* write access is protected by kthread_assignment_lock */
 uint64_t kthread_assignment_gen;
-unsigned int bundle_assignments[MAX_BUNDLES];
+static unsigned int bundle_assignments[MAX_BUNDLES];
 void __update_assignments(void);
 
 unsigned int preference_table[NCPU][MAX_BUNDLES];
@@ -177,8 +175,7 @@ static void kthread_yield_to_iokernel(struct ksched_park_args *args)
 	}
 #endif
 
-	k->curr_cpu = curr_cpu = sched_getcpu();
-	curr_phys_cpu = get_core_id(k);
+	k->curr_cpu = sched_getcpu();
 
 	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
 	bitmap_atomic_set(kthread_awake, k->kthread_idx);
@@ -255,8 +252,7 @@ void kthread_wait_to_attach(void)
 	BUG_ON(ksched_fd < 0);
 
 	BUG_ON(ioctl(ksched_fd, KSCHED_IOC_START));
-	k->curr_cpu = curr_cpu = sched_getcpu();
-	curr_phys_cpu = get_core_id(k);
+	k->curr_cpu = sched_getcpu();
 	store_release(&cpu_map[k->curr_cpu].recent_kthread, k);
 	bitmap_atomic_set(kthread_awake, k->kthread_idx);
 	atomic64_inc(&kthread_gen);
@@ -304,16 +300,23 @@ int kthread_init(void)
 	return 0;
 }
 
-static inline unsigned long kthread_id_to_phys(unsigned long kid)
+static inline void assign_bundle(unsigned int bundle_idx, unsigned int kthread_idx)
 {
-	unsigned int logical_core = allks[kid]->curr_cpu;
-	return min(logical_core, cpu_sibling[logical_core]);
+	struct io_bundle *b = &bundles[bundle_idx];
+
+	if (bundle_assignments[bundle_idx] == kthread_idx)
+		return;
+
+	rcu_hlist_del(&b->link);
+	rcu_hlist_add_head(&bundle_assignment_list[kthread_idx], &b->link);
+	bundle_assignments[bundle_idx] = kthread_idx;
 }
 
 void __update_assignments(void)
 {
-	int i, q = 0, idx, n = 0;
+	int i, q = 0, idx, sib, n = 0;
 	uint64_t cur_gen;
+	struct kthread *k;
 
 	DEFINE_BITMAP(q_done, nr_bundles);
 	bitmap_init(q_done, nr_bundles, false);
@@ -328,12 +331,22 @@ void __update_assignments(void)
 		return;
 	}
 
-	store_release(&kthread_assignment_gen, cur_gen);
+	ACCESS_ONCE(kthread_assignment_gen) = cur_gen;
 
 	/* assign "identity" queues to awake kthreads */
 	bitmap_for_each_set(kthread_awake, maxks, idx) {
-		ACCESS_ONCE(bundle_assignments[idx]) = kthread_id_to_phys(idx);
+		assign_bundle(idx, idx);
 		bitmap_set(q_done, idx);
+		n++;
+
+		/* absorb bundle from recently-parked sibling core */
+		sib = cpu_sibling[allks[idx]->curr_cpu];
+		k = cpu_map[sib].recent_kthread;
+		if (!k || bitmap_test(kthread_awake, k->kthread_idx))
+			continue;
+
+		assign_bundle(k->kthread_idx, idx);
+		bitmap_set(q_done, k->kthread_idx);
 		n++;
 	}
 
@@ -346,7 +359,7 @@ void __update_assignments(void)
 			}
 			BUG_ON(i == nr_bundles);
 			bitmap_set(q_done, q);
-			ACCESS_ONCE(bundle_assignments[q]) = kthread_id_to_phys(idx);
+			assign_bundle(q, idx);
 			if (++n == nr_bundles) {
 				goto out;
 			}

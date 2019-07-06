@@ -105,28 +105,26 @@ static void softirq_gather_bundles(struct softirq_work *w, struct kthread *k,
 				unsigned int budget)
 {
 	unsigned long id;
-	int j, budget_left, qidx;
+	int budget_left;
+	struct io_bundle *b;
+	struct rcu_hlist_node *node;
 
 	assert_preempt_disabled();
 
 	budget_left = min(budget, SOFTIRQ_MAX_BUDGET);
-	id = get_core_id(k);
+	id = k->kthread_idx;
 
 	update_assignments();
 
-	for (j = 0; j < nr_bundles; j++) {
+	rcu_hlist_for_each(&bundle_assignment_list[id], node, false) {
+		b = rcu_hlist_entry(node, struct io_bundle, link);
+
+		budget_left -= poll_bundle(w, b, budget_left);
 
 		if (!budget_left)
 			break;
-
-		qidx = (j + k->next_rx_poll) & (nr_bundles - 1);
-		if (ACCESS_ONCE(bundle_assignments[qidx]) != id)
-			continue;
-
-		budget_left -= poll_bundle(w, &bundles[qidx], budget_left);
 	}
 
-	k->next_rx_poll += j;
 }
 
 

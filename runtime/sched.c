@@ -151,6 +151,12 @@ static void drain_overflow(struct kthread *l)
 	}
 }
 
+static bool work_available(struct kthread *k)
+{
+	return ACCESS_ONCE(k->rq_tail) != ACCESS_ONCE(k->rq_head) ||
+	       !list_empty(&k->rq_overflow) || !lrpc_empty(&k->rxcmdq);
+}
+
 static bool steal_work(struct kthread *l, struct kthread *r)
 {
 	thread_t *th;
@@ -158,6 +164,9 @@ static bool steal_work(struct kthread *l, struct kthread *r)
 
 	assert_spin_lock_held(&l->lock);
 	assert(l->rq_head == 0 && l->rq_tail == 0);
+
+	if (!work_available(r))
+		return false;
 
 	if (!spin_try_lock(&r->lock))
 		return false;
@@ -275,7 +284,6 @@ static __noreturn __noinline void schedule(void)
 	if (unlikely(!list_empty(&l->rq_overflow)))
 		drain_overflow(l);
 
-again:
 	/* first try the local runqueue */
 	if (l->rq_head != l->rq_tail)
 		goto done;
@@ -290,11 +298,21 @@ again:
 		goto done;
 	}
 
+again:
+
 	/* then try to steal from a sibling kthread */
 	sibling = cpu_sibling[l->curr_cpu];
 	r = cpu_map[sibling].recent_kthread;
-	if (r && r != l && steal_work(l, r))
-		goto done;
+	if (r && r != l) {
+		if (steal_work(l, r))
+			goto done;
+
+		th = softirq_steal_bundle(r, RUNTIME_SOFTIRQ_BUDGET);
+		if (th) {
+			STAT(SOFTIRQS_STOLEN)++;
+			goto done;
+		}
+	}
 
 	/* then try to steal from a random kthread */
 	r = allks[rand_crc32c((uintptr_t)l) % maxks];
@@ -304,20 +322,26 @@ again:
 	/* then try to steal from the runqueues of active kthreads */
 	bitmap_for_each_set(kthread_awake, maxks, i) {
 		r = allks[i];
-		if (r && r != l && steal_work(l, r))
+		if (r != l && steal_work(l, r))
 			goto done;
 	}
 
 	/* finally try to steal from each bundle */
 	bitmap_for_each_set(kthread_awake, maxks, i) {
 		r = allks[i];
-		if (r && r != l) {
+		if (!load_acquire(&r->lock.locked)) {
 			th = softirq_steal_bundle(r, RUNTIME_SOFTIRQ_BUDGET);
 			if (th) {
 				STAT(SOFTIRQS_STOLEN)++;
 				goto done;
 			}
 		}
+	}
+
+	th = softirq_run_local(RUNTIME_SOFTIRQ_BUDGET);
+	if (th) {
+		STAT(SOFTIRQS_LOCAL)++;
+		goto done;
 	}
 
 	/* keep trying to find work until the polling timeout expires */

@@ -18,6 +18,7 @@
 #include <net/mbufq.h>
 #include <runtime/thread.h>
 #include <runtime/rcu.h>
+#include <runtime/rculist.h>
 #include <runtime/preempt.h>
 
 #include "storage.h"
@@ -69,6 +70,7 @@ BUILD_ASSERT(SQ_CLEAN_THRESH <= SQ_NUM_DESC);
 struct io_bundle {
 
 	spinlock_t lock;
+	struct rcu_hlist_node link;
 
 	/* cache line of variables shared with iokernel */
 	struct bundle_vars *b_vars;
@@ -514,18 +516,7 @@ static inline bool timer_needed(struct io_bundle *b)
 
 
 /* Queue shuffling support */
-extern unsigned int bundle_assignments[MAX_BUNDLES];
-extern unsigned int preference_table[NCPU][MAX_BUNDLES];
-
-/**
- * get_core_id - returns core ID number used for bundle assignments
- * for a given kthread
- * @k: the kthread
- */
-static inline unsigned int get_core_id(struct kthread *k)
-{
-	return min(k->curr_cpu, cpu_sibling[k->curr_cpu]);
-}
+extern struct rcu_hlist_head bundle_assignment_list[NCPU];
 
 /**
  * update_assignments - recomputes bundle assignments.
@@ -546,12 +537,7 @@ static inline void update_assignments(void)
 
 static inline struct io_bundle *get_first_bundle(struct kthread *k)
 {
-	unsigned long id;
-
-	assert_preempt_disabled();
-
-	id = get_core_id(k);
-	return &bundles[preference_table[id][0]];
+	return &bundles[k->kthread_idx];
 }
 
 extern DEFINE_BITMAP(kthread_awake, NCPU);

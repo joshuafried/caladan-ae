@@ -19,6 +19,7 @@
 
 struct iokernel_control iok;
 
+struct rcu_hlist_head bundle_assignment_list[NCPU];
 struct io_bundle bundles[MAX_BUNDLES];
 unsigned int nr_bundles;
 
@@ -224,8 +225,13 @@ int ioqueues_init(void)
 
 	nr_bundles = NR_BUNDLES(maxks, guaranteedks);
 
-	for (i = 0; i < nr_bundles; i++)
+	for (i = 0; i < maxks; i++)
+		rcu_hlist_init_head(&bundle_assignment_list[i]);
+
+	for (i = 0; i < nr_bundles; i++) {
 		spin_lock_init(&bundles[i].lock);
+		rcu_hlist_add_head(&bundle_assignment_list[0], &bundles[i].link);
+	}
 
 	ret = ioqueues_shm_setup();
 	if (ret) {
