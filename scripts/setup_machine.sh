@@ -8,6 +8,8 @@ sysctl -w vm.hugetlb_shm_group=27
 sysctl -w vm.max_map_count=16777216
 sysctl -w net.core.somaxconn=3072
 
+cd ksched && make && cd ..
+
 # set up the ksched module
 rmmod ksched
 rm /dev/ksched
