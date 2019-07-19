@@ -5,7 +5,7 @@ $(error ROOT_PATH is not set)
 endif
 
 # build configuration options (set to y for "yes", n for "no")
-CONFIG_MLX5=n
+CONFIG_MLX5=y
 CONFIG_MLX4=n
 CONFIG_SPDK=n
 CONFIG_DEBUG=n
