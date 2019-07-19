@@ -37,7 +37,7 @@ netaddr raddr;
 // the mean service time in us.
 double st;
 // number of iterations required for 1us on target server
-constexpr uint64_t kIterationsPerUS = 65;  // 83
+constexpr uint64_t kIterationsPerUS = 88;
 // Number of seconds to warmup at rate 0
 constexpr uint64_t kWarmupUpSeconds = 5;
 
@@ -118,6 +118,7 @@ struct payload {
   uint64_t index;
   uint64_t tsc_end;
   uint32_t cpu;
+  uint64_t standing_queue_us;
 };
 
 // The maximum lateness to tolerate before dropping egress samples.
@@ -143,6 +144,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c) {
     if (workn != 0) w->Work(workn);
     p.tsc_end = hton64(rdtscp(&p.cpu));
     p.cpu = hton32(p.cpu);
+    p.standing_queue_us = hton64(rt::RuntimeStandingQueueUS());
 
     // Send a work response.
     ssize_t sret = c->WriteFull(&p, ret);
@@ -193,6 +195,18 @@ std::vector<work_unit> ClientWorker(
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
 
+  // current window size
+  double cwnd = 32.0;
+  // number of outstanding requests
+  uint32_t num_outst_req = 0;
+  // number of feedback to ignore.
+  uint32_t skip_update = 0;
+  // Moving average of standing_queue_us
+  uint64_t ewma_standing_queue_us = 0;
+
+  rt::Mutex m_;
+  rt::CondVar cv_;
+
   // Start the receiver thread.
   auto th = rt::Thread([&] {
     payload rp;
@@ -211,6 +225,30 @@ std::vector<work_unit> ClientWorker(
       w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
+
+      uint64_t standing_queue_us = ntoh64(rp.standing_queue_us);
+      double new_cwnd = cwnd;
+
+      if (skip_update > 0) {
+        skip_update--;
+      } else {
+        ewma_standing_queue_us = 0.8*ewma_standing_queue_us + 0.2*standing_queue_us;
+        if (ewma_standing_queue_us >= 15) {
+    	    // congestion detected.
+          new_cwnd = cwnd/2.0;
+          skip_update = num_outst_req-1;
+        } else {
+          new_cwnd = cwnd + 1.0/cwnd;
+        }
+      }
+
+      if (new_cwnd < 1.0001) new_cwnd = 1.0001;
+
+      m_.Lock();
+      num_outst_req--;
+      cwnd = new_cwnd;
+      cv_.Signal();
+      m_.Unlock();
     }
   });
 
@@ -241,6 +279,18 @@ std::vector<work_unit> ClientWorker(
     if (duration_cast<sec>(now - expstart).count() - w[i].start_us >
         kMaxCatchUpUS)
       continue;
+
+    m_.Lock();
+    if ((double)(num_outst_req + 1) > cwnd && j > 0) {
+      ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
+      if (ret != static_cast<ssize_t>(sizeof(payload) * j))
+        panic("write failed, ret = %ld", ret);
+      j = 0;
+    }
+
+    while ((double)(num_outst_req + 1) > cwnd) cv_.Wait(&m_);
+    num_outst_req++;
+    m_.Unlock();
 
     barrier();
     timings[i] = steady_clock::now();
@@ -377,7 +427,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
     std::exponential_distribution<double> rd(
         1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
     std::exponential_distribution<double> wd(1.0 / service_time);
-    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, 2000000);
+    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, 5000000);
   });
 
   // Print the results.
@@ -409,7 +459,7 @@ void LoadShiftExperiment(int threads,
 void ClientHandler(void *arg) {
   // LoadShiftExperiment(threads, rates, st);
 #if 1
-  for (double i = 50000; i <= 8000000; i += 50000) {
+  for (double i = 100000; i <= 4000000; i += 100000) {
     SteadyStateExperiment(threads, i, st);
   }
 #endif
