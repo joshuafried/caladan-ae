@@ -172,6 +172,7 @@ void ServerHandler(void *arg) {
 
 struct work_unit {
   double start_us, work_us, duration_us;
+  uint64_t timing;
   uint64_t tsc;
   uint32_t cpu;
 };
@@ -182,7 +183,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
   std::vector<work_unit> w;
   while (cur_us < last_us) {
     cur_us += a();
-    w.emplace_back(work_unit{cur_us, s(), 0});
+    w.emplace_back(work_unit{cur_us, s(), 0, 0});
   }
   return w;
 }
@@ -296,6 +297,8 @@ std::vector<work_unit> ClientWorker(
     timings[i] = steady_clock::now();
     barrier();
 
+    w[i].timing = duration_cast<sec>(timings[i] - expstart).count();
+
     // Enqueue a network request.
     p[j].work_iterations = hton64(w[i].work_us * kIterationsPerUS);
     p[j].index = hton64(i);
@@ -367,6 +370,27 @@ std::vector<work_unit> RunExperiment(
     w.insert(w.end(), v.begin(), v.end());
   }
 
+/* Print out-going throughput
+  w.erase(std::remove_if(w.begin(), w.end(),
+                         [](const work_unit &s) { return s.timing == 0; }),
+          w.end());
+
+  std::sort(w.begin(), w.end(),
+            [](const work_unit &s1, work_unit &s2) { return s1.timing < s2.timing; });
+
+  uint64_t num_req_out = 0;
+  uint64_t next_target = 10;
+  for (const work_unit &u : w) {
+    if (u.timing <= next_target) {
+      num_req_out++;
+    } else {
+      std::cout << next_target/1000.0 << "," << num_req_out/10.0 << std::endl;
+      num_req_out = 1;
+      next_target += 10;
+    }
+    if (next_target == 11000) break;
+  }
+*/
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),
