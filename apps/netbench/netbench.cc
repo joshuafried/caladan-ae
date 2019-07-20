@@ -202,8 +202,6 @@ std::vector<work_unit> ClientWorker(
   uint32_t num_outst_req = 0;
   // number of feedback to ignore.
   uint32_t skip_update = 0;
-  // Moving average of standing_queue_us
-  uint64_t ewma_standing_queue_us = 0;
 
   rt::Mutex m_;
   rt::CondVar cv_;
@@ -233,10 +231,12 @@ std::vector<work_unit> ClientWorker(
       if (skip_update > 0) {
         skip_update--;
       } else {
-        ewma_standing_queue_us = 0.8*ewma_standing_queue_us + 0.2*standing_queue_us;
-        if (ewma_standing_queue_us >= 15) {
+        if (standing_queue_us >= 15) {
     	    // congestion detected.
-          new_cwnd = cwnd/2.0;
+          double window_cut = 1.25 - standing_queue_us/60.0; 
+          window_cut = std::min<double>(window_cut, 1.0);
+          window_cut = std::max<double>(window_cut, 0.5);
+          new_cwnd = cwnd * window_cut;
           skip_update = num_outst_req-1;
         } else {
           new_cwnd = cwnd + 1.0/cwnd;
@@ -370,7 +370,8 @@ std::vector<work_unit> RunExperiment(
     w.insert(w.end(), v.begin(), v.end());
   }
 
-/* Print out-going throughput
+  /*
+// Print out-going throughput
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.timing == 0; }),
           w.end());
@@ -389,8 +390,8 @@ std::vector<work_unit> RunExperiment(
       next_target += 10;
     }
     if (next_target == 11000) break;
-  }
-*/
+  }*/
+
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),
