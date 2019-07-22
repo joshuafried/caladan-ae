@@ -318,12 +318,16 @@ extern bool rx_send_to_runtime(struct proc *p, uint32_t hash, uint64_t cmd,
 extern int ksched_init(void);
 extern int sched_init(void);
 extern int simple_init(void);
+extern int mis_init(void);
 extern int control_init(void);
 extern int dpdk_init(void);
 extern int rx_init(void);
 extern int tx_init(void);
 extern int dp_clients_init(void);
 extern int dpdk_late_init(void);
+
+extern bool allowed_cores_supplied;
+extern DEFINE_BITMAP(input_allowed_cores, NCPU);
 
 /*
  * dataplane RX/TX functions

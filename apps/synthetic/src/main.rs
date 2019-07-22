@@ -6,6 +6,7 @@ extern crate clap;
 
 extern crate byteorder;
 extern crate dns_parser;
+extern crate itertools;
 extern crate libc;
 extern crate lockstep;
 extern crate mersenne_twister;
@@ -17,7 +18,7 @@ extern crate test;
 use std::collections::BTreeMap;
 use std::f32::INFINITY;
 use std::io;
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::slice;
 use std::str::FromStr;
@@ -26,6 +27,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{App, Arg};
+use itertools::Itertools;
 use rand::distributions::{Exp, IndependentSample};
 use rand::Rng;
 use shenango::udp::UdpSpawner;
@@ -44,6 +46,18 @@ pub struct Packet {
     actual_start: Option<Duration>,
     completion_time_ns: AtomicU64,
     completion_time: Option<Duration>,
+}
+
+impl PartialOrd for Packet {
+    fn partial_cmp(&self, other: &Packet) -> Option<std::cmp::Ordering> {
+        self.target_start.partial_cmp(&other.target_start)
+    }
+}
+
+impl PartialEq for Packet {
+    fn eq(&self, other: &Packet) -> bool {
+        self.target_start == other.target_start
+    }
 }
 
 mod fakework;
@@ -171,10 +185,11 @@ fn run_linux_udp_server(backend: Backend, addr: SocketAddrV4, nthreads: usize, w
 }
 
 fn socket_worker(socket: &mut Connection, worker: FakeWorker) {
-    let mut v = vec![0; 4096];
+    let mut v = vec![0; 16];
     let mut r = || {
+        socket.read_exact(&mut v[..16])?;
+        let payload = Payload::deserialize(&mut &v[..16])?;
         v.clear();
-        let payload = Payload::deserialize(socket)?;
         worker.work(payload.work_iterations);
         payload.serialize_into(&mut v)?;
         Ok(socket.write_all(&v[..])?)
@@ -510,6 +525,8 @@ fn run_client(
         })
         .collect();
 
+    backend.sleep(Duration::from_secs(2));
+
     if let Some(ref mut g) = *barrier_group {
         g.barrier();
     }
@@ -590,28 +607,28 @@ fn run_client(
     let mut packets: Vec<_> = send_threads
         .into_iter()
         .zip(receive_threads.into_iter())
-        .flat_map(|(s, r)| {
+        .map(|(s, r)| {
             s.join()
                 .unwrap()
                 .into_iter()
                 .zip(r.join().unwrap().into_iter())
+                .map(|(p, r)| Packet {
+                    completion_time: r,
+                    ..p
+                })
         })
-        .map(|(p, r)| Packet {
-            completion_time: r,
-            ..p
-        })
+        .kmerge()
         .collect();
-    packets.sort_by_key(|p| p.target_start);
 
+    let mut start_index = 0;
     let mut start = Duration::from_nanos(100_000_000);
     schedules.iter().all(|sched| {
-        let last_index = packets
+        let npackets = packets[start_index..]
             .iter()
             .position(|p| p.target_start >= start + sched.runtime)
-            .unwrap_or(packets.len());
-        let rest = packets.split_off(last_index);
-        let res = process_result(&sched, packets.as_mut_slice(), start_unix);
-        packets = rest;
+            .unwrap_or(packets.len() - start_index);
+        let res = process_result(&sched, &mut packets[start_index..start_index + npackets], start_unix);
+        start_index += npackets;
         start += sched.runtime;
         res
     })
@@ -1026,13 +1043,11 @@ fn main() {
                             &sched,
                             0,
                         );
-                        backend.sleep(Duration::from_secs(5));
                     }
                 }
 
                 let step_size = (packets_per_second - start_packets_per_second) / samples;
                 for j in 1..=samples {
-                    backend.sleep(Duration::from_secs(5));
                     let sched = gen_classic_packet_schedule(
                         runtime,
                         start_packets_per_second + step_size * j,

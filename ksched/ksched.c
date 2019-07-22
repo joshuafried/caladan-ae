@@ -2,29 +2,45 @@
  * ksched.c - an accelerated scheduler interface for the IOKernel
  */
 
-#include <linux/module.h>
-#include <linux/moduleparam.h>
+#include <asm/io.h>
+#include <asm/local.h>
+#include <asm/set_memory.h>
+#include <asm/msr-index.h>
+#include <asm/msr.h>
+#include <asm/mwait.h>
+#include <asm/page.h>
+#include <asm/pgtable.h>
+#include <asm/tlbflush.h>
+#include <linux/capability.h>
+#include <linux/cdev.h>
+#include <linux/cpuidle.h>
+#include <linux/delay.h>
+#include <linux/dma-mapping.h>
+#include <linux/errno.h>
+#include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
-#include <linux/fs.h>
-#include <linux/errno.h>
-#include <linux/cdev.h>
-#include <linux/smp.h>
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/mm.h>
+#include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/task.h>
-#include <linux/sched.h>
+#include <linux/smp.h>
 #include <linux/uaccess.h>
-#include <linux/capability.h>
-#include <linux/cpuidle.h>
-#include <asm/local.h>
-#include <asm/mwait.h>
 
 #include "ksched.h"
+
+#define KSCHED_PMC_PROBE_DELAY (3)
+#define CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_0 (0x1)
+#define CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_1 (0x2)
 
 MODULE_LICENSE("GPL");
 
 /* the character device that provides the ksched IOCTL interface */
 static struct cdev ksched_cdev;
+/* the character device that mmaps the PCI configuration space */
+static struct cdev pci_cfg_cdev;
 
 /* shared memory between the IOKernel and the Linux Kernel */
 static __read_mostly struct ksched_shm_cpu *shm;
@@ -47,7 +63,9 @@ static DEFINE_PER_CPU(struct ksched_percpu, kp);
  */
 static struct task_struct *ksched_lookup_task(pid_t nr)
 {
-	struct pid *pid = find_vpid(nr);
+	struct pid *pid;
+
+	pid = find_vpid(nr);
 	if (unlikely(!pid))
 		return NULL;
 	return pid_task(pid, PIDTYPE_PID);
@@ -221,16 +239,9 @@ static long ksched_start(void)
 	return 0;
 }
 
-static void ksched_ipi(void *unused)
+static void ksched_deliver_signal(struct ksched_percpu *p, unsigned int signum)
 {
-	struct ksched_percpu *p;
-	struct ksched_shm_cpu *s;
 	struct task_struct *t;
-	int cpu, gen;
-
-	cpu = get_cpu();
-	p = this_cpu_ptr(&kp);
-	s = &shm[cpu];
 
 	/* if core is already idle, don't bother delivering signals */
 	if (!local_read(&p->busy)) {
@@ -239,16 +250,61 @@ static void ksched_ipi(void *unused)
 	}
 
 	/* lookup the current task assigned to this core */
+	rcu_read_lock();
 	t = ksched_lookup_task(p->tid);
 	if (!t) {
-		put_cpu();
+		rcu_read_unlock();
 		return;
 	}
 
-	/* check if yield has been requested (detecting race conditions) */
-	gen = smp_load_acquire(&s->sig);
-	if (gen == p->last_gen)
-		send_sig(READ_ONCE(s->signum), t, 0);
+	/* send the signal */
+	send_sig(signum, t, 0);
+	rcu_read_unlock();
+}
+
+static u64 ksched_measure_pmc(u64 sel)
+{
+	u64 start, end;
+
+	wrmsrl(MSR_P6_EVNTSEL0, sel);
+	rdmsrl(MSR_P6_PERFCTR0, start);
+	udelay(KSCHED_PMC_PROBE_DELAY);
+	rdmsrl(MSR_P6_PERFCTR0, end);
+	return end - start;
+}
+
+static void ksched_enable_pmc(void) {
+        wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_0 |
+                                          CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_1);
+}
+
+static void ksched_ipi(void *unused)
+{
+	struct ksched_percpu *p;
+	struct ksched_shm_cpu *s;
+	static bool pmc_ctrl_enabled[NR_CPUS];
+	int cpu, tmp;
+
+	cpu = get_cpu();
+	p = this_cpu_ptr(&kp);
+	s = &shm[cpu];
+
+	/* check if a signal has been requested */
+	tmp = smp_load_acquire(&s->sig);
+	if (tmp == p->last_gen)
+		ksched_deliver_signal(p, READ_ONCE(s->signum));
+
+	/* check if a performance counter has been requested */
+	tmp = smp_load_acquire(&s->pmc);
+	if (tmp == p->last_gen) {
+		if (!pmc_ctrl_enabled[cpu]) {
+	        	ksched_enable_pmc();
+	        	pmc_ctrl_enabled[cpu] = true;
+	        }
+	  
+		s->pmcval = ksched_measure_pmc(READ_ONCE(s->pmcsel));
+		smp_store_release(&s->pmc, 0);
+	}
 
 	put_cpu();
 }
@@ -318,7 +374,6 @@ static int ksched_mmap(struct file *file, struct vm_area_struct *vma)
 	/* only the IOKernel can access the shared region (privileged) */
 	if (!capable(CAP_SYS_ADMIN))
 		return -EACCES;
-
 	return remap_vmalloc_range(vma, (void *)shm, vma->vm_pgoff);
 }
 
@@ -338,6 +393,22 @@ static struct file_operations ksched_ops = {
 	.unlocked_ioctl	= ksched_ioctl,
 	.open		= ksched_open,
 	.release	= ksched_release,
+};
+
+static int pci_cfg_mmap(struct file *file, struct vm_area_struct *vma) {
+        if (!capable(CAP_SYS_ADMIN))
+                return -EACCES;
+        vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+        if (io_remap_pfn_range(vma, vma->vm_start, PCI_CFG_ADDRESS >> PAGE_SHIFT,
+			    vma->vm_end - vma->vm_start, vma->vm_page_prot)) {
+	        return -EAGAIN;
+	}
+	return 0;
+}
+
+static struct file_operations pci_cfg_ops = {
+	.owner		= THIS_MODULE,
+	.mmap		= pci_cfg_mmap,
 };
 
 /* TODO: This is a total hack to make ksched work as a module */
@@ -380,22 +451,23 @@ static void __exit ksched_cpuidle_unhijack(void)
 
 static int __init ksched_init(void)
 {
-	dev_t devno = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
-	int ret;
+	dev_t devno_ksched = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
+        dev_t devno_pci_cfg;
+        int ret;
 
 	if (!cpu_has(&boot_cpu_data, X86_FEATURE_MWAIT)) {
 		printk(KERN_ERR "ksched: mwait support is required");
 		return -ENOTSUPP;
 	}
 
-	ret = register_chrdev_region(devno, 1, "ksched");
+	ret = register_chrdev_region(devno_ksched, 1, "ksched");
 	if (ret)
 		return ret;
 
 	cdev_init(&ksched_cdev, &ksched_ops);
-	ret = cdev_add(&ksched_cdev, devno, 1);
+	ret = cdev_add(&ksched_cdev, devno_ksched, 1);
 	if (ret)
-		goto fail_cdev_add;
+		goto fail_ksched_cdev_add;
 
 	shm = vmalloc_user(SHM_SIZE);
 	if (!shm) {
@@ -409,25 +481,43 @@ static int __init ksched_init(void)
 		goto fail_hijack;
 
 	printk(KERN_INFO "ksched: API V2 enabled");
-	return 0;
 
+        devno_pci_cfg = MKDEV(PCI_CFG_MAJOR, PCI_CFG_MINOR);
+	ret = register_chrdev_region(devno_pci_cfg, 1, "pcicfg");
+	if (ret) {
+	  goto fail_pci_cfg_reg_cdev_region;
+	}
+	cdev_init(&pci_cfg_cdev, &pci_cfg_ops);
+	ret = cdev_add(&pci_cfg_cdev, devno_pci_cfg, 1);
+	if (ret) {
+	  goto fail_pci_cfg_cdev_add;
+	}
+
+	return 0;
+	
+fail_pci_cfg_cdev_add:
+	unregister_chrdev_region(devno_pci_cfg, 1);
+fail_pci_cfg_reg_cdev_region:
 fail_hijack:
 	vfree(shm);
 fail_shm:
 	cdev_del(&ksched_cdev);
-fail_cdev_add:
-	unregister_chrdev_region(devno, 1);
+fail_ksched_cdev_add:
+	unregister_chrdev_region(devno_ksched, 1);
 	return ret;
 }
 
 static void __exit ksched_exit(void)
 {
-	dev_t devno = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
+	dev_t devno_ksched = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
+        dev_t devno_pci_cfg = MKDEV(PCI_CFG_MAJOR, PCI_CFG_MINOR);
 
-	ksched_cpuidle_unhijack();
+        ksched_cpuidle_unhijack();
 	vfree(shm);
 	cdev_del(&ksched_cdev);
-	unregister_chrdev_region(devno, 1);
+	unregister_chrdev_region(devno_ksched, 1);
+	cdev_del(&pci_cfg_cdev);
+	unregister_chrdev_region(devno_pci_cfg, 1);
 }
 
 module_init(ksched_init);

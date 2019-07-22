@@ -41,6 +41,9 @@ static const char *stat_names[] = {
 	"rx_tcp_in_order",
 	"rx_tcp_out_of_order",
 	"rx_tcp_text_cycles",
+
+	"rx_hw_drop",
+
 };
 
 /* must correspond exactly to STAT_* enum definitions in defs.h */
@@ -79,6 +82,14 @@ static ssize_t stat_write_buf(char *buf, size_t len)
 
 	/* report the clock rate */
 	ret = append_stat(pos, end - pos, "cycles_per_us", cycles_per_us);
+	if (ret < 0) {
+		return -EINVAL;
+	} else if (ret >= end - pos) {
+		return -E2BIG;
+	}
+	pos += ret;
+
+	ret = append_stat(pos, end - pos, "tsc", rdtsc());
 	if (ret < 0) {
 		return -EINVAL;
 	} else if (ret >= end - pos) {

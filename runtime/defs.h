@@ -29,8 +29,8 @@
  */
 
 #define RUNTIME_MAX_THREADS		100000
-#define RUNTIME_STACK_SIZE		128 * KB
-#define RUNTIME_GUARD_SIZE		128 * KB
+#define RUNTIME_STACK_SIZE		256 * KB
+#define RUNTIME_GUARD_SIZE		256 * KB
 #define RUNTIME_RQ_SIZE			32
 #define RUNTIME_SOFTIRQ_LOCAL_BUDGET	16
 #define RUNTIME_SOFTIRQ_REMOTE_BUDGET	1
@@ -269,6 +269,8 @@ enum {
 	STAT_RX_TCP_OUT_OF_ORDER,
 	STAT_RX_TCP_TEXT_CYCLES,
 
+	STAT_RX_HW_DROP,
+
 	/* total number of counters */
 	STAT_NR,
 };
@@ -430,6 +432,7 @@ extern struct cfg_arp_static_entry static_entries[MAX_ARP_STATIC_ENTRIES];
 
 extern void __net_recurrent(void);
 extern void net_rx_softirq(struct rx_net_hdr **hdrs, unsigned int nr);
+extern void net_rx_softirq_direct(struct mbuf **ms, unsigned int nr);
 
 #ifdef DIRECTPATH
 
@@ -450,9 +453,8 @@ struct direct_rxq {
 struct direct_txq {};
 
 struct net_driver_ops {
-	int (*rx_batch)(struct direct_rxq *rxq, struct rx_net_hdr **bufs, unsigned int budget);
+	int (*rx_batch)(struct direct_rxq *rxq, struct mbuf **ms, unsigned int budget);
 	int (*tx_single)(struct direct_txq *txq, struct mbuf *m);
-	void (*rx_completion)(unsigned long completion_data);
 	int (*steer_flows)(unsigned int *new_fg_assignment);
 	int (*register_flow)(unsigned int affininty, uint8_t proto, struct netaddr laddr, struct netaddr raddr, void **handle_out);
 	int (*deregister_flow)(void *handle);
@@ -576,6 +578,7 @@ extern int arp_init_late(void);
 extern int stat_init_late(void);
 extern int tcp_init_late(void);
 extern int rcu_init_late(void);
+extern int directpath_init_late(void);
 
 /* configuration loading */
 extern int cfg_load(const char *path);

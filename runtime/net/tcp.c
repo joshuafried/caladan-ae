@@ -198,70 +198,20 @@ const struct trans_ops tcp_conn_ops = {
  */
 
 #ifdef DIRECTPATH
-static uint64_t next_affinity;
-static DEFINE_SPINLOCK(tcp_flow_lock);
-static thread_t *flow_worker_th;
-static LIST_HEAD(tcp_to_register);
-static LIST_HEAD(tcp_to_deregister);
+static atomic64_t next_affinity;
 
-static void tcp_async_flow_worker(void *arg)
+static void tcp_init_flow(tcpconn_t *c)
 {
-	int ret;
-	tcpconn_t *c;
+	struct flow_registration *f = &c->flow;
 
-	while (true) {
-		spin_lock_np(&tcp_flow_lock);
-		c = list_pop(&tcp_to_register, tcpconn_t, flow_reg_link);
-		if (c) {
-			spin_unlock_np(&tcp_flow_lock);
-			c->kthread_affinity = next_affinity++ % maxks;
-			ret = net_ops.register_flow(c->kthread_affinity, IPPROTO_TCP, c->e.laddr, c->e.raddr, &c->flow_handle);
-			WARN_ON(ret);
-			continue;
-		}
-
-		c = list_pop(&tcp_to_deregister, tcpconn_t, flow_dereg_link);
-		if (c) {
-			spin_unlock_np(&tcp_flow_lock);
-			ret = net_ops.deregister_flow(c->flow_handle);
-			WARN_ON(ret);
-			tcp_conn_put(c);
-			continue;
-		}
-
-		flow_worker_th = thread_self();
-		thread_park_and_unlock_np(&tcp_flow_lock);
-	}
+	f->kthread_affinity = atomic64_fetch_and_add(&next_affinity, 1) % maxks;
+	f->e = &c->e;
+	f->ref = &c->ref;
+	f->release = tcp_conn_release_ref;
 }
 
-static void tcp_async_register_flow(tcpconn_t *c)
-{
-	/* take a reference for the flow table */
-	tcp_conn_get(c);
-
-	spin_lock_np(&tcp_flow_lock);
-	list_add(&tcp_to_register, &c->flow_reg_link);
-	if (flow_worker_th) {
-		thread_ready(flow_worker_th);
-		flow_worker_th = NULL;
-	}
-	spin_unlock_np(&tcp_flow_lock);
-
-}
-
-static void tcp_async_deregister_flow(tcpconn_t *c)
-{
-	spin_lock_np(&tcp_flow_lock);
-	list_add(&tcp_to_deregister, &c->flow_dereg_link);
-	if (flow_worker_th) {
-		thread_ready(flow_worker_th);
-		flow_worker_th = NULL;
-	}
-	spin_unlock_np(&tcp_flow_lock);
-}
 #else
-static inline void tcp_async_register_flow(tcpconn_t *c) {}
-static inline void tcp_async_deregister_flow(tcpconn_t *c) {}
+static inline void tcp_init_flow(tcpconn_t *c) {}
 #endif
 
 /**
@@ -287,6 +237,7 @@ tcpconn_t *tcp_conn_alloc(void)
 	c->rx_closed = false;
 	c->rx_exclusive = false;
 	waitq_init(&c->rx_wq);
+	c->rxq_ooo_len = 0;
 	list_head_init(&c->rxq_ooo);
 	list_head_init(&c->rxq);
 
@@ -350,7 +301,8 @@ int tcp_conn_attach(tcpconn_t *c, struct netaddr laddr, struct netaddr raddr)
 
 	c->attach_ts = microtime();
 
-	tcp_async_register_flow(c);
+	tcp_init_flow(c);
+	register_flow(&c->flow);
 
 	return 0;
 }
@@ -940,16 +892,30 @@ ssize_t tcp_write(tcpconn_t *c, const void *buf, size_t len)
 	size_t winlen;
 	ssize_t ret;
 
-	/* block until the data can be sent */
-	ret = tcp_write_wait(c, &winlen);
-	if (ret)
-		return ret;
+	spin_lock_np(&c->lock);
+
+	/* block until there is an actionable event */
+	while (!c->tx_closed &&
+	       (c->pcb.state < TCP_STATE_ESTABLISHED || c->tx_exclusive ||
+		wraps_lte(c->pcb.snd_una + c->pcb.snd_wnd, c->pcb.snd_nxt))) {
+		waitq_wait(&c->tx_wq, &c->lock);
+	}
+
+	/* is the socket closed? */
+	if (c->tx_closed) {
+		spin_unlock_np(&c->lock);
+		return c->err ? -c->err : -EPIPE;
+	}
+
+	/* TODO: must allow at least one byte to avoid zero window deadlock */
+	winlen = c->pcb.snd_una + c->pcb.snd_wnd - c->pcb.snd_nxt;
 
 	/* actually send the data */
 	ret = tcp_tx_send(c, buf, MIN(len, winlen), len <= winlen);
 
-	/* catch up on any pending work */
-	tcp_write_finish(c);
+	c->ack_delayed = (ret < 0);
+	tcp_timer_update(c);
+	spin_unlock_np(&c->lock);
 
 	return ret;
 }
@@ -1067,7 +1033,7 @@ void tcp_conn_shutdown_rx(tcpconn_t *c)
 
 	c->rx_closed = true;
 	waitq_release(&c->rx_wq);
-	tcp_async_deregister_flow(c);
+	deregister_flow(&c->flow);
 }
 
 static int tcp_conn_shutdown_tx(tcpconn_t *c)
@@ -1197,13 +1163,5 @@ void tcp_close(tcpconn_t *c)
  */
 int tcp_init_late(void)
 {
-#ifdef DIRECTPATH
-	int ret;
-
-	ret = thread_spawn(tcp_async_flow_worker, NULL);
-	if (ret)
-		return ret;
-#endif
-
 	return thread_spawn(tcp_worker, NULL);
 }

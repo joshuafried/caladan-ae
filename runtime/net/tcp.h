@@ -80,6 +80,7 @@ struct tcpconn {
 	unsigned int		rx_closed:1;
 	unsigned int		rx_exclusive:1;
 	waitq_t			rx_wq;
+	unsigned int		rxq_ooo_len;
 	struct list_head	rxq_ooo;
 	struct list_head	rxq;
 
@@ -105,12 +106,7 @@ struct tcpconn {
 	};
 	int			rep_acks;
 
-	/* flow steering */
-	unsigned int		kthread_affinity;
-	void		*flow_handle;
-	struct list_node		flow_reg_link;
-	struct list_node		flow_dereg_link;
-
+	struct flow_registration flow;
 };
 
 extern tcpconn_t *tcp_conn_alloc(void);

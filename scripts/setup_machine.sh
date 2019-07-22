@@ -14,9 +14,12 @@ cd ksched && make && cd ..
 # set up the ksched module
 rmmod ksched
 rm /dev/ksched
-insmod ./ksched/build/ksched.ko
+insmod $(dirname $0)/../ksched/build/ksched.ko
 mknod /dev/ksched c 280 0
 chmod uga+rwx /dev/ksched
+rm /dev/pcicfg
+mknod /dev/pcicfg c 281 0
+chmod uga+rwx /dev/pcicfg
 
 # reserve huge pages
 echo 8192 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages

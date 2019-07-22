@@ -12,7 +12,7 @@
 
 /* a list of processes that are waiting for more cores */
 static LIST_HEAD(congested_procs);
-/* a list of processes that are using more than their guaranteed cores */
+/* a bitmap of all available cores that are currently idle */
 static DEFINE_BITMAP(simple_idle_cores, NCPU);
 
 struct simple_data {
@@ -144,9 +144,20 @@ static unsigned int simple_choose_core(struct proc *p)
 {
 	struct simple_data *sd = (struct simple_data *)p->policy_data;
 	struct thread *th;
-	unsigned int core;
+	unsigned int core, tmp;
 
-	/* first try to find a previously used core (to improve locality) */
+        /* first try to find a matching active hyperthread */
+        sched_for_each_allowed_core(core, tmp) {
+		unsigned int sib = sched_siblings[core];
+		if (cores[core] != sd)
+			continue;
+		if (cores[sib] == sd || (cores[sib] != NULL &&
+		    !simple_proc_is_preemptible(cores[sib], sd)))
+			continue;
+		return sib;
+	}
+
+	/* then try to find a previously used core (to improve locality) */
 	list_for_each(&p->idle_threads, th, idle_link) {
 		core = th->core;
 		if (core >= NCPU)
@@ -171,7 +182,7 @@ static unsigned int simple_choose_core(struct proc *p)
 		return core;
 
 	/* finally look for any preemptible core */
-	for (core = 0; core < NCPU; core++) {
+	sched_for_each_allowed_core(core, tmp) {
 		if (cores[core] == sd)
 			continue;
 		if (cores[core] &&
@@ -279,12 +290,17 @@ static struct simple_data *simple_choose_kthread(unsigned int core)
 	return list_top(&congested_procs, struct simple_data, congested_link);
 }
 
-static void simple_sched_poll(bitmap_ptr_t idle)
+static void simple_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
 {
 	struct simple_data *sd;
 	unsigned int core;
 
+	if (idle_cnt == 0)
+		return;
+
 	bitmap_for_each_set(idle, NCPU, core) {
+		if (cores[core] != NULL)
+			simple_unmark_congested(cores[core]);
 		simple_cleanup_core(core);
 		sd = simple_choose_kthread(core);
 		if (!sd) {
@@ -292,8 +308,10 @@ static void simple_sched_poll(bitmap_ptr_t idle)
 			continue;
 		}
 		simple_unmark_congested(sd);
-		if (unlikely(simple_run_kthread_on_core(sd->p, core)))
+		if (unlikely(simple_run_kthread_on_core(sd->p, core))) {
 			bitmap_set(simple_idle_cores, core);
+			simple_mark_congested(sd);
+		}
 	}
 }
 

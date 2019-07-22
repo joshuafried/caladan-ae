@@ -26,9 +26,11 @@ unsigned int sched_dp_core;	/* used for the iokernel's dataplane */
 unsigned int sched_ctrl_core;	/* used for the iokernel's controlplane */
 unsigned int sched_linux_core;	/* used by normal linux scheduler */
 
-/* an array of core numbers that need to be polled */
-static unsigned int poll_cores[NCPU];
-static int poll_cores_nr;
+/* arrays of core numbers for fast polling */
+unsigned int sched_cores_tbl[NCPU];
+int sched_cores_nr;
+unsigned int sched_siblings_tbl[NCPU];
+int sched_siblings_nr;
 
 struct core_state {
 	struct thread	*pending_th;  /* a thread waiting run */
@@ -41,8 +43,7 @@ struct core_state {
 /* a per-CPU state table to manage scheduling operations */
 static struct core_state state[NCPU];
 /* policy-specific operations (TODO: should be made configurable) */
-extern struct sched_ops simple_ops;
-static const struct sched_ops *ops = &simple_ops;
+const struct sched_ops *sched_ops;
 
 /**
  * sched_steer_flows - redirects flows to active kthreads
@@ -134,37 +135,8 @@ static struct thread *sched_pick_kthread(struct proc *p, unsigned int core)
 	return list_tail(&p->idle_threads, struct thread, idle_link);
 }
 
-/**
- * sched_run_on_core - allocates a core to a process
- * @p: the process to run on the core (can be NULL to make the core idle)
- * @core: the core number to run the process on
- *
- * If another process is currently running on @core, it will be preempted.
- *
- * Returns 0 if successful, otherwise fail.
- */
-int sched_run_on_core(struct proc *p, unsigned int core)
+int __sched_run(struct core_state *s, struct thread *th, unsigned int core)
 {
-	struct core_state *s = &state[core];
-	struct thread *th = NULL;
-
-	/* validate inputs --- mostly to catch bugs */
-	if (unlikely((p && list_empty(&p->idle_threads)) || core >= NCPU ||
-		     !bitmap_test(sched_allowed_cores, core))) {
-		WARN();
-		return -EINVAL;
-	}
-
-	/* select the best kthread to run on this core (if requested) */
-	if (p) {
-		th = sched_pick_kthread(p, core);
-		if (unlikely(!th))
-			return -ENOENT;
-
-		proc_get(th->p);
-		sched_enable_kthread(th, core);
-	}
-
 	/* if we're still busy with the last run request than stop here */
 	if (s->wait) {
 		if (s->pending_th) {
@@ -190,6 +162,64 @@ int sched_run_on_core(struct proc *p, unsigned int core)
 	s->wait = true;
 	s->idle = false;
 	return 0;
+}
+
+/**
+ * sched_run_on_core - allocates a core to a process
+ * @p: the process to run on the core
+ * @core: the core number to run the process on
+ *
+ * If another process is currently running on @core, it will be preempted.
+ *
+ * Returns 0 if successful, otherwise fail.
+ */
+int sched_run_on_core(struct proc *p, unsigned int core)
+{
+	struct core_state *s = &state[core];
+	struct thread *th;
+
+	/* validate inputs --- mostly to catch bugs */
+	if (unlikely(list_empty(&p->idle_threads) || core >= NCPU ||
+		     !bitmap_test(sched_allowed_cores, core))) {
+		WARN();
+		return -EINVAL;
+	}
+
+	/* select the best kthread to run on this core (if requested) */
+	th = sched_pick_kthread(p, core);
+	if (unlikely(!th))
+		return -ENOENT;
+	proc_get(th->p);
+	sched_enable_kthread(th, core);
+
+	/* issue the command to run the thread */
+	return __sched_run(s, th, core);
+}
+
+/**
+ * sched_idle_on_core - makes a core go idle
+ * @mwait_hint: the model-specific MWAIT idle state hint
+ * @core: the core number to run the process on
+ *
+ * If another process is currently running on @core, it will be preempted.
+ *
+ * Returns 0 if successful, otherwise fail.
+ */
+int sched_idle_on_core(uint32_t mwait_hint, unsigned int core)
+{
+	struct core_state *s = &state[core];
+
+	/* validate inputs --- mostly to catch bugs */
+	if (unlikely(core >= NCPU || !bitmap_test(sched_allowed_cores, core))) {
+		WARN();
+		return -EINVAL;
+	}
+
+	/* setup the requested idle state */
+	ksched_idle_hint(mwait_hint, core);
+
+	/* issue the command to idle the core */
+	return __sched_run(s, NULL, core);
 }
 
 static bool hardware_queue_congested(struct thread *th, struct hwq *h)
@@ -256,7 +286,7 @@ static void sched_detect_congestion(struct proc *p)
 	}
 
 	/* notify the scheduler policy of the current congestion */
-	ops->notify_congested(p, threads, ios);
+	sched_ops->notify_congested(p, threads, ios);
 }
 
 static int sched_try_fast_rewake(struct thread *th)
@@ -268,8 +298,8 @@ static int sched_try_fast_rewake(struct thread *th)
 	 * requests in flight, we can just wake it back up directly without
 	 * wasting any extra time in the scheduler.
 	 */
-	if (ACCESS_ONCE(th->rxq.send_head) == lrpc_poll_send_tail(&th->rxq)
-			 && (!h->enabled || !hwq_busy(h, ACCESS_ONCE(*h->consumer_idx))))
+	if (ACCESS_ONCE(th->rxq.send_head) == lrpc_poll_send_tail(&th->rxq) &&
+	    (!h->enabled || !hwq_busy(h, ACCESS_ONCE(*h->consumer_idx))))
 		return -EINVAL;
 
 	ksched_run(th->core, th->tid);
@@ -286,16 +316,14 @@ void sched_poll(void)
 	DEFINE_BITMAP(idle, NCPU);
 	struct core_state *s;
 	uint64_t now;
-	int i, core;
-	bool idled = false;
+	int i, core, idle_cnt = 0;
 
 	/*
 	 * fast pass --- runs every poll loop
 	 */
 
 	bitmap_init(idle, NCPU, false);
-	for (i = 0; i < poll_cores_nr; i++) {
-		core = poll_cores[i];
+	sched_for_each_allowed_core(core, i) {
 		s = &state[core];
 
 		/* check if a pending context switch finished */
@@ -328,7 +356,7 @@ void sched_poll(void)
 			}
 			s->idle = true;
 			bitmap_set(idle, core);
-			idled = true;
+			idle_cnt++;
 		}
 	}
 
@@ -349,8 +377,7 @@ void sched_poll(void)
 	 * final pass --- let the scheduler policy decide how to respond
 	 */
 
-	if (idled)
-		ops->sched_poll(idle);
+	sched_ops->sched_poll(now, idle_cnt, idle);
 	ksched_send_intrs();
 }
 
@@ -362,7 +389,7 @@ void sched_poll(void)
  */
 int sched_add_core(struct proc *p)
 {
-	return ops->notify_core_needed(p);
+	return sched_ops->notify_core_needed(p);
 }
 
 /**
@@ -383,7 +410,7 @@ int sched_attach_proc(struct proc *p)
 		list_add_tail(&p->idle_threads, &p->threads[i].idle_link);
 	}
 
-	return ops->proc_attach(p, &p->sched_cfg);
+	return sched_ops->proc_attach(p, &p->sched_cfg);
 }
 
 /**
@@ -392,7 +419,7 @@ int sched_attach_proc(struct proc *p)
  */
 void sched_detach_proc(struct proc *p)
 {
-	ops->proc_detach(p);
+	sched_ops->proc_detach(p);
 }
 
 static int sched_scan_node(int node)
@@ -459,6 +486,10 @@ int sched_init(void)
 		if (cpu_info_tbl[i].package != 0)
 			continue;
 
+		if (allowed_cores_supplied &&
+		    !bitmap_test(input_allowed_cores, i))
+			continue;
+
 		bitmap_set(sched_allowed_cores, i);
 	}
 	/* check for minimum number of cores required */
@@ -492,8 +523,20 @@ int sched_init(void)
 		}
 	}
 
+	/* generate polling arrays */
 	bitmap_for_each_set(sched_allowed_cores, NCPU, i)
-		poll_cores[poll_cores_nr++] = i;
+		sched_cores_tbl[sched_cores_nr++] = i;
+	bitmap_for_each_set(sched_allowed_cores, NCPU, i) {
+		bool found = false;
+		for (sib = 0; sib < sched_siblings_nr; sib++) {
+			if (sched_siblings[sched_siblings_tbl[sib]] == i) {
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			sched_siblings_tbl[sched_siblings_nr++] = i;
+	}
 
 	return 0;
 }

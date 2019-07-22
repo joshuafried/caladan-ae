@@ -53,13 +53,14 @@ struct sched_ops {
 
 	/**
 	 * sched_poll - called each poll loop
-	 * @idle: an edge-triggered bitmap of the CPU cores that have become
-	 * idle
+	 * @now: current time in microseconds
+	 * @idle_cnt: the number of cores that went idle
+	 * @idle: an edge-triggered bitmap of cores that have become idle
 	 *
 	 * Happens right after all notifications. In general, the scheduler
 	 * should make adjustments and allocate idle cores during this phase.
 	 */
-	void (*sched_poll)(bitmap_ptr_t idle);
+	void (*sched_poll)(uint64_t now, int idle_cnt, bitmap_ptr_t idle);
 };
 
 
@@ -79,6 +80,7 @@ unsigned int sched_linux_core;
  */
 
 extern int sched_run_on_core(struct proc *p, unsigned int core);
+extern int sched_idle_on_core(uint32_t mwait_hint, unsigned int core);
 
 static inline int sched_threads_active(struct proc *p)
 {
@@ -92,6 +94,28 @@ static inline int sched_threads_avail(struct proc *p)
 
 
 /*
+ * Core iterators
+ */
+
+extern unsigned int sched_cores_tbl[NCPU];
+extern int sched_cores_nr;
+extern unsigned int sched_siblings_tbl[NCPU];
+extern int sched_siblings_nr;
+
+#define sched_for_each_allowed_core(core, tmp)			\
+	for ((core) = sched_cores_tbl[0], (tmp) = 0;		\
+	     (tmp) < sched_cores_nr &&				\
+	     ({(core) = sched_cores_tbl[(tmp)]; true;});	\
+	     (tmp)++)
+
+#define sched_for_each_allowed_sibling(core, tmp)		\
+	for ((core) = sched_siblings_tbl[0], (tmp) = 0;		\
+	     (tmp) < sched_siblings_nr &&			\
+	     ({(core) = sched_siblings_tbl[(tmp)]; true;});	\
+	     (tmp)++)
+
+
+/*
  * API for the rest of the IOkernel
  */
 
@@ -99,3 +123,12 @@ extern void sched_poll(void);
 extern int sched_add_core(struct proc *p);
 extern int sched_attach_proc(struct proc *p);
 extern void sched_detach_proc(struct proc *p);
+
+
+/*
+ * Scheduler policies
+ */
+
+extern const struct sched_ops *sched_ops;
+extern struct sched_ops simple_ops;
+extern struct sched_ops mis_ops;
