@@ -190,18 +190,17 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
 
 std::vector<work_unit> ClientWorker(
     rt::TcpConn *c, rt::WaitGroup *starter,
-    std::function<std::vector<work_unit>()> wf) {
+    std::function<std::vector<work_unit>()> wf,
+    int worker_id) {
   constexpr int kBatchSize = 32;
   std::vector<work_unit> w(wf());
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
 
   // current window size
-  double cwnd = 32.0;
+  double cwnd = 8.0;
   // number of outstanding requests
   uint32_t num_outst_req = 0;
-  // number of feedback to ignore.
-  uint32_t skip_update = 0;
 
   rt::Mutex m_;
   rt::CondVar cv_;
@@ -228,16 +227,13 @@ std::vector<work_unit> ClientWorker(
       uint64_t standing_queue_us = ntoh64(rp.standing_queue_us);
       double new_cwnd = cwnd;
 
-      if (skip_update > 0) {
-        skip_update--;
-      } else {
+      if (num_outst_req <= cwnd) { // will this open a new window?
         if (standing_queue_us >= 15) {
     	    // congestion detected.
           double window_cut = 1.25 - standing_queue_us/60.0; 
           window_cut = std::min<double>(window_cut, 1.0);
           window_cut = std::max<double>(window_cut, 0.5);
           new_cwnd = cwnd * window_cut;
-          skip_update = num_outst_req-1;
         } else {
           new_cwnd = cwnd + 1.0/cwnd;
         }
@@ -336,7 +332,7 @@ std::vector<work_unit> RunExperiment(
   std::unique_ptr<std::vector<work_unit>> samples[threads];
   for (int i = 0; i < threads; ++i) {
     th.emplace_back(rt::Thread([&, i] {
-      auto v = ClientWorker(conns[i].get(), &starter, wf);
+      auto v = ClientWorker(conns[i].get(), &starter, wf, i);
       samples[i].reset(new std::vector<work_unit>(std::move(v)));
     }));
   }
@@ -369,6 +365,55 @@ std::vector<work_unit> RunExperiment(
     auto &v = *samples[i];
     w.insert(w.end(), v.begin(), v.end());
   }
+
+/* Per-flow group throughput
+  std::vector<work_unit> vs[threads];
+  for (int i=0; i<threads; ++i) {
+    vs[i].insert(vs[i].end(), v.begin(), v.end());
+  }
+
+
+  for (int i=0; i < threads; ++i) {
+    vs[i].erase(std::remove_if(vs[i].begin(), vs[i].end(),
+                              [](const work_unit &s) { return s.timing == 0; }),
+                vs[i].end());
+    std::sort(vs[i].begin(), vs[i].end(),
+              [](const work_unit &s1, work_unit &s2) { return s1.timing < s2.timing; });
+  }
+
+  int num_data_point = 100;
+  int granularity = 100;
+  double throughput[num_data_point][2];
+
+  for (int i=0; i < threads; ++i) {
+    int num_req_out = 0;
+    uint64_t next_target = granularity;
+    int idx = 0;
+    for (const work_unit &u : vs[i]) {
+      if (u.timing <= next_target) {
+        num_req_out++;
+      } else {
+        if (i < 2) {
+          throughput[idx][i] = num_req_out/double(granularity);
+        } else {
+          throughput[idx][i%2] += num_req_out/double(granularity);
+        }
+        num_req_out = 1;
+        idx++;
+        next_target = (idx+1)*granularity;
+      }
+      if (idx == num_data_point) break;
+    }
+  }
+
+  for (int i = 0; i < num_data_point; ++i) {
+    std::cout << (i+1)*granularity/1000.0;
+    for (int j=0; j<2; ++j) {
+      std::cout << "," << throughput[i][j];
+    }
+    std::cout << std::endl;
+  }
+*/
 
   /*
 // Print out-going throughput
