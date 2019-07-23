@@ -366,9 +366,11 @@ std::vector<work_unit> RunExperiment(
     w.insert(w.end(), v.begin(), v.end());
   }
 
-/* Per-flow group throughput
+/*
+// Per-flow group throughput
   std::vector<work_unit> vs[threads];
   for (int i=0; i<threads; ++i) {
+    auto &v = *samples[i];
     vs[i].insert(vs[i].end(), v.begin(), v.end());
   }
 
@@ -381,9 +383,15 @@ std::vector<work_unit> RunExperiment(
               [](const work_unit &s1, work_unit &s2) { return s1.timing < s2.timing; });
   }
 
-  int num_data_point = 100;
-  int granularity = 100;
+  int num_data_point = 500;
+  int granularity = 10;
   double throughput[num_data_point][2];
+
+  for (int i=0; i<num_data_point; ++i) {
+    for(int j=0; j<2; ++j) {
+      throughput[i][j] = 0.0;
+    }
+  }
 
   for (int i=0; i < threads; ++i) {
     int num_req_out = 0;
@@ -393,16 +401,14 @@ std::vector<work_unit> RunExperiment(
       if (u.timing <= next_target) {
         num_req_out++;
       } else {
-        if (i < 2) {
-          throughput[idx][i] = num_req_out/double(granularity);
-        } else {
-          throughput[idx][i%2] += num_req_out/double(granularity);
-        }
+        throughput[idx][i%2] += double(num_req_out)/double(granularity);
+        do {
+          idx++;
+          next_target = (idx+1)*granularity;
+        } while (u.timing + granularity > next_target);
         num_req_out = 1;
-        idx++;
-        next_target = (idx+1)*granularity;
       }
-      if (idx == num_data_point) break;
+      if (idx >= num_data_point) break;
     }
   }
 
@@ -415,8 +421,8 @@ std::vector<work_unit> RunExperiment(
   }
 */
 
-  /*
-// Print out-going throughput
+/*
+// Print aggregated throughput
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.timing == 0; }),
           w.end());
@@ -424,19 +430,20 @@ std::vector<work_unit> RunExperiment(
   std::sort(w.begin(), w.end(),
             [](const work_unit &s1, work_unit &s2) { return s1.timing < s2.timing; });
 
-  uint64_t num_req_out = 0;
-  uint64_t next_target = 10;
+  int num_req_out = 0;
+  int granularity = 10;
+  uint64_t next_target = granularity;
   for (const work_unit &u : w) {
     if (u.timing <= next_target) {
       num_req_out++;
     } else {
-      std::cout << next_target/1000.0 << "," << num_req_out/10.0 << std::endl;
+      std::cout << next_target/1000.0 << "," << num_req_out/double(granularity) << std::endl;
       num_req_out = 1;
-      next_target += 10;
+      next_target += granularity;
     }
-    if (next_target == 11000) break;
-  }*/
-
+    if (next_target > 10000) break;
+  }
+*/
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),
