@@ -181,6 +181,9 @@ std::vector<work_unit> ClientWorker(
 
     w[i].timing = duration_cast<sec>(timings[i] - expstart).count();
 
+    p.work_iterations = hton64(w[i].work_us * kIterationsPerUS);
+    p.index = hton64(i);
+
     rt::TcpConn* c= cs[0];
 
     ssize_t ret = c->WriteFull(&p, sizeof(payload));
@@ -292,7 +295,7 @@ void SteadyStateExperiment(int num_threads, int num_servers, double offered_rps,
 }
 
 void ClientHandler(void *arg) {
-  for (double i = 100000; i <= 4000000; i += 100000) {
+  for (double i = 100000; i <= 100000; i += 100000) {
     SteadyStateExperiment(num_threads, num_servers, i, st);
   }
 }
