@@ -123,6 +123,11 @@ std::vector<work_unit> ClientWorker(
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
 
+  std::vector<uint64_t> metrics;
+  metrics.reserve(num_servers);
+  for(int i = 0; i < num_servers; ++i)
+    metrics[i] = 0;
+
   std::vector<rt::Thread> th;
   for (int i = 0; i < num_servers; ++i) {
     th.emplace_back(rt::Thread([&, i] {
@@ -335,7 +340,7 @@ int main(int argc, char *argv[]) {
   st = std::stod(argv[4], nullptr);
   num_servers = std::stoi(argv[5], nullptr, 0);
 
-  for (int i = 0; i < num_servers; ++i) {
+  for (i = 0; i < num_servers; ++i) {
     netaddr raddr;
     ret = StringToAddr(argv[6+i], &raddr.ip);
     if (ret) return -EINVAL;
