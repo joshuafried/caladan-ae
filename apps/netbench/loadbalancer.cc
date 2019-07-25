@@ -176,7 +176,7 @@ std::vector<work_unit> ClientWorker(
 
     w[i].timing = duration_cast<sec>(timings[i] - expstart).count();
 
-    rt::TcpConn* c = cs[0];
+    rt::TcpConn* c= cs[0];
 
     ssize_t ret = c->WriteFull(&p, sizeof(payload));
     if (ret != static_cast<ssize_t>(sizeof(payload)))
@@ -193,15 +193,14 @@ std::vector<work_unit> RunExperiment(
     int num_threads, int num_servers, double *reqs_per_sec, double *cpu_usage,
     std::function<std::vector<work_unit>()> wf) {
   // Create TCP connections
-  std::vector<std::vector<std::unique_ptr<rt::TcpConn>>> conns;
+  //
+  std::vector<std::unique_ptr<rt::TcpConn>> conns;
   for (int i = 0; i < num_threads; ++i) {
-    std::vector<std::unique_ptr<rt::TcpConn>> conn_per_thread;
     for (int j = 0; j < num_servers; ++j) {
       std::unique_ptr<rt::TcpConn> outc(rt::TcpConn::Dial({0, 0}, raddrs[j]));
       if (unlikely(outc == nullptr)) panic("couldn't connect to raddr.");
-      conn_per_thread.emplace_back(std::move(outc));
+      conns.emplace_back(std::move(outc));
     }
-    conns.push_back(conn_per_thread);
   }
 
   // Launch a worker thread for each connection
@@ -212,7 +211,7 @@ std::vector<work_unit> RunExperiment(
     th.emplace_back(rt::Thread([&, i] {
       std::vector<rt::TcpConn*> cs_;
       for(int j = 0 ; j < num_servers ; ++j) {
-        cs_.push_back(conns[i][j].get());
+        cs_.push_back(conns[num_servers*i+j].get());
       }      
       auto v = ClientWorker(cs_, num_servers, &starter, wf, i);
       samples[i].reset(new std::vector<work_unit>(std::move(v)));
@@ -232,11 +231,7 @@ std::vector<work_unit> RunExperiment(
   auto finish = steady_clock::now();
   barrier();
 
-  for (auto &cs : conns) {
-    for (auto &c : cs) {
-      c->Abort();
-    }
-  }
+  for (auto &c : conns) c->Abort();
 
   std::vector<work_unit> w;
   for (int i = 0; i < num_threads; ++i) {
