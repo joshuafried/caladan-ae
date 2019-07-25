@@ -14,13 +14,16 @@ stress_obj = $(stress_src:.cc=.o)
 interference_src = interference.cc
 interference_obj = $(interference_src:.cc=.o)
 
+loadbalancer_src = loadbalancer.cc
+loadbalancer_obj = $(loadbalancer_src:.cc=.o)
+
 librt_libs = $(ROOT_PATH)/bindings/cc/librt++.a
 INC += -I$(ROOT_PATH)/bindings/cc
 
 RUNTIME_LIBS := $(RUNTIME_LIBS) -lnuma
 
 # must be first
-all: netbench stress interference
+all: netbench stress interference loadbalancer
 
 netbench: $(lib_obj) $(netbench_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(netbench_obj) \
@@ -34,8 +37,12 @@ interference: $(lib_obj) $(interference_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(interference_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
 
+loadbalancer: $(lib_obj) $(loadbalancer_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(loadbalancer_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
 # general build rules for all targets
-src = $(lib_src) $(netbench_src) $(stress_src) $(interference_src)
+src = $(lib_src) $(netbench_src) $(stress_src) $(interference_src) $(loadbalancer_src)
 obj = $(src:.cc=.o)
 dep = $(obj:.o=.d)
 
@@ -52,4 +59,4 @@ endif
 
 .PHONY: clean
 clean:
-	rm -f $(obj) $(dep) netbench stress interference
+	rm -f $(obj) $(dep) netbench stress interference loadbalancer
