@@ -69,6 +69,9 @@ use memcached::MemcachedProtocol;
 mod dns;
 use dns::DnsProtocol;
 
+mod reflex;
+use reflex::ReflexProtocol;
+
 #[derive(Copy, Clone, Debug)]
 enum Distribution {
     Zero,
@@ -123,6 +126,7 @@ enum Protocol {
     Synthetic,
     Memcached,
     Dns,
+    Reflex,
 }}
 
 impl Protocol {
@@ -131,6 +135,7 @@ impl Protocol {
             Protocol::Memcached => MemcachedProtocol::gen_request(i, p, buf, tport),
             Protocol::Synthetic => SyntheticProtocol::gen_request(i, p, buf, tport),
             Protocol::Dns => DnsProtocol::gen_request(i, p, buf, tport),
+            Protocol::Reflex => ReflexProtocol::gen_request(i, p, buf, tport),
         }
     }
 
@@ -144,6 +149,7 @@ impl Protocol {
             Protocol::Synthetic => SyntheticProtocol::read_response(sock, tport, scratch),
             Protocol::Memcached => MemcachedProtocol::read_response(sock, tport, scratch),
             Protocol::Dns => DnsProtocol::read_response(sock, tport, scratch),
+            Protocol::Reflex => ReflexProtocol::read_response(sock, tport, scratch),
         }
     }
 }
@@ -622,15 +628,19 @@ fn run_client(
 
     let mut start_index = 0;
     let mut start = Duration::from_nanos(100_000_000);
-    schedules.iter().all(|sched| {
+    schedules.iter().fold(true, |pres, sched| {
         let npackets = packets[start_index..]
             .iter()
             .position(|p| p.target_start >= start + sched.runtime)
             .unwrap_or(packets.len() - start_index);
-        let res = process_result(&sched, &mut packets[start_index..start_index + npackets], start_unix);
+        let res = process_result(
+            &sched,
+            &mut packets[start_index..start_index + npackets],
+            start_unix,
+        );
         start_index += npackets;
         start += sched.runtime;
-        res
+        pres && res
     })
 }
 
@@ -801,7 +811,7 @@ fn main() {
                 .short("p")
                 .long("protocol")
                 .value_name("PROTOCOL")
-                .possible_values(&["synthetic", "memcached", "dns"])
+                .possible_values(&["synthetic", "memcached", "dns", "reflex"])
                 .default_value("synthetic")
                 .help("Server protocol"),
         )

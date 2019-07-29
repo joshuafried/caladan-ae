@@ -321,6 +321,7 @@ again:
 	/* we may have got a preempt signal before voluntarily yielding */
 	kthread_park(!preempt_needed());
 	start_tsc = rdtsc();
+	iters = 0;
 
 	spin_lock(&l->lock);
 	l->parked = false;
@@ -478,6 +479,7 @@ void thread_ready(thread_t *th)
 		list_add_tail(&k->rq_overflow, &th->link);
 		spin_unlock(&k->lock);
 		putk();
+		STAT(RQ_OVERFLOW)++;
 		return;
 	}
 

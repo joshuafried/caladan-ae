@@ -15,7 +15,7 @@
  * struct control_hdr, please increment the version number!
  */
 
-#define CONTROL_HDR_VERSION 2
+#define CONTROL_HDR_VERSION 4
 
 /* The abstract namespace path for the control socket. */
 #define CONTROL_SOCK_PATH	"\0/control/iokernel.sock"
@@ -26,6 +26,8 @@ struct q_ptrs {
 	uint32_t		rq_head;
 	uint32_t		rq_tail;
 	uint32_t		directpath_rx_tail;
+	uint64_t		next_timer_tsc;
+	uint32_t		storage_tail;
 };
 
 struct congestion_info {
@@ -36,7 +38,6 @@ struct congestion_info {
 enum {
 	HWQ_INVALID = 0,
 	HWQ_MLX5,
-	HWQ_MLX4,
 	HWQ_SPDK_NVME,
 	NR_HWQ,
 };
@@ -44,7 +45,7 @@ enum {
 struct hardware_queue_spec {
 	shmptr_t		descriptor_table;
 	shmptr_t		consumer_idx;
-	uint32_t		descriptor_size;
+	uint32_t		descriptor_log_size;
 	uint32_t		nr_descriptors;
 	uint32_t		parity_byte_offset;
 	uint32_t		parity_bit_mask;
@@ -52,7 +53,6 @@ struct hardware_queue_spec {
 };
 
 struct timer_spec {
-	shmptr_t		timern;
 	shmptr_t		next_tsc;
 	unsigned long		timer_resolution;
 };
@@ -68,10 +68,8 @@ struct thread_spec {
 	int32_t			park_efd;
 
 	struct hardware_queue_spec		direct_rxq;
-
-	shmptr_t		nvme_qpair_cpl;
-	shmptr_t		nvme_qpair_cq_head;
-	shmptr_t		nvme_qpair_phase;
+	struct hardware_queue_spec		storage_hwq;
+	struct timer_spec		timer_heap;
 };
 
 enum {
@@ -87,6 +85,7 @@ struct sched_spec {
 	unsigned int		guaranteed_cores;
 	unsigned int		congestion_latency_us;
 	unsigned int		scaleout_latency_us;
+	unsigned int		preferred_socket;
 };
 
 #define CONTROL_HDR_MAGIC	0x696f6b3a /* "iok:" */
@@ -98,7 +97,6 @@ struct control_hdr {
 	unsigned int		thread_count;
 	unsigned long		egress_buf_count;
 	shmptr_t		congestion_info;
-	int			spdk_shm_id;
 	struct eth_addr		mac;
 	struct sched_spec	sched_cfg;
 	shmptr_t		thread_specs;

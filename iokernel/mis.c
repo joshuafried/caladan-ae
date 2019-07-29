@@ -24,16 +24,15 @@ static DEFINE_BITMAP(mis_idle_cores, NCPU);
 /* a bitmap of all cores with performance counters being sampled */
 static DEFINE_BITMAP(mis_sampled_cores, NCPU);
 
-/* this performance counter measures LLC misses as a proxy for mem bandwidth */
-#define PMC_LLC_MISSES (PMC_ARCH_LLC_MISSES | PMC_ESEL_USR | PMC_ESEL_OS | \
-			PMC_ESEL_ANY | PMC_ESEL_ENABLE)
-
 /* poll the global (system-wide) memory bandwidth over this time interval */
-#define MIS_BW_MEASURE_INTERVAL	50
+#define MIS_BW_MEASURE_INTERVAL	30
 /* wait for performance counter results over this time interval */
 #define MIS_BW_PUNISH_INTERVAL	10
-/* punish processes consuming high bandwidth over this threshold */
-#define MIS_BW_THRESHOLD	20000 /* FIXME: should not be hard coded */
+/* FIXME: should not be hard coded */
+#define MIS_BW_HIGH_WATERMARK	0.100
+/* FIXME: should not be hard coded */
+#define MIS_BW_LOW_WATERMARK	(0.8 * MIS_BW_HIGH_WATERMARK)
+#define MIS_UNDER_LOW_WATERMARK_CNT_THRESHOLD 2
 
 struct mis_data {
 	struct proc		*p;
@@ -65,6 +64,11 @@ static bool mis_proc_is_preemptible(struct mis_data *cursd,
 	       nextsd->threads_active < nextsd->threads_guaranteed;
 }
 
+static bool mis_proc_can_be_congested(struct mis_data *sd)
+{
+	return sd->threads_active < sd->threads_limit;
+}
+
 /* the current process running on each core */
 static struct mis_data *cores[NCPU];
 
@@ -83,17 +87,18 @@ static void mis_cleanup_core(unsigned int core)
 	if (cores[core])
 		cores[core]->threads_active--;
 	cores[core] = NULL;
-	for (i = 1; i < NHIST; i++)
+	for (i = NHIST-1; i > 0; i--)
 		hist[core][i] = hist[core][i - 1];
 	hist[core][0] = sd;
 }
 
 static void mis_mark_congested(struct mis_data *sd)
 {
+	assert(mis_proc_can_be_congested(sd));
 	if (sd->is_congested)
 		return;
 	sd->is_congested = true;
-	list_add(&congested_procs, &sd->congested_link);
+	list_add_tail(&congested_procs, &sd->congested_link);
 }
 
 static void mis_unmark_congested(struct mis_data *sd)
@@ -102,6 +107,22 @@ static void mis_unmark_congested(struct mis_data *sd)
 		return;
 	sd->is_congested = false;
 	list_del_from(&congested_procs, &sd->congested_link);
+}
+
+static void mis_mark_bwlimited(struct mis_data *sd)
+{
+	if (sd->is_bwlimited)
+		return;
+	sd->is_bwlimited = true;
+	list_add_tail(&bwlimited_procs, &sd->bwlimited_link);
+}
+
+static void mis_unmark_bwlimited(struct mis_data *sd)
+{
+	if (!sd->is_bwlimited)
+		return;
+	sd->is_bwlimited = false;
+	list_del_from(&bwlimited_procs, &sd->bwlimited_link);
 }
 
 static int mis_attach(struct proc *p, struct sched_spec *cfg)
@@ -131,9 +152,8 @@ static void mis_detach(struct proc *p)
 	int i, j;
 
 	mis_unmark_congested(sd);
+	mis_unmark_bwlimited(sd);
 	list_del_from(&all_procs, &sd->all_link);
-	if (sd->is_bwlimited)
-		list_del_from(&bwlimited_procs, &sd->bwlimited_link);
 
 	for (i = 0; i < NCPU; i++) {
 		if (cores[i] == sd)
@@ -145,117 +165,6 @@ static void mis_detach(struct proc *p)
 	}
 
 	free(sd);
-}
-
-static void mis_sample_pmc(uint64_t sel)
-{
-	struct mis_data *sd;
-	int core, sib, tmp;
-
-	bitmap_clear(mis_sampled_cores, NCPU);
-	list_for_each(&all_procs, sd, all_link) {
-		sd->threads_monitored = 0;
-		sd->llc_misses = 0;
-	}
-
-	sched_for_each_allowed_sibling(core, tmp) {
-		struct mis_data *sd1, *sd2;
-		sib = sched_siblings[core];
-		sd1 = cores[core];
-		sd2 = cores[sib];
-
-		if (!sd1 && !sd2)
-			continue;
-		if (sd1 &&
-		    (!sd2 || sd1->threads_monitored < sd2->threads_monitored)) {
-			sd1->threads_monitored++;
-			ksched_enqueue_pmc(sib, sel);
-			bitmap_set(mis_sampled_cores, sib);
-		} else {
-			sd2->threads_monitored++;
-			ksched_enqueue_pmc(core, sel);
-			bitmap_set(mis_sampled_cores, core);
-		}
-	}
-}
-
-static struct mis_data *mis_choose_bandwidth_victim(void)
-{
-	struct mis_data *sd, *victim = NULL;
-	float highest_l3miss;
-	uint64_t pmc;
-	int i;
-
-	bitmap_for_each_set(mis_sampled_cores, NCPU, i) {
-		sd = cores[sched_siblings[i]];
-		if (unlikely(!ksched_poll_pmc(i, &pmc))) {
-			if (sd)
-				sd->threads_monitored--;
-			log_err_ratelimited("mis: pmc not ready");
-			continue;
-		}
-		if (sd)
-			sd->llc_misses += pmc;
-	}
-
-	list_for_each(&all_procs, sd, all_link) {
-		float estimated_l3miss = (float)sd->llc_misses /
-					 (float)sd->threads_monitored *
-					 (float)sd->threads_active;
-		log_info("mis: proc %d monitored %d L3Miss %f",
-			 sd->p->pid, sd->threads_monitored, estimated_l3miss);
-		if (sd->threads_limit == 0 ||
-		    sd->threads_limit <= sd->threads_guaranteed)
-			continue;
-		if (!victim || estimated_l3miss > highest_l3miss) {
-			highest_l3miss = estimated_l3miss;
-			victim = sd;
-		}
-	}
-
-	return victim;
-}
-
-static void mis_bandwidth_state_machine(uint64_t now)
-{
-	static bool bw_punish_triggered = false;
-	static uint64_t last_tsc = 0, last_bw_measure_ts = 0, last_bw_punish_ts;
-	static uint32_t last_cas = 0;
-	uint64_t tsc;
-	uint32_t cur_cas;
-	float bw_estimate;
-
-	/* punish a process that is using too much bandwidth */
-	if (bw_punish_triggered &&
-	    now - last_bw_punish_ts >= MIS_BW_PUNISH_INTERVAL) {
-		struct mis_data *sd;
-
-		bw_punish_triggered = false;
-		sd = mis_choose_bandwidth_victim();
-	}
-
-	/* check if it's time to sample bandwidth */
-	if (now - last_bw_measure_ts < MIS_BW_MEASURE_INTERVAL)
-		return;
-
-	/* update the bandwidth estimate */
-	barrier();
-	tsc = rdtsc();
-	barrier();
-	cur_cas = get_cas_count_all();
-	bw_estimate = (float)(cur_cas - last_cas) / (float)(tsc - last_tsc);
-	last_bw_measure_ts = now;
-	last_cas = cur_cas;
-	last_tsc = tsc;
-
-	/* check if the bandwidth limit has been exceeded */
-	if (bw_estimate > MIS_BW_THRESHOLD) {
-		mis_sample_pmc(PMC_LLC_MISSES);
-		bw_punish_triggered = true;
-		last_bw_punish_ts = microtime();
-	}
-
-	log_info_ratelimited("bw estimate %f", bw_estimate);
 }
 
 static int mis_run_kthread_on_core(struct proc *p, unsigned int core)
@@ -312,7 +221,8 @@ static unsigned int mis_choose_core(struct proc *p)
 		if (cores[sib] == sd || (cores[sib] != NULL &&
 		    !mis_proc_is_preemptible(cores[sib], sd)))
 			continue;
-		return sib;
+		if (bitmap_test(sched_allowed_cores, sib))
+			return sib;
 	}
 
 	/* then try to find a previously used core (to improve locality) */
@@ -388,7 +298,8 @@ static void mis_update_congestion_info(struct mis_data *sd)
 
 	/* update the CPU load */
 	/* TODO: handle using more than guaranteed cores */
-	instant_load = (float)sd->threads_active / (float)sd->threads_limit;
+	instant_load = (sd->threads_limit)
+		? (float)sd->threads_active / (float)sd->threads_limit : 0;
 	sd->load = sd->load * (1 - EWMA_WEIGHT) + instant_load * EWMA_WEIGHT;
 	ACCESS_ONCE(info->load) = sd->load;
 }
@@ -406,8 +317,8 @@ static void mis_notify_congested(struct proc *p, bitmap_ptr_t threads,
 		goto done;
 	}
 
-	/* do nothing if already marked as congested */
-	if (sd->is_congested)
+	/* do nothing if already marked as congested or can't be congested */
+	if (sd->is_congested || !mis_proc_can_be_congested(sd))
 		goto done;
 
 	/* try to add an additional core right away */
@@ -448,10 +359,218 @@ static struct mis_data *mis_choose_kthread(unsigned int core)
 	return list_top(&congested_procs, struct mis_data, congested_link);
 }
 
-static void mis_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
+static int mis_add_kthread_on_core(unsigned int core)
 {
 	struct mis_data *sd;
+	int ret;
+
+	sd = mis_choose_kthread(core);
+	if (unlikely(!sd))
+		return -ENOENT;
+
+	ret = mis_run_kthread_on_core(sd->p, core);
+	if (unlikely(ret))
+		return ret;
+
+	return 0;
+}
+
+static void mis_sample_pmc(uint64_t sel)
+{
+	struct mis_data *sd;
+	int core, sib, tmp;
+
+	bitmap_clear(mis_sampled_cores, NCPU);
+	list_for_each(&all_procs, sd, all_link) {
+		sd->threads_monitored = 0;
+		sd->llc_misses = 0;
+	}
+
+	sched_for_each_allowed_sibling(core, tmp) {
+		struct mis_data *sd1, *sd2;
+		sib = sched_siblings[core];
+		sd1 = cores[core];
+		sd2 = cores[sib];
+
+		if (!sd1 && !sd2)
+			continue;
+		if (sd1 && (!sd2 ||
+			    sd1->threads_monitored <= sd2->threads_monitored)) {
+			sd1->threads_monitored++;
+			ksched_enqueue_pmc(sib, sel);
+			bitmap_set(mis_sampled_cores, sib);
+		} else {
+			sd2->threads_monitored++;
+			ksched_enqueue_pmc(core, sel);
+			bitmap_set(mis_sampled_cores, core);
+		}
+	}
+}
+
+static struct mis_data *mis_choose_bandwidth_victim(void)
+{
+	struct mis_data *sd, *victim = NULL;
+	float highest_l3miss;
+	uint64_t pmc;
+	int i;
+	int has_not_ready = 0;
+	static int invoked_cnt = 0;
+	static int not_ready_cnt = 0;
+
+	bitmap_for_each_set(mis_sampled_cores, NCPU, i) {
+		sd = cores[sched_siblings[i]];
+		if (unlikely(!ksched_poll_pmc(i, &pmc))) {
+			if (sd) {
+				has_not_ready = 1;
+				sd->threads_monitored--;
+			}
+			continue;
+		}
+		if (sd)
+			sd->llc_misses += pmc;
+	}
+
+	not_ready_cnt += has_not_ready;
+	invoked_cnt++;
+	log_ratelimited(LOG_INFO, "not ready ratio = %f",
+			(float)not_ready_cnt / (float)invoked_cnt);
+
+	list_for_each(&all_procs, sd, all_link) {
+		if (!sd->threads_monitored) {
+		  // pmc not ready, pass
+		  continue;
+		}
+		float estimated_l3miss = (float)sd->llc_misses /
+					 (float)sd->threads_monitored *
+					 (float)sd->threads_active;
+		if (sd->threads_limit == 0 ||
+		    sd->threads_limit <= sd->threads_guaranteed)
+			continue;
+		if (!victim || estimated_l3miss > highest_l3miss) {
+			highest_l3miss = estimated_l3miss;
+			victim = sd;
+		}
+	}
+
+	return victim;
+}
+
+static void mis_bandwidth_state_machine(uint64_t now)
+{
+	static int bw_okay_cnt = 0;
+	static bool bw_punish_triggered = false;
+	static uint64_t last_tsc = 0, last_bw_measure_ts = 0, last_bw_punish_ts;
+	static uint32_t last_cas = 0;
+	uint64_t tsc;
+	uint32_t cur_cas;
+	float bw_estimate;
+	unsigned int core, tmp;
+
+	/* punish a process that is using too much bandwidth */
+	if (bw_punish_triggered &&
+	    now - last_bw_punish_ts >= MIS_BW_PUNISH_INTERVAL) {
+		struct mis_data *sd;
+
+		bw_punish_triggered = false;
+		sd = mis_choose_bandwidth_victim();
+		if (!sd)
+			goto done;
+		sd->threads_limit = MIN(sd->threads_limit - 1,
+					sd->threads_active - 1);
+		mis_unmark_congested(sd);
+		mis_mark_bwlimited(sd);
+
+		/* first prefer lone hyperthreads */
+		sched_for_each_allowed_core(core, tmp) {
+			if (cores[core] == sd &&
+			    cores[sched_siblings[core]] != sd) {
+				if (mis_add_kthread_on_core(core))
+					mis_idle_on_core(core);
+				goto done;
+			}
+		}
+
+		/* then try any core */
+		sched_for_each_allowed_core(core, tmp) {
+			if (cores[core] == sd) {
+				if (mis_add_kthread_on_core(core))
+					mis_idle_on_core(core);
+				goto done;
+			}
+		}
+	}
+
+done:
+	/* check if it's time to sample bandwidth */
+	if (now - last_bw_measure_ts < MIS_BW_MEASURE_INTERVAL)
+		return;
+
+	/* update the bandwidth estimate */
+	barrier();
+	tsc = rdtsc();
+	barrier();
+	cur_cas = get_cas_count_all();
+	bw_estimate = (float)(cur_cas - last_cas) / (float)(tsc - last_tsc);
+	last_bw_measure_ts = now;
+	last_cas = cur_cas;
+	last_tsc = tsc;
+
+	/* check if the bandwidth limit has been exceeded */
+	if (bw_estimate > MIS_BW_HIGH_WATERMARK && !bw_punish_triggered) {
+		mis_sample_pmc(PMC_LLC_MISSES);
+		bw_punish_triggered = true;
+		last_bw_punish_ts = microtime();
+		bw_okay_cnt = 0;
+	} else if (bw_estimate < MIS_BW_LOW_WATERMARK) {
+		bw_okay_cnt++;
+	}
+
+	/* check if bandwidth has been below threshold long enough to relax */
+	if (bw_okay_cnt >= MIS_UNDER_LOW_WATERMARK_CNT_THRESHOLD) {
+		struct mis_data *sd;
+
+		sd = list_pop(&bwlimited_procs, struct mis_data,
+			      bwlimited_link);
+		if (!sd)
+			return;
+
+		if (sd->threads_limit <= sd->threads_active) {
+			bw_okay_cnt = 0;
+			sd->threads_limit++;
+		}
+
+		if (sd->threads_limit >= sd->threads_max)
+			sd->is_bwlimited = false;
+		else
+			list_add_tail(&bwlimited_procs, &sd->bwlimited_link);
+	}
+}
+
+static void mis_print_debug_info(void)
+{
+	struct mis_data *sd;
+
+	list_for_each(&all_procs, sd, all_link) {
+		log_info("pid %d: %s%s active %d, limit %d, max %d, load %f",
+			 sd->p->pid,
+			 sd->is_congested ? "C" : "_",
+			 sd->is_bwlimited ? "B" : "_",
+			 sd->threads_active, sd->threads_limit, sd->threads_max,
+			 sd->load);
+	}
+}
+
+static void mis_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
+{
 	unsigned int core;
+	int ret;
+
+	static uint64_t last_debug_ts = 0;
+
+	if (now - last_debug_ts > 2000000) {
+		last_debug_ts = now;
+		mis_print_debug_info();
+	}
 
 	mis_bandwidth_state_machine(now);
 	if (idle_cnt == 0)
@@ -461,16 +580,9 @@ static void mis_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
 		if (cores[core] != NULL)
 			mis_unmark_congested(cores[core]);
 		mis_cleanup_core(core);
-		sd = mis_choose_kthread(core);
-		if (!sd) {
+		ret = mis_add_kthread_on_core(core);
+		if (ret)
 			bitmap_set(mis_idle_cores, core);
-			continue;
-		}
-		mis_unmark_congested(sd);
-		if (unlikely(mis_run_kthread_on_core(sd->p, core))) {
-			bitmap_set(mis_idle_cores, core);
-			mis_mark_congested(sd);
-		}
 	}
 }
 

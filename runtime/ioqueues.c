@@ -29,7 +29,7 @@
 #define COMMAND_QUEUE_MCOUNT	4096
 /* the egress buffer pool must be large enough to fill all the TXQs entirely */
 #define EGRESS_POOL_SIZE(nks) \
-	(PACKET_QUEUE_MCOUNT * MBUF_DEFAULT_LEN * MAX(16, (nks)) * 16UL)
+	(PACKET_QUEUE_MCOUNT * MBUF_DEFAULT_LEN * MAX(16, (nks)) * 8UL)
 
 struct iokernel_control iok;
 
@@ -94,8 +94,12 @@ static size_t estimate_shm_space(void)
 	ret += EGRESS_POOL_SIZE(maxks);
 	ret = align_up(ret, PGSIZE_2MB);
 
+	// mlx5 directpath
+	ret += PGSIZE_2MB;
+
 	// SPDK Memory - TODO: size this correctly
-	ret += 12 * PGSIZE_2MB;
+	ret += 5 * PGSIZE_2MB;
+	ret += 2 * maxks * PGSIZE_2MB;
 
 	return ret;
 }
@@ -256,7 +260,6 @@ int ioqueues_register_iokernel(void)
 	BUG_ON((uintptr_t)iok.hdr != (uintptr_t)r->base);
 	hdr->magic = CONTROL_HDR_MAGIC;
 	hdr->version_no = CONTROL_HDR_VERSION;
-	hdr->spdk_shm_id = iok.spdk_shm_id;
 	hdr->egress_buf_count = div_up(iok.tx_len, MBUF_DEFAULT_LEN);
 	hdr->thread_count = maxks;
 	hdr->mac = netcfg.mac;
@@ -268,6 +271,7 @@ int ioqueues_register_iokernel(void)
 	hdr->sched_cfg.guaranteed_cores = guaranteedks;
 	hdr->sched_cfg.congestion_latency_us = 0;
 	hdr->sched_cfg.scaleout_latency_us = 0;
+	hdr->sched_cfg.preferred_socket = preferred_socket;
 
 	hdr->thread_specs = ptr_to_shmptr(r, iok.threads, sizeof(*iok.threads) * maxks);
 

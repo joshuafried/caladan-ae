@@ -149,7 +149,7 @@ int __sched_run(struct core_state *s, struct thread *th, unsigned int core)
 	}
 
 	/* check if we need to interrupt the current core */
-	if (!s->idle)
+	if (!s->idle && s->cur_th != NULL)
 		ksched_enqueue_intr(core, KSCHED_INTR_CEDE);
 
 	/* finally request that the new kthread run on this core */
@@ -222,27 +222,38 @@ int sched_idle_on_core(uint32_t mwait_hint, unsigned int core)
 	return __sched_run(s, NULL, core);
 }
 
+static uint32_t hwq_find_head(struct hwq *h, uint32_t cur_tail, uint32_t last_head)
+{
+	uint32_t i = 0;
+	uint32_t start_idx = wraps_lt(cur_tail, last_head) ? last_head : cur_tail;
+	uint32_t nr_desc = h->nr_descriptors - (start_idx - cur_tail);
+
+	while (i < nr_desc) {
+		if (!hwq_busy(h, start_idx + i))
+			break;
+		i++;
+	}
+
+	return i + start_idx;
+}
+
 static bool hardware_queue_congested(struct thread *th, struct hwq *h)
 {
-	bool last_pending, cur_pending;
-	uint32_t cur_tail, last_tail;
+	uint32_t cur_tail, cur_head, last_head;
 
 	if (!h->enabled)
 		return false;
 
-	last_tail = h->last_tail;
-	last_pending = h->last_pending;
+	last_head = h->last_head;
 
 	cur_tail = ACCESS_ONCE(*h->consumer_idx);
-	cur_pending = hwq_busy(h, cur_tail);
+	cur_head = hwq_find_head(h, cur_tail, last_head);
 
 	h->last_tail = cur_tail;
-	h->last_pending = cur_pending;
-	if (cur_pending)
-		if (!th->active || (last_tail == cur_tail && last_pending))
-			return true;
+	h->last_head = cur_head;
 
-	return false;
+	return th->active ? wraps_lt(cur_tail, last_head) :
+				 cur_head != cur_tail;
 }
 
 static void sched_detect_congestion(struct proc *p)
@@ -251,6 +262,7 @@ static void sched_detect_congestion(struct proc *p)
 	DEFINE_BITMAP(ios, NCPU);
 	struct thread *th;
 	uint32_t cur_tail, cur_head, last_head;
+	uint64_t now, timer_tsc;
 	int i;
 
 	bitmap_init(threads, NCPU, false);
@@ -283,6 +295,22 @@ static void sched_detect_congestion(struct proc *p)
 
 		if (hardware_queue_congested(th, &th->directpath_hwq))
 			bitmap_set(ios, i);
+
+		if (hardware_queue_congested(th, &th->storage_hwq))
+			bitmap_set(ios, i);
+	}
+
+	/* detect expired timers */
+	now = rdtsc();
+	for (i = 0; i < p->thread_count; i++) {
+		th = &p->threads[i];
+		timer_tsc = ACCESS_ONCE(*th->timer_heap.next_tsc);
+
+		if (!timer_tsc || timer_tsc > now)
+			continue;
+
+		if (!th->active || timer_tsc + IOKERNEL_POLL_INTERVAL * cycles_per_us < now)
+			bitmap_set(ios, i);
 	}
 
 	/* notify the scheduler policy of the current congestion */
@@ -291,17 +319,26 @@ static void sched_detect_congestion(struct proc *p)
 
 static int sched_try_fast_rewake(struct thread *th)
 {
-	struct hwq *h = &th->directpath_hwq;
+	int i;
+	struct hwq *h;
 
 	/*
 	 * If the kthread has yielded voluntarily but still has pending I/O
 	 * requests in flight, we can just wake it back up directly without
 	 * wasting any extra time in the scheduler.
 	 */
-	if (ACCESS_ONCE(th->rxq.send_head) == lrpc_poll_send_tail(&th->rxq) &&
-	    (!h->enabled || !hwq_busy(h, ACCESS_ONCE(*h->consumer_idx))))
-		return -EINVAL;
+	if (ACCESS_ONCE(th->rxq.send_head) != lrpc_poll_send_tail(&th->rxq))
+		goto rewake;
 
+	for (i = 0; i < ARRAY_SIZE(th->hwqs); i++) {
+		h = &th->hwqs[i];
+		if (h->enabled && hwq_busy(h, ACCESS_ONCE(*h->consumer_idx)))
+			goto rewake;
+	}
+
+	return -EINVAL;
+
+rewake:
 	ksched_run(th->core, th->tid);
 	state[th->core].wait = true;
 	return 0;
@@ -365,7 +402,7 @@ void sched_poll(void)
 	 */
 
 	now = microtime();
-	if (now - last_time > IOKERNEL_POLL_INTERVAL) {
+	if (now - last_time >= IOKERNEL_POLL_INTERVAL) {
 		int i;
 
 		last_time = now;
@@ -432,6 +469,8 @@ static int sched_scan_node(int node)
 		if (info->package != node)
 			continue;
 
+		bitmap_set(socket_state[node].cores, i);
+
 		/* TODO: can only support hyperthread pairs */
 		if (bitmap_popcount(info->thread_siblings_mask, NCPU) != 2)
 			ret = -EINVAL;
@@ -482,8 +521,7 @@ int sched_init(void)
 	 */
 
 	for (i = 0; i < cpu_count; i++) {
-		/* TODO: can only support one package */
-		if (cpu_info_tbl[i].package != 0)
+		if (cpu_info_tbl[i].package != 0 && sched_ops != &numa_ops)
 			continue;
 
 		if (allowed_cores_supplied &&

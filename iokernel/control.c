@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/eventfd.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -32,6 +33,7 @@ static struct proc *clients[IOKERNEL_MAX_PROC];
 static int nr_clients;
 struct lrpc_params lrpc_control_to_data_params;
 struct lrpc_params lrpc_data_to_control_params;
+int data_to_control_efd;
 static struct lrpc_chan_out lrpc_control_to_data;
 static struct lrpc_chan_in lrpc_data_to_control;
 static int nr_guaranteed;
@@ -61,9 +63,9 @@ static int control_init_hwq(struct shm_region *r,
 		return 0;
 	}
 
-	h->descriptor_table = shmptr_to_ptr(r, hs->descriptor_table, hs->descriptor_size * hs->nr_descriptors);
+	h->descriptor_table = shmptr_to_ptr(r, hs->descriptor_table, (1 << hs->descriptor_log_size) * hs->nr_descriptors);
 	h->consumer_idx = shmptr_to_ptr(r, hs->consumer_idx, sizeof(*h->consumer_idx));
-	h->descriptor_size = hs->descriptor_size;
+	h->descriptor_log_size = hs->descriptor_log_size;
 	h->nr_descriptors = hs->nr_descriptors;
 	h->parity_byte_offset = hs->parity_byte_offset;
 	h->parity_bit_mask = hs->parity_bit_mask;
@@ -76,8 +78,11 @@ static int control_init_hwq(struct shm_region *r,
 	if (!is_power_of_two(h->nr_descriptors))
 		return -EINVAL;
 
-	if (h->parity_byte_offset > h->descriptor_size)
+	if (h->parity_byte_offset > (1 << h->descriptor_log_size))
 		return -EINVAL;
+
+	h->last_head = 0;
+	h->last_tail = 0;
 
 	return 0;
 }
@@ -168,24 +173,9 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 		if (ret)
 			goto fail;
 
-#if __has_include("spdk/nvme.h")
-		/* set SPDK pointers */
-		p->nvmeq[i].cpl_ref = (struct spdk_nvme_cpl *)shmptr_to_ptr(&reg,
-				(shmptr_t)s->nvme_qpair_cpl,
-				sizeof(p->nvmeq[i].cpl_ref));
-		if (!p->nvmeq[i].cpl_ref)
+		th->timer_heap.next_tsc = shmptr_to_ptr(&reg, s->timer_heap.next_tsc, sizeof(uint64_t));
+		if (!th->timer_heap.next_tsc)
 			goto fail;
-		p->nvmeq[i].nvme_io_cq_head = (uint16_t *)shmptr_to_ptr(&reg,
-				(shmptr_t)s->nvme_qpair_cq_head,
-				sizeof(p->nvmeq[i].nvme_io_cq_head));
-		if (!p->nvmeq[i].nvme_io_cq_head)
-			goto fail;
-		p->nvmeq[i].nvme_io_phase = (uint8_t *)shmptr_to_ptr(&reg,
-				(shmptr_t)s->nvme_qpair_phase,
-				sizeof(p->nvmeq[i].nvme_io_phase));
-		if (!p->nvmeq[i].nvme_io_phase)
-			goto fail;
-#endif
 
 		th->tid = s->tid;
 		th->park_efd = fds[i];
@@ -200,6 +190,10 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 			goto fail;
 
 		ret = control_init_hwq(&reg, &s->direct_rxq, &th->directpath_hwq);
+		if (ret)
+			goto fail;
+
+		ret = control_init_hwq(&reg, &s->storage_hwq, &th->storage_hwq);
 		if (ret)
 			goto fail;
 
@@ -426,14 +420,15 @@ static void control_loop(void)
 {
 	fd_set readset;
 	int maxfd, i, nrdy;
-	uint64_t cmd;
+	uint64_t cmd, efdval;
 	unsigned long payload;
 	struct proc *p;
 
 	while (1) {
-		maxfd = controlfd;
+		maxfd = MAX(controlfd, data_to_control_efd);
 		FD_ZERO(&readset);
 		FD_SET(controlfd, &readset);
+		FD_SET(data_to_control_efd, &readset);
 
 		for (i = 0; i < nr_clients; i++) {
 			if (clients[i]->removed)
@@ -454,7 +449,9 @@ static void control_loop(void)
 			if (!FD_ISSET(i, &readset))
 				continue;
 
-			if (i == controlfd) {
+			if (i == data_to_control_efd) {
+				/* do nothing */
+			} else if (i == controlfd) {
 				/* accept a new connection */
 				control_add_client();
 			} else {
@@ -465,13 +462,14 @@ static void control_loop(void)
 			nrdy--;
 		}
 
-		while (lrpc_recv(&lrpc_data_to_control, &cmd, &payload)) {
-			p = (struct proc *) payload;
-			assert(cmd == CONTROL_PLANE_REMOVE_CLIENT);
-
-			/* it is now safe to remove data structures for this client */
-			control_remove_client(p);
-		}
+		do {
+			while (lrpc_recv(&lrpc_data_to_control, &cmd, &payload)) {
+				p = (struct proc *) payload;
+				assert(cmd == CONTROL_PLANE_REMOVE_CLIENT);
+				/* it is now safe to remove data structures for this client */
+				control_remove_client(p);
+			}
+		} while (read(data_to_control_efd, &efdval, sizeof(efdval)) == sizeof(efdval));
 	}
 }
 
@@ -559,6 +557,10 @@ static int control_init_dataplane_comm(void)
 		log_err("control: initializing LRPC from dataplane failed");
 		goto fail_free_wb_in;
 	}
+
+	data_to_control_efd = eventfd(0, EFD_NONBLOCK);
+	if (data_to_control_efd < 0)
+		return -errno;
 
 	return 0;
 

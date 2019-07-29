@@ -23,9 +23,21 @@ chmod uga+rwx /dev/pcicfg
 
 # reserve huge pages
 echo 8192 > /sys/devices/system/node/node0/hugepages/hugepages-2048kB/nr_hugepages
-for n in /sys/devices/system/node/node[1-9]; do
+echo 8192 > /sys/devices/system/node/node1/hugepages/hugepages-2048kB/nr_hugepages
+for n in /sys/devices/system/node/node[2-9]; do
 	echo 0 > $n/hugepages/hugepages-2048kB/nr_hugepages
 done
+
+# reserve LLC to iokernel
+cat=`lscpu | grep cat`
+if [[ ! -z "$cat" ]]; then
+       modprobe msr
+       pqos -R l3cdp-any
+       pqos -e "llc:1=0x00003;llc:0=0xffffc;"
+       pqos -a "llc:1=0"
+else
+       echo "Machine does not support CAT, skip..."
+fi
 
 # turn on cstate
 sudo killall cstate
@@ -39,3 +51,4 @@ echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 
 # Disable turbo boost
 echo 1 | tee /sys/devices/system/cpu/intel_pstate/no_turbo
+

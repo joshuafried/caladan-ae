@@ -55,7 +55,7 @@ static void simple_cleanup_core(unsigned int core)
 	if (cores[core])
 		cores[core]->threads_active--;
 	cores[core] = NULL;
-	for (i = 1; i < NHIST; i++)
+	for (i = NHIST-1; i > 0; i--)
 		hist[core][i] = hist[core][i - 1];
 	hist[core][0] = sd;
 }
@@ -146,15 +146,16 @@ static unsigned int simple_choose_core(struct proc *p)
 	struct thread *th;
 	unsigned int core, tmp;
 
-        /* first try to find a matching active hyperthread */
-        sched_for_each_allowed_core(core, tmp) {
+	/* first try to find a matching active hyperthread */
+	sched_for_each_allowed_core(core, tmp) {
 		unsigned int sib = sched_siblings[core];
 		if (cores[core] != sd)
 			continue;
 		if (cores[sib] == sd || (cores[sib] != NULL &&
 		    !simple_proc_is_preemptible(cores[sib], sd)))
 			continue;
-		return sib;
+		if (bitmap_test(sched_allowed_cores, sib))
+			return sib;
 	}
 
 	/* then try to find a previously used core (to improve locality) */
@@ -230,7 +231,7 @@ static void simple_update_congestion_info(struct simple_data *sd)
 
 	/* update the CPU load */
 	/* TODO: handle using more than guaranteed cores */
-	instant_load = (float)sd->threads_active / (float)sd->threads_max;
+        instant_load = (float)sd->threads_active / (float)sd->threads_max;
 	sd->load = sd->load * (1 - EWMA_WEIGHT) + instant_load * EWMA_WEIGHT;
 	ACCESS_ONCE(info->load) = sd->load;
 }
@@ -249,7 +250,7 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 	}
 
 	/* do nothing if already marked as congested */
-	if (sd->is_congested)
+	if (sd->is_congested || sd->threads_active >= sd->threads_max)
 		goto done;
 
 	/* try to add an additional core right away */
@@ -271,18 +272,18 @@ static struct simple_data *simple_choose_kthread(unsigned int core)
 
 	/* first try to run the same process as the sibling */
 	sd = cores[sched_siblings[core]];
-	if (sd && sd->is_congested)
+	if (sd && sd->is_congested && sd->threads_active < sd->threads_max)
 		return sd;
 
 	/* then try to find a congested process that ran on this core last */
 	for (i = 0; i < NHIST; i++) {
 		sd = hist[core][i];
-		if (sd && sd->is_congested)
+		if (sd && sd->is_congested && sd->threads_active < sd->threads_max)
 			return sd;
 
 		/* the hyperthread sibling has equally good locality */
 		sd = hist[sched_siblings[core]][i];
-		if (sd && sd->is_congested)
+		if (sd && sd->is_congested && sd->threads_active < sd->threads_max)
 			return sd;
 	}
 
@@ -307,7 +308,7 @@ static void simple_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
 			bitmap_set(simple_idle_cores, core);
 			continue;
 		}
-		simple_unmark_congested(sd);
+
 		if (unlikely(simple_run_kthread_on_core(sd->p, core))) {
 			bitmap_set(simple_idle_cores, core);
 			simple_mark_congested(sd);
