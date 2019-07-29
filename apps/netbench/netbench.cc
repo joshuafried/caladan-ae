@@ -191,19 +191,22 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
 std::vector<work_unit> ClientWorker(
     rt::TcpConn *c, rt::WaitGroup *starter,
     std::function<std::vector<work_unit>()> wf,
-    int worker_id) {
+    int worker_id,
+    std::vector<std::pair<uint64_t, uint64_t>> &queues) {
   constexpr int kBatchSize = 32;
   std::vector<work_unit> w(wf());
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
 
   // current window size
-  double cwnd = 8.0;
+  double cwnd = 4.0;
   // number of outstanding requests
   uint32_t num_outst_req = 0;
 
   rt::Mutex m_;
   rt::CondVar cv_;
+
+  time_point<steady_clock> expstart;
 
   // Start the receiver thread.
   auto th = rt::Thread([&] {
@@ -227,16 +230,22 @@ std::vector<work_unit> ClientWorker(
       uint64_t standing_queue_us = ntoh64(rp.standing_queue_us);
       double new_cwnd = cwnd;
 
-      if (num_outst_req <= cwnd) { // will this open a new window?
-        if (standing_queue_us >= 15) {
-    	    // congestion detected.
-          double window_cut = 1.25 - standing_queue_us/60.0; 
-          window_cut = std::min<double>(window_cut, 1.0);
-          window_cut = std::max<double>(window_cut, 0.5);
-          new_cwnd = cwnd * window_cut;
-        } else {
-          new_cwnd = cwnd + 1.0/cwnd;
-        }
+      if (worker_id == 0) {
+        queues.emplace_back(duration_cast<sec>(ts - expstart).count(),
+                            standing_queue_us);
+      }
+
+      double alpha = 0.01;
+      double beta = 0.6;
+      if (standing_queue_us >= 20) {
+    	  // congestion detected
+        double window_cut = (double)(alpha*standing_queue_us);
+        window_cut = std::min<double>(window_cut, 0.5);
+        window_cut = std::max<double>(window_cut, 0.2);
+        new_cwnd = cwnd - window_cut;
+      } else {
+        // when congestion is not detected.
+        new_cwnd = cwnd + beta/cwnd;
       }
 
       if (new_cwnd < 1.0001) new_cwnd = 1.0001;
@@ -254,7 +263,7 @@ std::vector<work_unit> ClientWorker(
   starter->Wait();
 
   barrier();
-  auto expstart = steady_clock::now();
+  expstart = steady_clock::now();
   barrier();
 
   payload p[kBatchSize];
@@ -330,9 +339,10 @@ std::vector<work_unit> RunExperiment(
   rt::WaitGroup starter(threads + 1);
   std::vector<rt::Thread> th;
   std::unique_ptr<std::vector<work_unit>> samples[threads];
+  std::vector<std::pair<uint64_t, uint64_t>> queues;
   for (int i = 0; i < threads; ++i) {
     th.emplace_back(rt::Thread([&, i] {
-      auto v = ClientWorker(conns[i].get(), &starter, wf, i);
+      auto v = ClientWorker(conns[i].get(), &starter, wf, i, queues);
       samples[i].reset(new std::vector<work_unit>(std::move(v)));
     }));
   }
@@ -365,7 +375,6 @@ std::vector<work_unit> RunExperiment(
     auto &v = *samples[i];
     w.insert(w.end(), v.begin(), v.end());
   }
-
 /*
 // Per-flow group throughput
   std::vector<work_unit> vs[threads];
@@ -420,7 +429,6 @@ std::vector<work_unit> RunExperiment(
     std::cout << std::endl;
   }
 */
-
 /*
 // Print aggregated throughput
   w.erase(std::remove_if(w.begin(), w.end(),
@@ -441,9 +449,19 @@ std::vector<work_unit> RunExperiment(
       num_req_out = 1;
       next_target += granularity;
     }
-    if (next_target > 10000) break;
+    if (next_target > 5000) break;
   }
 */
+
+/*
+  // Print queue info for flow 0
+  std::cout << std::endl;
+  for (auto &q : queues) {
+    if (q.first > 5000) break;
+    std::cout << q.first / 1000.0 << "," << q.second << std::endl;
+  }
+*/
+
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),
