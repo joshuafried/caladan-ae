@@ -16,7 +16,7 @@
 #include "../ksched/ksched.h"
 
 // TODO: should not be hard-coded.
-#define SOCKET0_IMC_BUS_NO (0x7F)
+#define SOCKET0_IMC_BUS_NO (0xFF)
 #define SOCKET0_IMC_DEVICE_NO (0x14)
 #define SOCKET0_CHANNEL0_IMC_FUNC_NO (0)
 #define SOCKET0_CHANNEL1_IMC_FUNC_NO (1)
