@@ -47,10 +47,11 @@ static std::vector<std::pair<double, uint64_t>> rates;
 
 constexpr uint64_t kTBMaxToken = 8; // reqs
 constexpr uint64_t kTBMinTimeToSleep = 1; // us
+constexpr uint64_t kTBMaxTimeToSleep = 100; // us
 class TokenBucket {
 public:
-  TokenBucket(uint64_t init_refresh_interval)
-    : refresh_interval_(init_refresh_interval), token_(0),
+  TokenBucket(uint64_t rate)
+    : refresh_interval_(1000000000 / rate), token_(0),
       clock_(steady_clock::now()) { }
 
   void Update() {
@@ -76,16 +77,16 @@ public:
     return false;
   }
 
-  void SetRefreshInterval(uint64_t refresh_int_ns) {
-    refresh_interval_ = refresh_int_ns;
+  void SetRate(uint64_t rate) {
+    refresh_interval_ = 1000000000 / rate;
   }
 
   uint64_t GetRefreshInterval() {
     return refresh_interval_;
   }
 
-  // return throughput (req / s)
-  uint64_t GetThroughput() {
+  // return request rate (req / s)
+  uint64_t GetRate() {
     return (1000000000 / refresh_interval_);
   }
 
@@ -98,7 +99,7 @@ public:
 
     if (elapsed_time_ns < refresh_interval_) {
       uint64_t time_to_sleep_us = (refresh_interval_ - elapsed_time_ns) / 1000 + 1;
-//      std::cout << "sleeping " << time_to_sleep_us << " us" << std::endl;
+      time_to_sleep_us = std::min<uint64_t>(time_to_sleep_us, kTBMaxTimeToSleep);
       rt::Sleep(time_to_sleep_us);
     } 
   }
@@ -276,6 +277,16 @@ std::vector<work_unit> ClientWorker(
   rt::Mutex m_;
   rt::CondVar cv_;
   */
+  // rate-based CC
+  // current rate
+  uint64_t cur_rate = 10000; // 10k reqs/s
+  // Token Bucket to control the transmission rate
+  TokenBucket tb(cur_rate);
+  // The time when the rate is updated
+  time_point<steady_clock> last_update;
+  // increment speed : req / us
+  uint64_t alpha = 20; // 200 reqs / 1us
+  uint64_t beta = 800; // 100us / 0.5 decrease
 
   uint32_t num_outst_req = 0;
   rt::Mutex m_;
@@ -332,6 +343,31 @@ std::vector<work_unit> ClientWorker(
       m_.Unlock();
       */
 
+      // rate-based CC
+      uint64_t new_rate = cur_rate;
+      uint64_t elapsed_time_us = duration_cast<microseconds>(ts - last_update).count();
+
+      if (standing_queue_us >= 20) {
+        // with congestion
+        double multiplicative_decrease = 1.0 - static_cast<double>(elapsed_time_us) / static_cast<double>(2 * beta);
+        multiplicative_decrease = std::max<double>(multiplicative_decrease, 0.5);
+        new_rate = static_cast<uint64_t>(multiplicative_decrease * cur_rate);
+      } else {
+        // without congestion
+        // maximum rate increase : 100k per response (so that it is not that aggressive)
+        uint64_t additive_increase = std::min<uint64_t>(alpha * elapsed_time_us, 100000);
+        new_rate = cur_rate + additive_increase;
+      }
+
+      // one flow cannot exceeds 40k req/s
+      new_rate = std::min<uint64_t>(new_rate, 50000);
+
+      // one flow should be at least 1 req / 1ms
+      new_rate = std::max<uint64_t>(new_rate, 100);
+
+      cur_rate = new_rate;
+      tb.SetRate(cur_rate);
+      last_update = ts;
       m_.Lock();
       num_outst_req--;
       m_.Unlock();
@@ -345,12 +381,11 @@ std::vector<work_unit> ClientWorker(
   barrier();
   expstart = steady_clock::now();
   barrier();
+  last_update = expstart;
 
   payload p[kBatchSize];
   int j = 0;
   auto wsize = w.size();
-
-  TokenBucket tb(10000);
 
   for (unsigned int i = 0; i < wsize; ++i) {
     barrier();
@@ -545,13 +580,16 @@ std::vector<work_unit> RunExperiment(
       num_req_out++;
     } else {
       std::cout << next_target/1000.0 << "," << num_req_out/double(granularity) << std::endl;
-      num_req_out = 1;
       next_target += granularity;
+      while (u.timing > next_target) {
+        std::cout << next_target/1000.0 << ",0" << std::endl;
+        next_target += granularity;
+      }
+      num_req_out = 1;
     }
     if (next_target > 5000) break;
   }
 */
-
 /*
   // Print queue info for flow 0
   std::cout << std::endl;
@@ -560,7 +598,6 @@ std::vector<work_unit> RunExperiment(
     std::cout << q.first / 1000.0 << "," << q.second << std::endl;
   }
 */
-
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),
