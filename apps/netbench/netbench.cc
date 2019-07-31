@@ -41,7 +41,76 @@ constexpr uint64_t kIterationsPerUS = 88;
 // Number of seconds to warmup at rate 0
 constexpr uint64_t kWarmupUpSeconds = 5;
 
+constexpr uint64_t kExperimentTime = 5000000;
+
 static std::vector<std::pair<double, uint64_t>> rates;
+
+constexpr uint64_t kTBMaxToken = 8; // reqs
+constexpr uint64_t kTBMinTimeToSleep = 1; // us
+class TokenBucket {
+public:
+  TokenBucket(uint64_t init_refresh_interval)
+    : refresh_interval_(init_refresh_interval), token_(0),
+      clock_(steady_clock::now()) { }
+
+  void Update() {
+    barrier();
+    auto now = steady_clock::now();
+    barrier();
+
+    uint64_t elapsed_time_ns = duration_cast<nanoseconds>(now - clock_).count();
+
+    if (elapsed_time_ns >= refresh_interval_) {
+      int new_token = elapsed_time_ns / refresh_interval_;
+      token_ += new_token;
+      token_ = std::min<uint64_t>(token_, kTBMaxToken);
+      clock_ += nanoseconds(new_token * refresh_interval_);
+    }
+  }
+
+  bool RetrieveToken() {
+    if (token_ > 0) {
+      token_--;
+      return true;
+    }
+    return false;
+  }
+
+  void SetRefreshInterval(uint64_t refresh_int_ns) {
+    refresh_interval_ = refresh_int_ns;
+  }
+
+  uint64_t GetRefreshInterval() {
+    return refresh_interval_;
+  }
+
+  // return throughput (req / s)
+  uint64_t GetThroughput() {
+    return (1000000000 / refresh_interval_);
+  }
+
+  void SleepUntilNextToken() {
+    barrier();
+    auto now = steady_clock::now();
+    barrier();
+
+    uint64_t elapsed_time_ns = duration_cast<nanoseconds>(now - clock_).count();
+
+    if (elapsed_time_ns < refresh_interval_) {
+      uint64_t time_to_sleep_us = (refresh_interval_ - elapsed_time_ns) / 1000 + 1;
+//      std::cout << "sleeping " << time_to_sleep_us << " us" << std::endl;
+      rt::Sleep(time_to_sleep_us);
+    } 
+  }
+
+private:
+  // token refill time (ns/req)
+  uint64_t refresh_interval_;
+  // the number of remaining token (reqs)
+  uint64_t token_; 
+  // internal timer
+  time_point<steady_clock> clock_;
+};
 
 constexpr uint64_t kUptimePort = 8002;
 constexpr uint64_t kUptimeMagic = 0xDEADBEEF;
@@ -198,13 +267,18 @@ std::vector<work_unit> ClientWorker(
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
 
+  /* window-based CC
   // current window size
   double cwnd = 4.0;
   // number of outstanding requests
   uint32_t num_outst_req = 0;
-
+  
   rt::Mutex m_;
   rt::CondVar cv_;
+  */
+
+  uint32_t num_outst_req = 0;
+  rt::Mutex m_;
 
   time_point<steady_clock> expstart;
 
@@ -228,24 +302,25 @@ std::vector<work_unit> ClientWorker(
       w[idx].cpu = ntoh32(rp.cpu);
 
       uint64_t standing_queue_us = ntoh64(rp.standing_queue_us);
-      double new_cwnd = cwnd;
 
       if (worker_id == 0) {
         queues.emplace_back(duration_cast<sec>(ts - expstart).count(),
                             standing_queue_us);
       }
 
-      double alpha = 0.01;
-      double beta = 0.6;
-      if (standing_queue_us >= 20) {
+      /* window-based CC
+      double new_cwnd = cwnd;
+      double alpha = 0.1;
+
+      if (standing_queue_us >= 20 && num_outst_req < cwnd) {
     	  // congestion detected
-        double window_cut = (double)(alpha*standing_queue_us);
-        window_cut = std::min<double>(window_cut, 0.5);
-        window_cut = std::max<double>(window_cut, 0.2);
-        new_cwnd = cwnd - window_cut;
-      } else {
+        double window_cut = 1.25 - standing_queue_us/80.0;
+        window_cut = std::min<double>(window_cut, 1.0);
+        window_cut = std::max<double>(window_cut, 0.5);
+        new_cwnd = cwnd * window_cut;
+      } else if (standing_queue_us < 20) {
         // when congestion is not detected.
-        new_cwnd = cwnd + beta/cwnd;
+        new_cwnd = cwnd + alpha/cwnd;
       }
 
       if (new_cwnd < 1.0001) new_cwnd = 1.0001;
@@ -254,6 +329,11 @@ std::vector<work_unit> ClientWorker(
       num_outst_req--;
       cwnd = new_cwnd;
       cv_.Signal();
+      m_.Unlock();
+      */
+
+      m_.Lock();
+      num_outst_req--;
       m_.Unlock();
     }
   });
@@ -270,10 +350,15 @@ std::vector<work_unit> ClientWorker(
   int j = 0;
   auto wsize = w.size();
 
+  TokenBucket tb(10000);
+
   for (unsigned int i = 0; i < wsize; ++i) {
     barrier();
     auto now = steady_clock::now();
     barrier();
+
+    if (duration_cast<sec>(now - expstart).count() > kExperimentTime) break;
+
     if (duration_cast<sec>(now - expstart).count() < w[i].start_us) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
@@ -282,10 +367,8 @@ std::vector<work_unit> ClientWorker(
       now = steady_clock::now();
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
-    if (duration_cast<sec>(now - expstart).count() - w[i].start_us >
-        kMaxCatchUpUS)
-      continue;
 
+    /* window-based CC
     m_.Lock();
     if ((double)(num_outst_req + 1) > cwnd && j > 0) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
@@ -295,6 +378,20 @@ std::vector<work_unit> ClientWorker(
     }
 
     while ((double)(num_outst_req + 1) > cwnd) cv_.Wait(&m_);
+    num_outst_req++;
+    m_.Unlock();
+   */
+
+    while (!tb.RetrieveToken()) {
+      ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
+      if (ret != static_cast<ssize_t>(sizeof(payload) * j))
+        panic("write failed, ret = %ld", ret);
+      j = 0;
+      tb.SleepUntilNextToken();
+      tb.Update();
+    }
+
+    m_.Lock();
     num_outst_req++;
     m_.Unlock();
 
@@ -314,6 +411,7 @@ std::vector<work_unit> ClientWorker(
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
         panic("write failed, ret = %ld", ret);
       j = 0;
+      now = steady_clock::now();
     }
   }
 
@@ -429,6 +527,7 @@ std::vector<work_unit> RunExperiment(
     std::cout << std::endl;
   }
 */
+
 /*
 // Print aggregated throughput
   w.erase(std::remove_if(w.begin(), w.end(),
@@ -522,7 +621,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
     std::exponential_distribution<double> rd(
         1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
     std::exponential_distribution<double> wd(1.0 / service_time);
-    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, 5000000);
+    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, kExperimentTime);
   });
 
   // Print the results.
@@ -554,7 +653,7 @@ void LoadShiftExperiment(int threads,
 void ClientHandler(void *arg) {
   // LoadShiftExperiment(threads, rates, st);
 #if 1
-  for (double i = 100000; i <= 4000000; i += 100000) {
+  for (double i = 3000000; i <= 3000000; i += 100000) {
     SteadyStateExperiment(threads, i, st);
   }
 #endif
