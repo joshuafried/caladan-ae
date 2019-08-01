@@ -45,7 +45,7 @@ constexpr uint64_t kExperimentTime = 5000000;
 
 static std::vector<std::pair<double, uint64_t>> rates;
 
-constexpr uint64_t kTBMaxToken = 8; // reqs
+constexpr uint64_t kTBMaxToken = 32; // reqs
 constexpr uint64_t kTBMinTimeToSleep = 1; // us
 constexpr uint64_t kTBMaxTimeToSleep = 100; // us
 class TokenBucket {
@@ -284,9 +284,14 @@ std::vector<work_unit> ClientWorker(
   TokenBucket tb(cur_rate);
   // The time when the rate is updated
   time_point<steady_clock> last_update;
-  // increment speed : req / us
-  uint64_t alpha = 20; // 200 reqs / 1us
-  uint64_t beta = 800; // 100us / 0.5 decrease
+  // previous standing queue to calcualate queue_diff;
+  uint64_t prev_standing_queue_us = 0;
+  // increment step
+  uint64_t delta = 10000;
+  // beta : decrement factor
+  double beta = 0.4;
+  uint32_t num_consecutive_neg_queue_diff = 0;
+  uint64_t ewma_queue_diff = 0;
 
   uint32_t num_outst_req = 0;
   rt::Mutex m_;
@@ -347,23 +352,32 @@ std::vector<work_unit> ClientWorker(
       uint64_t new_rate = cur_rate;
       uint64_t elapsed_time_us = duration_cast<microseconds>(ts - last_update).count();
 
-      if (standing_queue_us >= 20) {
-        // with congestion
-        double multiplicative_decrease = 1.0 - static_cast<double>(elapsed_time_us) / static_cast<double>(2 * beta);
-        multiplicative_decrease = std::max<double>(multiplicative_decrease, 0.5);
-        new_rate = static_cast<uint64_t>(multiplicative_decrease * cur_rate);
+      uint64_t new_queue_diff = standing_queue_us - prev_standing_queue_us;
+      ewma_queue_diff = static_cast<uint64_t>(0.8*ewma_queue_diff + 0.2*new_queue_diff);
+
+      if (ewma_queue_diff < 0) {
+        num_consecutive_neg_queue_diff++;
       } else {
-        // without congestion
-        // maximum rate increase : 100k per response (so that it is not that aggressive)
-        uint64_t additive_increase = std::min<uint64_t>(alpha * elapsed_time_us, 100000);
-        new_rate = cur_rate + additive_increase;
+        num_consecutive_neg_queue_diff = 0;
       }
 
-      // one flow cannot exceeds 40k req/s
-      new_rate = std::min<uint64_t>(new_rate, 50000);
+      if (standing_queue_us < 40) {
+        new_rate = cur_rate + delta;
+      } else if (standing_queue_us > 100) {
+        double mul_dec = (1.0 - beta * (1.0 - 100.0 / standing_queue_us));
+        new_rate = static_cast<uint64_t>(cur_rate * mul_dec);
+      } else if (ewma_queue_diff <= 0) {
+        int N = (num_consecutive_neg_queue_diff >= 5) ? 3 : 1;
+        new_rate = cur_rate + N *delta;
+      } else {
+        double mul_dec = 1.0 - beta * ewma_queue_diff / 100.0;
+        new_rate = static_cast<uint64_t>(cur_rate * mul_dec);
+      }
+
+      new_rate = std::min<uint64_t>(new_rate, 100000);
 
       // one flow should be at least 1 req / 1ms
-      new_rate = std::max<uint64_t>(new_rate, 100);
+      new_rate = std::max<uint64_t>(new_rate, 1000);
 
       cur_rate = new_rate;
       tb.SetRate(cur_rate);
@@ -590,6 +604,7 @@ std::vector<work_unit> RunExperiment(
     if (next_target > 5000) break;
   }
 */
+
 /*
   // Print queue info for flow 0
   std::cout << std::endl;
