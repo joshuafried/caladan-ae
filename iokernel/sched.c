@@ -264,6 +264,7 @@ static void sched_detect_congestion(struct proc *p)
 	uint32_t cur_tail, cur_head, last_head;
 	uint64_t now, timer_tsc;
 	int i;
+  int32_t stqlen = 0;
 
 	bitmap_init(threads, NCPU, false);
 	bitmap_init(ios, NCPU, false);
@@ -278,6 +279,7 @@ static void sched_detect_congestion(struct proc *p)
 		if (th->active ? wraps_lt(cur_tail, last_head) :
 				 cur_head != cur_tail) {
 			bitmap_set(threads, i);
+      stqlen = MAX(stqlen,(int32_t)(last_head - cur_tail) + 1);
 		}
 	}
 
@@ -314,7 +316,7 @@ static void sched_detect_congestion(struct proc *p)
 	}
 
 	/* notify the scheduler policy of the current congestion */
-	sched_ops->notify_congested(p, threads, ios);
+	sched_ops->notify_congested(p, threads, ios, stqlen);
 }
 
 static int sched_try_fast_rewake(struct thread *th)

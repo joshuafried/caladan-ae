@@ -20,11 +20,11 @@ extern int runtime_init(const char *cfgpath, thread_fn_t main_fn, void *arg);
 extern struct congestion_info *runtime_congestion;
 
 /**
- * runtime_standing_queue_us - returns the us a queue has been left standing
+ * runtime_standing_queue_len - returns the queue length which has been left standing
  */
-static inline uint64_t runtime_standing_queue_us(void)
+static inline int32_t runtime_standing_queue_len(void)
 {
-	return ACCESS_ONCE(runtime_congestion->standing_queue_us);
+	return ACCESS_ONCE(runtime_congestion->standing_queue_len);
 }
 
 /**

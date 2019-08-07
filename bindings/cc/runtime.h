@@ -15,8 +15,8 @@ namespace rt {
 int RuntimeInit(std::string cfg_path, std::function<void()> main_func);
 
 // Gets the elapsed microseconds the IOKernel has detected a standing queue.
-inline uint64_t RuntimeStandingQueueUS() {
-  return runtime_standing_queue_us();
+inline int32_t RuntimeStandingQueueLen() {
+  return runtime_standing_queue_len();
 }
 
 // Gets an estimate of the instantanious load as measured by the IOKernel.

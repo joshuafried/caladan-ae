@@ -27,7 +27,7 @@ struct simple_data {
 
 	/* congestion info */
 	float			load;
-	uint64_t		standing_queue_us;
+	int32_t   standing_queue_len;
 };
 
 static bool simple_proc_is_preemptible(struct simple_data *cursd,
@@ -217,18 +217,13 @@ static int simple_notify_core_needed(struct proc *p)
 
 #define EWMA_WEIGHT	0.1f
 
-static void simple_update_congestion_info(struct simple_data *sd)
+static void simple_update_congestion_info(struct simple_data *sd, uint32_t stqlen)
 {
 	struct congestion_info *info = sd->p->congestion_info;
 	float instant_load;
 
-	/* update the standing queue congestion microseconds */
-	if (sd->is_congested)
-		sd->standing_queue_us += IOKERNEL_POLL_INTERVAL;
-	else
-		sd->standing_queue_us = 0;
-	ACCESS_ONCE(info->standing_queue_us) = sd->standing_queue_us;
-
+  sd->standing_queue_len = stqlen;
+  ACCESS_ONCE(info->standing_queue_len) = stqlen;
 	/* update the CPU load */
 	/* TODO: handle using more than guaranteed cores */
         instant_load = (float)sd->threads_active / (float)sd->threads_max;
@@ -237,7 +232,7 @@ static void simple_update_congestion_info(struct simple_data *sd)
 }
 
 static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
-				    bitmap_ptr_t io)
+				    bitmap_ptr_t io, int32_t stqlen)
 {
 	struct simple_data *sd = (struct simple_data *)p->policy_data;
 	int ret;
@@ -268,7 +263,7 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 	simple_mark_congested(sd);
 
 done:
-	simple_update_congestion_info(sd);
+	simple_update_congestion_info(sd, stqlen);
 }
 
 static struct simple_data *simple_choose_kthread(unsigned int core)

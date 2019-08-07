@@ -32,7 +32,7 @@ struct q_ptrs {
 
 struct congestion_info {
 	float			load;
-	uint64_t		standing_queue_us;
+	int32_t	  standing_queue_len;
 };
 
 enum {
