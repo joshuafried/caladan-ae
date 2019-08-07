@@ -40,6 +40,7 @@ std::vector<netaddr> raddrs;
 double st;
 // the number of iterations required for 1us on target server
 constexpr uint64_t kIterationsPerUS = 88;
+constexpr uint64_t kExperimentTime = 5000000;
 
 constexpr uint64_t kLoadBalancerPort = 8001;
 struct payload {
@@ -128,6 +129,18 @@ std::vector<work_unit> ClientWorker(
   for(int i = 0; i < num_servers; ++i)
     metrics[i] = 0;
 
+  rt::Mutex ms_[num_servers];
+
+  std::vector<uint64_t> num_outst_reqs;
+  num_outst_reqs.reserve(num_servers);
+  for (int i = 0; i < num_servers; ++i)
+    num_outst_reqs[i] = 0;
+
+  std::vector<double> cwnds_;
+  cwnds_.reserve(num_servers);
+  for (int i = 0; i < num_servers; ++i)
+    cwnds_[i] = 4.0;
+
   std::vector<rt::Thread> th;
   for (int i = 0; i < num_servers; ++i) {
     th.emplace_back(rt::Thread([&, i] {
@@ -148,7 +161,25 @@ std::vector<work_unit> ClientWorker(
         w[idx].tsc = ntoh64(rp.tsc_end);
         w[idx].cpu = ntoh32(rp.cpu);
 
+        double new_cwnd = cwnds_[i];
         uint64_t standing_queue_us = ntoh64(rp.standing_queue_us);
+        metrics[i] = standing_queue_us;
+
+        if (standing_queue_us >= 20 && num_outst_reqs[i] < cwnds_[i]) {
+          double window_cut = 1.25 - standing_queue_us/80.0;
+          window_cut = std::min<double>(window_cut, 1.0);
+          window_cut = std::max<double>(window_cut, 0.5);
+          new_cwnd = cwnds_[i] * window_cut;
+        } else if (standing_queue_us < 20) {
+          new_cwnd = cwnds_[i] + 1.0/cwnds_[i];
+        }
+
+        if (new_cwnd < 1.0001) new_cwnd = 1.001;
+
+        ms_[i].Lock();
+        cwnds_[i] = new_cwnd;
+        num_outst_reqs[i]--;
+        ms_[i].Unlock();
       }
     }));
   }
@@ -163,17 +194,18 @@ std::vector<work_unit> ClientWorker(
   payload p;
   auto wsize = w.size();
 
+  int start_idx = 0;
+
   for (unsigned int i = 0; i < wsize; ++i) {
     barrier();
     auto now = steady_clock::now();
     barrier();
 
+    if (duration_cast<sec>(now - expstart).count() > kExperimentTime) break;
+
     if (duration_cast<sec>(now - expstart).count() < w[i].start_us) {
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
-    if (duration_cast<sec>(now - expstart).count() - w[i].start_us >
-        kMaxCatchUpUS)
-      continue;
 
     barrier();
     timings[i] = steady_clock::now();
@@ -184,11 +216,57 @@ std::vector<work_unit> ClientWorker(
     p.work_iterations = hton64(w[i].work_us * kIterationsPerUS);
     p.index = hton64(i);
 
-    rt::TcpConn* c= cs[0];
+    int min_idx = -1;
+    uint64_t min_value;
+/*
+    // round-robin
+    for (int j = start_idx; j < start_idx + num_servers; ++j) {
+      int real_idx = j % num_servers;
+      if (min_idx == -1) {
+        if ((double)(num_outst_reqs[real_idx] + 1) <= cwnds_[real_idx]) {
+          min_idx = real_idx;
+          break;
+        }
+      }
+    }
+*/
+/*
+    // num_req
+    for (int j = start_idx; j < start_idx + num_servers; ++j) {
+      int real_idx = j % num_servers;
+      if (min_idx == -1 || num_outst_reqs[real_idx] < min_value) {
+        if ((double)(num_outst_reqs[real_idx] + 1) <= cwnds_[real_idx]) {
+          min_idx = real_idx;
+          min_value = num_outst_reqs[real_idx];
+        }
+      }
+    }
+*/
+
+    // standing queue
+    for (int j = start_idx; j < start_idx + num_servers; ++j) {
+      int real_idx = j % num_servers;
+      if (min_idx == -1 || metrics[real_idx] < min_value) {
+        if ((double)(num_outst_reqs[real_idx] + 1) <= cwnds_[real_idx]) {
+          min_idx = real_idx;
+          min_value = metrics[real_idx];
+        }
+      }
+    }
+
+    start_idx = (start_idx + 1) % num_servers;
+
+    if (min_idx == -1) continue;
+
+    rt::TcpConn* c= cs[min_idx];
 
     ssize_t ret = c->WriteFull(&p, sizeof(payload));
     if (ret != static_cast<ssize_t>(sizeof(payload)))
       panic("write failed, ret = %ld", ret);
+
+    ms_[min_idx].Lock();
+    num_outst_reqs[min_idx]++;
+    ms_[min_idx].Unlock();
   }
 
   for (auto &c : cs) c->Shutdown(SHUT_RDWR);
@@ -208,6 +286,7 @@ std::vector<work_unit> RunExperiment(
       std::unique_ptr<rt::TcpConn> outc(rt::TcpConn::Dial({0, 0}, raddrs[j]));
       if (unlikely(outc == nullptr)) panic("couldn't connect to raddr.");
       conns.emplace_back(std::move(outc));
+      rt::Sleep(10000);
     }
   }
 
@@ -279,6 +358,16 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
     << mean << "," << p90 << "," << p99 << "," << p999 << "," << max << std::endl;
 }
 
+double GetBimodalRandom(std::mt19937 rgen) {
+  if (rgen() > (unsigned int)0xe6666665) {
+    // 10% of 10us requests
+    return 10.0;
+  } else {
+    // 90% of 100 * 10us = 1ms requests
+    return 1000.0;
+  }
+}
+
 void SteadyStateExperiment(int num_threads, int num_servers, double offered_rps,
                            double service_time) {
   double rps, cpu_usage;
@@ -287,16 +376,17 @@ void SteadyStateExperiment(int num_threads, int num_servers, double offered_rps,
       std::mt19937 dg(rand());
       std::exponential_distribution<double> rd(
           1.0 / (1000000.0 / (offered_rps / static_cast<double>(num_threads))));
-      std::exponential_distribution<double> wd(1.0 / service_time);
-      return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, 5000000);
+//      std::exponential_distribution<double> wd(1.0 / service_time);
+      return GenerateWork(std::bind(rd, rg), std::bind(GetBimodalRandom, dg), 0, kExperimentTime);
   });
 
   PrintStatResults(w, offered_rps, rps, cpu_usage);
 }
 
 void ClientHandler(void *arg) {
-  for (double i = 100000; i <= 100000; i += 100000) {
+  for (double i = 10000; i <= 400000; i += 10000) {
     SteadyStateExperiment(num_threads, num_servers, i, st);
+    rt::Sleep(1000000);
   }
 }
 
@@ -310,7 +400,6 @@ int StringToAddr(const char *str, uint32_t *addr) {
 }
 
 } // anonymous namespace
-
 
 int main(int argc, char *argv[]) {
   int i, ret;
