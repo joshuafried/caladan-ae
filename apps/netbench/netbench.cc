@@ -188,7 +188,7 @@ struct payload {
   uint64_t index;
   uint64_t tsc_end;
   uint32_t cpu;
-  uint64_t standing_queue_us;
+  int32_t standing_queue_len;
 };
 
 // The maximum lateness to tolerate before dropping egress samples.
@@ -214,7 +214,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c) {
     if (workn != 0) w->Work(workn);
     p.tsc_end = hton64(rdtscp(&p.cpu));
     p.cpu = hton32(p.cpu);
-    p.standing_queue_us = hton64(rt::RuntimeStandingQueueUS());
+    p.standing_queue_len = hton32(rt::RuntimeStandingQueueLen());
 
     // Send a work response.
     ssize_t sret = c->WriteFull(&p, ret);
@@ -262,13 +262,15 @@ std::vector<work_unit> ClientWorker(
     rt::TcpConn *c, rt::WaitGroup *starter,
     std::function<std::vector<work_unit>()> wf,
     int worker_id,
-    std::vector<std::pair<uint64_t, uint64_t>> &queues) {
+    std::vector<std::pair<uint64_t, int32_t>> &queues,
+    std::vector<std::pair<uint64_t, double>> &cwnds) {
   constexpr int kBatchSize = 32;
   std::vector<work_unit> w(wf());
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
 
-  /* window-based CC
+  /*
+  // window-based CC
   // current window size
   double cwnd = 4.0;
   // number of outstanding requests
@@ -277,6 +279,7 @@ std::vector<work_unit> ClientWorker(
   rt::Mutex m_;
   rt::CondVar cv_;
   */
+  /*
   // rate-based CC
   // current rate
   uint64_t cur_rate = 10000; // 10k reqs/s
@@ -295,7 +298,7 @@ std::vector<work_unit> ClientWorker(
 
   uint32_t num_outst_req = 0;
   rt::Mutex m_;
-
+  */
   time_point<steady_clock> expstart;
 
   // Start the receiver thread.
@@ -317,14 +320,15 @@ std::vector<work_unit> ClientWorker(
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
 
-      uint64_t standing_queue_us = ntoh64(rp.standing_queue_us);
+      uint64_t standing_queue_len = ntoh32(rp.standing_queue_len);
 
       if (worker_id == 0) {
         queues.emplace_back(duration_cast<sec>(ts - expstart).count(),
-                            standing_queue_us);
+                            standing_queue_len);
       }
 
-      /* window-based CC
+      /*
+      // window-based CC
       double new_cwnd = cwnd;
       double alpha = 0.1;
 
@@ -341,13 +345,18 @@ std::vector<work_unit> ClientWorker(
 
       if (new_cwnd < 1.0001) new_cwnd = 1.0001;
 
+      if (worker_id == 0) {
+        cwnds.emplace_back(duration_cast<sec>(ts - expstart).count(),
+                           new_cwnd);
+      }
+
       m_.Lock();
       num_outst_req--;
       cwnd = new_cwnd;
       cv_.Signal();
       m_.Unlock();
       */
-
+      /*
       // rate-based CC
       uint64_t new_rate = cur_rate;
       uint64_t elapsed_time_us = duration_cast<microseconds>(ts - last_update).count();
@@ -385,6 +394,7 @@ std::vector<work_unit> ClientWorker(
       m_.Lock();
       num_outst_req--;
       m_.Unlock();
+      */
     }
   });
 
@@ -395,7 +405,7 @@ std::vector<work_unit> ClientWorker(
   barrier();
   expstart = steady_clock::now();
   barrier();
-  last_update = expstart;
+//  last_update = expstart;
 
   payload p[kBatchSize];
   int j = 0;
@@ -417,7 +427,8 @@ std::vector<work_unit> ClientWorker(
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
 
-    /* window-based CC
+    /* 
+    // window-based CC
     m_.Lock();
     if ((double)(num_outst_req + 1) > cwnd && j > 0) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
@@ -431,6 +442,8 @@ std::vector<work_unit> ClientWorker(
     m_.Unlock();
    */
 
+    /*
+    // rate-based CC
     while (!tb.RetrieveToken()) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
@@ -443,7 +456,7 @@ std::vector<work_unit> ClientWorker(
     m_.Lock();
     num_outst_req++;
     m_.Unlock();
-
+    */
     barrier();
     timings[i] = steady_clock::now();
     barrier();
@@ -486,10 +499,11 @@ std::vector<work_unit> RunExperiment(
   rt::WaitGroup starter(threads + 1);
   std::vector<rt::Thread> th;
   std::unique_ptr<std::vector<work_unit>> samples[threads];
-  std::vector<std::pair<uint64_t, uint64_t>> queues;
+  std::vector<std::pair<uint64_t, int32_t>> queues;
+  std::vector<std::pair<uint64_t, double>> cwnds;
   for (int i = 0; i < threads; ++i) {
     th.emplace_back(rt::Thread([&, i] {
-      auto v = ClientWorker(conns[i].get(), &starter, wf, i, queues);
+      auto v = ClientWorker(conns[i].get(), &starter, wf, i, queues, cwnds);
       samples[i].reset(new std::vector<work_unit>(std::move(v)));
     }));
   }
@@ -577,7 +591,6 @@ std::vector<work_unit> RunExperiment(
   }
 */
 
-/*
 // Print aggregated throughput
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.timing == 0; }),
@@ -589,30 +602,43 @@ std::vector<work_unit> RunExperiment(
   int num_req_out = 0;
   int granularity = 10;
   uint64_t next_target = granularity;
+  std::ofstream agt_out;
+  agt_out.open("agt.out");
+
   for (const work_unit &u : w) {
     if (u.timing <= next_target) {
       num_req_out++;
     } else {
-      std::cout << next_target/1000.0 << "," << num_req_out/double(granularity) << std::endl;
+      agt_out << next_target/1000.0 << "," << num_req_out/double(granularity) << std::endl;
       next_target += granularity;
       while (u.timing > next_target) {
-        std::cout << next_target/1000.0 << ",0" << std::endl;
+        agt_out << next_target/1000.0 << ",0" << std::endl;
         next_target += granularity;
       }
       num_req_out = 1;
     }
     if (next_target > 5000) break;
   }
-*/
+  agt_out.close();
 
-/*
   // Print queue info for flow 0
-  std::cout << std::endl;
+  std::ofstream q_out;
+  q_out.open("q.out");
   for (auto &q : queues) {
     if (q.first > 5000) break;
-    std::cout << q.first / 1000.0 << "," << q.second << std::endl;
+    q_out << q.first / 1000.0 << "," << q.second << std::endl;
   }
-*/
+  q_out.close();
+
+  // Print cwnd info for flow 0
+  std::ofstream cwnd_out;
+  cwnd_out.open("cwnd.out");
+  for (auto &c : cwnds) {
+    if (c.first > 5000) break;
+    cwnd_out << c.first / 1000.0 << "," << c.second << std::endl;
+  }
+  cwnd_out.close();
+
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),

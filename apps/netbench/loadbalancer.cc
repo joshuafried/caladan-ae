@@ -48,7 +48,7 @@ struct payload {
   uint64_t index;
   uint64_t tsc_end;
   uint32_t cpu;
-  uint64_t standing_queue_us;
+  int32_t standing_queue_len;
 };
 
 constexpr uint64_t kMaxCatchUpUS = 5;
@@ -73,7 +73,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c) {
     if (workn != 0) w->Work(workn);
     p.tsc_end = hton64(rdtscp(&p.cpu));
     p.cpu = hton32(p.cpu);
-    p.standing_queue_us = hton64(rt::RuntimeStandingQueueUS());
+    p.standing_queue_len = hton32(rt::RuntimeStandingQueueLen());
 
     // Send a work response
     ssize_t sret = c->WriteFull(&p, ret);
@@ -161,6 +161,8 @@ std::vector<work_unit> ClientWorker(
         w[idx].tsc = ntoh64(rp.tsc_end);
         w[idx].cpu = ntoh32(rp.cpu);
 
+        /*
+        // window-based cc
         double new_cwnd = cwnds_[i];
         uint64_t standing_queue_us = ntoh64(rp.standing_queue_us);
         metrics[i] = standing_queue_us;
@@ -180,6 +182,7 @@ std::vector<work_unit> ClientWorker(
         cwnds_[i] = new_cwnd;
         num_outst_reqs[i]--;
         ms_[i].Unlock();
+        */
       }
     }));
   }
@@ -218,6 +221,9 @@ std::vector<work_unit> ClientWorker(
 
     int min_idx = -1;
     uint64_t min_value;
+
+    // always first connection
+    min_idx = 0;
 /*
     // round-robin
     for (int j = start_idx; j < start_idx + num_servers; ++j) {
@@ -242,7 +248,7 @@ std::vector<work_unit> ClientWorker(
       }
     }
 */
-
+/*
     // standing queue
     for (int j = start_idx; j < start_idx + num_servers; ++j) {
       int real_idx = j % num_servers;
@@ -253,7 +259,7 @@ std::vector<work_unit> ClientWorker(
         }
       }
     }
-
+*/
     start_idx = (start_idx + 1) % num_servers;
 
     if (min_idx == -1) continue;
@@ -264,9 +270,12 @@ std::vector<work_unit> ClientWorker(
     if (ret != static_cast<ssize_t>(sizeof(payload)))
       panic("write failed, ret = %ld", ret);
 
+    /*
+    // window-based cc
     ms_[min_idx].Lock();
     num_outst_reqs[min_idx]++;
     ms_[min_idx].Unlock();
+    */
   }
 
   for (auto &c : cs) c->Shutdown(SHUT_RDWR);
