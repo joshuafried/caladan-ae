@@ -40,7 +40,9 @@
 #define CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_1 (0x2)
 
 #ifdef ZAIN_VECTOR
+#ifndef SUPPRESS_CUSTOMIZED_IPI_HANDLER
 #define OS_SUPPORT_CUSTOMIZED_IPI_HANDER
+#endif
 #endif
 
 #define MSR_X2APIC_ICR (0x830)
@@ -224,7 +226,7 @@ static long ksched_park(void)
 		local_set(&p->busy, true);
 		smp_store_release(&s->last_gen, gen);
 		put_cpu();
-		return 0;
+		return smp_processor_id();
 	}
 
 	/* if the tid is zero, then simply idle this core */
@@ -252,7 +254,7 @@ static long ksched_start(void)
 	__set_current_state(TASK_INTERRUPTIBLE);
 	schedule();
 	__set_current_state(TASK_RUNNING);
-	return 0;
+	return smp_processor_id();
 }
 
 static void ksched_deliver_signal(struct ksched_percpu *p, unsigned int signum)
@@ -534,8 +536,11 @@ static void __exit ksched_cpuidle_unhijack(void)
 static void __init ksched_init_pmc(void *arg)
 {
         wrmsrl(MSR_P6_EVNTSEL0, PMC_LLC_MISSES);
-        wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL, CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_0 |
-                                          CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_1);
+	wrmsrl(MSR_CORE_PERF_FIXED_CTR_CTRL, 0x333);
+        wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL,
+	       CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_0 |
+	       CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_1 |
+	       (1UL << 32) | (1UL << 33) | (1UL << 34));
 }
 
 static int __init ksched_init(void)

@@ -12,6 +12,7 @@ namespace rt {
 
 class NetConn {
  public:
+  virtual ~NetConn() {};
   virtual ssize_t Read(void *buf, size_t len) = 0;
   virtual ssize_t Write(const void *buf, size_t len) = 0;
 };
@@ -91,6 +92,13 @@ class TcpConn : public NetConn {
 
  public:
   ~TcpConn() { tcp_close(c_); }
+
+  static TcpConn *DialAffinity(uint32_t affinity, netaddr raddr) {
+    tcpconn_t *c;
+    int ret = tcp_dial_affinity(affinity, raddr, &c);
+    if (ret) return nullptr;
+    return new TcpConn(c);
+  }
 
   // Creates a TCP connection between a local and remote address.
   static TcpConn *Dial(netaddr laddr, netaddr raddr) {

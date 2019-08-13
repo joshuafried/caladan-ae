@@ -33,10 +33,10 @@
 #define RUNTIME_GUARD_SIZE		256 * KB
 #define RUNTIME_RQ_SIZE			32
 #define RUNTIME_SOFTIRQ_LOCAL_BUDGET	16
-#define RUNTIME_SOFTIRQ_REMOTE_BUDGET	1
+#define RUNTIME_SOFTIRQ_REMOTE_BUDGET	16
 #define RUNTIME_MAX_TIMERS		4096
 #define RUNTIME_SCHED_POLL_ITERS	0
-#define RUNTIME_SCHED_MIN_POLL_US	4
+#define RUNTIME_SCHED_MIN_POLL_US	2
 #define RUNTIME_WATCHDOG_US		50
 
 
@@ -220,6 +220,7 @@ struct iokernel_control {
 	mem_key_t key;
 	struct control_hdr *hdr;
 	struct thread_spec *threads;
+	const struct iokernel_info *iok_info;
 	void *tx_buf;
 	size_t tx_len;
 };
@@ -262,6 +263,8 @@ static inline bool hardware_q_pending(struct hardware_q *q)
 
 #ifdef DIRECT_STORAGE
 
+extern bool cfg_storage_enabled;
+
 struct storage_q {
 
 	spinlock_t lock;
@@ -276,7 +279,12 @@ struct storage_q {
 
 static inline bool storage_available_completions(struct storage_q *q)
 {
-	return hardware_q_pending(&q->hq);
+	return cfg_storage_enabled && hardware_q_pending(&q->hq);
+}
+
+static inline bool storage_pending_completions(struct storage_q *q)
+{
+	return cfg_storage_enabled && q->outstanding_reqs > 0;
 }
 
 extern int storage_proc_completions(struct storage_q *q,
@@ -289,6 +297,12 @@ static inline bool storage_available_completions(struct storage_q *q)
 {
 	return false;
 }
+
+static inline bool storage_pending_completions(struct storage_q *q)
+{
+	return false;
+}
+
 
 static inline int storage_proc_completions(struct storage_q *q,
 	    unsigned int budget, struct thread **wakeable_threads)
@@ -505,32 +519,40 @@ extern void __net_recurrent(void);
 extern void net_rx_softirq(struct rx_net_hdr **hdrs, unsigned int nr);
 extern void net_rx_softirq_direct(struct mbuf **ms, unsigned int nr);
 
-#ifdef DIRECTPATH
-
-
-struct direct_txq {};
-
 struct trans_entry;
 struct net_driver_ops {
 	int (*rx_batch)(struct hardware_q *rxq, struct mbuf **ms, unsigned int budget);
-	int (*tx_single)(struct direct_txq *txq, struct mbuf *m);
+	int (*tx_single)(struct mbuf *m);
 	int (*steer_flows)(unsigned int *new_fg_assignment);
 	int (*register_flow)(unsigned int affininty, struct trans_entry *e, void **handle_out);
-	int (*deregister_flow)(void *handle);
+	int (*deregister_flow)(struct trans_entry *e, void *handle);
+	uint32_t (*get_flow_affinity)(uint8_t ipproto, uint16_t local_port, struct netaddr remote);
 };
 
 extern struct net_driver_ops net_ops;
 
+#ifdef DIRECTPATH
+
+extern bool cfg_directpath_enabled;
+struct direct_txq {};
+
 static inline bool rx_pending(struct hardware_q *rxq)
 {
-	return hardware_q_pending(rxq);
+	return cfg_directpath_enabled && hardware_q_pending(rxq);
 }
+
+extern size_t directpath_rx_buf_pool_sz(unsigned int nrqs);
 
 #else
 
 static inline bool rx_pending(struct hardware_q *rxq)
 {
 	return false;
+}
+
+static inline size_t directpath_rx_buf_pool_sz(unsigned int nrqs)
+{
+	return 0;
 }
 
 #endif
@@ -571,6 +593,25 @@ static inline bool softirq_work_available(struct kthread *k)
 	work_available |= storage_available_completions(&k->storage_q);
 
 	return work_available;
+}
+
+static inline bool timer_available_soon(struct kthread *k, uint64_t now)
+{
+	return k->timern > 0 &&
+		(k->timers[0].deadline_us - 10) * cycles_per_us + start_tsc <= now;
+}
+
+/**
+ * softirq_work_soon - returns true if a softirq is likely
+ * to be ready in the next 10us
+ *
+ * @k: the kthread to check
+ * @now: current timestamp
+ */
+static inline bool softirq_work_soon(struct kthread *k, uint64_t now)
+{
+	return storage_pending_completions(&k->storage_q) ||
+		timer_available_soon(k, now);
 }
 
 /*

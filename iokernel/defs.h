@@ -42,7 +42,7 @@ extern struct iokernel_cfg cfg;
 #define IOKERNEL_CMD_BURST_SIZE		64
 #define IOKERNEL_RX_BURST_SIZE		64
 #define IOKERNEL_CONTROL_BURST_SIZE	4
-#define IOKERNEL_POLL_INTERVAL		10
+#define IOKERNEL_POLL_INTERVAL		5
 
 /*
  * Process Support
@@ -242,12 +242,16 @@ struct dataplane {
 	bool			is_mlx;
 	struct rte_mempool	*rx_mbuf_pool;
 
+	struct shm_region		ingress_mbuf_region;
+
 	struct proc		*clients[IOKERNEL_MAX_PROC];
 	int			nr_clients;
 	struct rte_hash		*mac_to_proc;
 };
 
 extern struct dataplane dp;
+extern struct iokernel_info *iok_info;
+
 
 /*
  * Logical cores assigned to linux and the control and dataplane threads

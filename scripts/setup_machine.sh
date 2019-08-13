@@ -39,6 +39,9 @@ else
        echo "Machine does not support CAT, skip..."
 fi
 
+# enable RDPMC instruction from userspace
+echo 2 > /sys/devices/cpu/rdpmc
+
 # turn on cstate
 sudo killall cstate
 cd scripts
@@ -51,4 +54,3 @@ echo performance | tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 
 # Disable turbo boost
 echo 1 | tee /sys/devices/system/cpu/intel_pstate/no_turbo
-

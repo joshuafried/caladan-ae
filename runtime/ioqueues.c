@@ -29,7 +29,7 @@
 #define COMMAND_QUEUE_MCOUNT	4096
 /* the egress buffer pool must be large enough to fill all the TXQs entirely */
 #define EGRESS_POOL_SIZE(nks) \
-	(PACKET_QUEUE_MCOUNT * MBUF_DEFAULT_LEN * MAX(16, (nks)) * 8UL)
+	(PACKET_QUEUE_MCOUNT * MBUF_DEFAULT_LEN * MAX(1, guaranteedks) * 16UL)
 
 struct iokernel_control iok;
 
@@ -94,13 +94,19 @@ static size_t estimate_shm_space(void)
 	ret += EGRESS_POOL_SIZE(maxks);
 	ret = align_up(ret, PGSIZE_2MB);
 
+#ifdef DIRECTPATH
 	// mlx5 directpath
-	ret += PGSIZE_2MB;
+	if (cfg_directpath_enabled)
+		ret += align_up(directpath_rx_buf_pool_sz(maxks), PGSIZE_2MB);
+#endif
 
+#ifdef DIRECT_STORAGE
 	// SPDK Memory - TODO: size this correctly
-	ret += 5 * PGSIZE_2MB;
-	ret += 2 * maxks * PGSIZE_2MB;
-
+	if (cfg_storage_enabled) {
+		ret += 5 * PGSIZE_2MB;
+		ret += 2 * maxks * PGSIZE_2MB;
+	}
+#endif
 	return ret;
 }
 
@@ -175,13 +181,14 @@ int ioqueues_init(void)
 
 	/* map ingress memory */
 	netcfg.rx_region.base =
-	    mem_map_shm(INGRESS_MBUF_SHM_KEY, NULL, INGRESS_MBUF_SHM_SIZE,
-			PGSIZE_2MB, false);
+	    mem_map_shm_rdonly(INGRESS_MBUF_SHM_KEY, NULL, INGRESS_MBUF_SHM_SIZE,
+			PGSIZE_2MB);
 	if (netcfg.rx_region.base == MAP_FAILED) {
 		log_err("control_setup: failed to map ingress region");
 		return -1;
 	}
 	netcfg.rx_region.len = INGRESS_MBUF_SHM_SIZE;
+	iok.iok_info = (struct iokernel_info *)netcfg.rx_region.base;
 
 	/* set up queues in shared memory */
 	iok.hdr = iok_shm_alloc(sizeof(*iok.hdr), 0, NULL);

@@ -20,6 +20,7 @@
 
 /* important global state */
 struct net_cfg netcfg __aligned(CACHE_LINE_SIZE);
+struct net_driver_ops net_ops;
 
 /* TX buffer allocation */
 struct mempool net_tx_buf_mp;
@@ -32,6 +33,35 @@ static DEFINE_PERTHREAD(struct tcache_perthread, net_tx_buf_pt);
 /*
  * RX Networking Functions
  */
+
+/**
+ * compute_flow_affinity - compute rss hash for incoming packets
+ * @local_port: the local port number
+ * @remote: the remote network address
+ *
+ * Returns the 32 bit hash mod maxks
+ *
+ * copied from dpdk/lib/librte_hash/rte_thash.h
+ */
+static uint32_t compute_flow_affinity(uint8_t ipproto, uint16_t local_port, struct netaddr remote)
+{
+	const uint8_t *rss_key = iok.iok_info->rss_key;
+
+	uint32_t i, j, map, ret = 0, input_tuple[] = {
+		remote.ip, netcfg.addr, local_port | remote.port << 16
+	};
+
+	for (j = 0; j < ARRAY_SIZE(input_tuple); j++) {
+		for (map = input_tuple[j]; map;	map &= (map - 1)) {
+			i = (uint32_t)__builtin_ctz(map);
+			ret ^= hton32(((const uint32_t *)rss_key)[j]) << (31 - i) |
+					(uint32_t)((uint64_t)(hton32(((const uint32_t *)rss_key)[j + 1])) >>
+					(i + 1));
+		}
+	}
+
+	return ret % (uint32_t)maxks;
+}
 
 static void net_rx_send_completion(unsigned long completion_data)
 {
@@ -293,19 +323,34 @@ void __noinline net_tx_drain_overflow(void)
 	/* drain TX packets */
 	while (!mbufq_empty(&k->txpktq_overflow)) {
 		m = mbufq_peak_head(&k->txpktq_overflow);
-#ifndef DIRECTPATH
-		shmptr_t shm = ptr_to_shmptr(&netcfg.tx_region,
-				    mbuf_data(m), mbuf_length(m));
-		if (!lrpc_send(&k->txpktq, TXPKT_NET_XMIT, shm))
+		if (net_ops.tx_single(m))
 			break;
-#else
-		if (net_ops.tx_single(k->directpath_txq, m))
-			break;
-#endif
 		mbufq_pop_head(&k->txpktq_overflow);
 		if (unlikely(preempt_needed()))
 			return;
 	}
+}
+
+static int net_tx_iokernel(struct mbuf *m)
+{
+	struct kthread *k = myk();
+	unsigned int len = mbuf_length(m);
+	struct tx_net_hdr *hdr;
+
+	assert_preempt_disabled();
+
+	hdr = mbuf_push_hdr(m, *hdr);
+	hdr->completion_data = (unsigned long)m;
+	hdr->len = len;
+	hdr->olflags = m->txflags;
+	shmptr_t shm = ptr_to_shmptr(&netcfg.tx_region, hdr, len + sizeof(*hdr));
+
+	if (unlikely(!lrpc_send(&k->txpktq, TXPKT_NET_XMIT, shm))) {
+		mbuf_pull_hdr(m, *hdr);
+		return -1;
+	}
+
+	return 0;
 }
 
 static void net_tx_raw(struct mbuf *m)
@@ -321,23 +366,11 @@ static void net_tx_raw(struct mbuf *m)
 	STAT(TX_PACKETS)++;
 	STAT(TX_BYTES) += len;
 
-#ifndef DIRECTPATH
-	struct tx_net_hdr *hdr = mbuf_push_hdr(m, *hdr);
-	hdr->completion_data = (unsigned long)m;
-	hdr->len = len;
-	hdr->olflags = m->txflags;
-	shmptr_t shm = ptr_to_shmptr(&netcfg.tx_region, hdr, len + sizeof(*hdr));
+	if (unlikely(net_ops.tx_single(m))) {
+		mbufq_push_tail(&k->txpktq_overflow, m);
+		STAT(TXQ_OVERFLOW)++;
+	}
 
-	if (!lrpc_send(&k->txpktq, TXPKT_NET_XMIT, shm)) {
-		mbufq_push_tail(&k->txpktq_overflow, m);
-		STAT(TXQ_OVERFLOW)++;
-	}
-#else
-	if (unlikely(net_ops.tx_single(k->directpath_txq, m))) {
-		mbufq_push_tail(&k->txpktq_overflow, m);
-		STAT(TXQ_OVERFLOW)++;
-	}
-#endif
 	putk();
 }
 
@@ -555,6 +588,35 @@ static void net_dump_config(void)
 		 netcfg.mac.addr[3], netcfg.mac.addr[4], netcfg.mac.addr[5]);
 }
 
+static int rx_batch_iokernel(struct hardware_q *rxq, struct mbuf **ms, unsigned int budget)
+{
+	return 0;
+}
+
+static int steer_flows_iokernel(unsigned int *new_fg_assignment)
+{
+	return 0;
+}
+
+static int register_flow_iokernel(unsigned int affininty, struct trans_entry *e, void **handle_out)
+{
+	return 0;
+}
+
+static int deregister_flow_iokernel(struct trans_entry *e, void *handle)
+{
+	return 0;
+}
+
+static struct net_driver_ops iokernel_ops = {
+	.rx_batch = rx_batch_iokernel,
+	.tx_single = net_tx_iokernel,
+	.steer_flows = steer_flows_iokernel,
+	.register_flow =  register_flow_iokernel,
+	.deregister_flow = deregister_flow_iokernel,
+	.get_flow_affinity = compute_flow_affinity,
+};
+
 /**
  * net_init - initializes the network stack
  *
@@ -576,5 +638,13 @@ int net_init(void)
 
 	log_info("net: started network stack");
 	net_dump_config();
+
+#ifdef DIRECTPATH
+	if (!cfg_directpath_enabled)
+		net_ops = iokernel_ops;
+#else
+	net_ops = iokernel_ops;
+#endif
+
 	return 0;
 }

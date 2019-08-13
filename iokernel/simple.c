@@ -27,7 +27,8 @@ struct simple_data {
 
 	/* congestion info */
 	float			load;
-	int32_t   standing_queue_len;
+	int32_t	  standing_queue_len;
+	bool			waking;
 };
 
 static bool simple_proc_is_preemptible(struct simple_data *cursd,
@@ -91,6 +92,7 @@ static int simple_attach(struct proc *p, struct sched_spec *cfg)
 	sd->threads_guaranteed = cfg->guaranteed_cores;
 	sd->threads_max = cfg->max_cores;
 	sd->threads_active = 0;
+	sd->waking = false;
 	p->policy_data = (unsigned long)sd;
 	return 0;
 }
@@ -137,6 +139,7 @@ static int simple_run_kthread_on_core(struct proc *p, unsigned int core)
 	cores[core] = sd;
 	bitmap_clear(simple_idle_cores, core);
 	sd->threads_active++;
+	sd->waking = true;
 	return 0;
 }
 
@@ -237,18 +240,18 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 	struct simple_data *sd = (struct simple_data *)p->policy_data;
 	int ret;
 
+	/* do nothing if we woke up a core during the last interval */
+	if (sd->waking) {
+		sd->waking = false;
+		goto done;
+	}
+
 	/* check if congested */
 	if (bitmap_popcount(threads, NCPU) +
             bitmap_popcount(io, NCPU) == 0) {
 		simple_unmark_congested(sd);
 		goto done;
 	}
-
-    /* if there is no more core to allocate,
-     * no need to try simple_add_kthread */
-    if (sd->threads_active >= sd->threads_max) {
-        simple_mark_congested(sd);
-    }
 
 	/* do nothing if already marked as congested */
 	if (sd->is_congested)
@@ -273,23 +276,27 @@ static struct simple_data *simple_choose_kthread(unsigned int core)
 
 	/* first try to run the same process as the sibling */
 	sd = cores[sched_siblings[core]];
-	if (sd && sd->is_congested && sd->threads_active < sd->threads_max)
+	if (sd && sd->is_congested && sched_threads_avail(sd->p))
 		return sd;
 
 	/* then try to find a congested process that ran on this core last */
 	for (i = 0; i < NHIST; i++) {
 		sd = hist[core][i];
-		if (sd && sd->is_congested && sd->threads_active < sd->threads_max)
+		if (sd && sd->is_congested && sched_threads_avail(sd->p))
 			return sd;
 
 		/* the hyperthread sibling has equally good locality */
 		sd = hist[sched_siblings[core]][i];
-		if (sd && sd->is_congested && sd->threads_active < sd->threads_max)
+		if (sd && sd->is_congested && sched_threads_avail(sd->p))
 			return sd;
 	}
 
 	/* then try to find any congested process */
-	return list_top(&congested_procs, struct simple_data, congested_link);
+	list_for_each(&congested_procs, sd, congested_link)
+		if (sched_threads_avail(sd->p))
+			return sd;
+
+	return NULL;
 }
 
 static void simple_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
@@ -311,6 +318,7 @@ static void simple_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
 		}
 
 		if (unlikely(simple_run_kthread_on_core(sd->p, core))) {
+			WARN();
 			bitmap_set(simple_idle_cores, core);
 			simple_mark_congested(sd);
 		}

@@ -10,11 +10,17 @@
 static struct hardware_q *rxq_out[NCPU];
 static struct direct_txq *txq_out[NCPU];
 
-struct net_driver_ops net_ops;
-
 struct mempool directpath_buf_mp;
 struct tcache *directpath_buf_tcache;
 DEFINE_PERTHREAD(struct tcache_perthread, directpath_buf_pt);
+
+bool cfg_directpath_enabled;
+
+size_t directpath_rx_buf_pool_sz(unsigned int nrqs)
+{
+	return align_up(nrqs * (32 * RQ_NUM_DESC) * 16UL * MBUF_DEFAULT_LEN,
+			PGSIZE_2MB);
+}
 
 void directpath_rx_completion(struct mbuf *m)
 {
@@ -29,7 +35,7 @@ static int rx_memory_init(void)
 	size_t rx_len;
 	void *rx_buf;
 
-	rx_len = RX_BUF_BOOL_SZ(maxks);
+	rx_len = directpath_rx_buf_pool_sz(maxks);
 	rx_buf = mem_map_anom(NULL, rx_len, PGSIZE_2MB, 0);
 	if (rx_buf == MAP_FAILED)
 		return -ENOMEM;
@@ -52,6 +58,9 @@ int directpath_init(void)
 {
 	int ret;
 
+	if (!cfg_directpath_enabled)
+		return 0;
+
 	ret = rx_memory_init();
 	if (ret)
 		return ret;
@@ -67,6 +76,9 @@ int directpath_init(void)
 
 int directpath_init_thread(void)
 {
+	if (!cfg_directpath_enabled)
+		return 0;
+
 	struct kthread *k = myk();
 	struct hardware_queue_spec *hs;
 	struct hardware_q *rxq = rxq_out[k->kthread_idx];
@@ -114,7 +126,7 @@ static void flow_registration_worker(void *arg)
 		f = list_pop(&flow_to_deregister, struct flow_registration, flow_dereg_link);
 		if (f) {
 			spin_unlock_np(&flow_worker_lock);
-			ret = net_ops.deregister_flow(f->hw_flow_handle);
+			ret = net_ops.deregister_flow(f->e, f->hw_flow_handle);
 			WARN_ON(ret);
 			f->release(f->ref);
 			continue;
@@ -127,6 +139,9 @@ static void flow_registration_worker(void *arg)
 
 void register_flow(struct flow_registration *f)
 {
+	if (!cfg_directpath_enabled)
+		return;
+
 	/* take a reference for the hardware flow table */
 	kref_get(f->ref);
 
@@ -142,6 +157,9 @@ void register_flow(struct flow_registration *f)
 
 void deregister_flow(struct flow_registration *f)
 {
+	if (!cfg_directpath_enabled)
+		return;
+
 	spin_lock_np(&flow_worker_lock);
 	list_add(&flow_to_deregister, &f->flow_dereg_link);
 	if (flow_worker_th) {
@@ -153,6 +171,9 @@ void deregister_flow(struct flow_registration *f)
 
 int directpath_init_late(void)
 {
+	if (!cfg_directpath_enabled)
+		return 0;
+
 	return thread_spawn(flow_registration_worker, NULL);
 }
 
