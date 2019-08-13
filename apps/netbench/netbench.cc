@@ -269,16 +269,15 @@ std::vector<work_unit> ClientWorker(
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
 
-  /*
   // window-based CC
   // current window size
   double cwnd = 4.0;
   // number of outstanding requests
   uint32_t num_outst_req = 0;
+  double ewma_standing_queue_len = 0.0;
   
   rt::Mutex m_;
   rt::CondVar cv_;
-  */
   /*
   // rate-based CC
   // current rate
@@ -320,27 +319,24 @@ std::vector<work_unit> ClientWorker(
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
 
-      uint64_t standing_queue_len = ntoh32(rp.standing_queue_len);
+      int32_t standing_queue_len = ntoh32(rp.standing_queue_len);
+      ewma_standing_queue_len = 0.8*ewma_standing_queue_len + 0.2*standing_queue_len;
 
       if (worker_id == 0) {
         queues.emplace_back(duration_cast<sec>(ts - expstart).count(),
                             standing_queue_len);
       }
 
-      /*
       // window-based CC
       double new_cwnd = cwnd;
-      double alpha = 0.1;
 
-      if (standing_queue_us >= 20 && num_outst_req < cwnd) {
-    	  // congestion detected
-        double window_cut = 1.25 - standing_queue_us/80.0;
-        window_cut = std::min<double>(window_cut, 1.0);
-        window_cut = std::max<double>(window_cut, 0.5);
-        new_cwnd = cwnd * window_cut;
-      } else if (standing_queue_us < 20) {
-        // when congestion is not detected.
-        new_cwnd = cwnd + alpha/cwnd;
+      if (ewma_standing_queue_len > 2.0) {
+        if (num_outst_req <= cwnd)
+          new_cwnd = cwnd * 0.8;
+      } else if (ewma_standing_queue_len <= 1.0) {
+        new_cwnd = cwnd + 0.2/cwnd;
+      } else {
+        new_cwnd = cwnd - 0.2;
       }
 
       if (new_cwnd < 1.0001) new_cwnd = 1.0001;
@@ -355,7 +351,7 @@ std::vector<work_unit> ClientWorker(
       cwnd = new_cwnd;
       cv_.Signal();
       m_.Unlock();
-      */
+
       /*
       // rate-based CC
       uint64_t new_rate = cur_rate;
@@ -427,7 +423,6 @@ std::vector<work_unit> ClientWorker(
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
 
-    /* 
     // window-based CC
     m_.Lock();
     if ((double)(num_outst_req + 1) > cwnd && j > 0) {
@@ -440,7 +435,6 @@ std::vector<work_unit> ClientWorker(
     while ((double)(num_outst_req + 1) > cwnd) cv_.Wait(&m_);
     num_outst_req++;
     m_.Unlock();
-   */
 
     /*
     // rate-based CC
@@ -731,7 +725,7 @@ void LoadShiftExperiment(int threads,
 void ClientHandler(void *arg) {
   // LoadShiftExperiment(threads, rates, st);
 #if 1
-  for (double i = 3000000; i <= 3000000; i += 100000) {
+  for (double i = 100000; i <= 3000000; i += 100000) {
     SteadyStateExperiment(threads, i, st);
   }
 #endif
