@@ -148,6 +148,7 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c) {
       HandleRequest(ctx);
       delete ctx;
     }).Detach();
+    rt::Yield();
     ctx = new RequestContext(resp);
   }
 }
