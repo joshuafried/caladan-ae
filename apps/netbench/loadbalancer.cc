@@ -124,7 +124,7 @@ std::vector<work_unit> ClientWorker(
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
 
-  std::vector<uint64_t> metrics;
+  std::vector<int32_t> metrics;
   metrics.reserve(num_servers);
   for(int i = 0; i < num_servers; ++i)
     metrics[i] = 0;
@@ -140,6 +140,11 @@ std::vector<work_unit> ClientWorker(
   cwnds_.reserve(num_servers);
   for (int i = 0; i < num_servers; ++i)
     cwnds_[i] = 4.0;
+
+  std::vector<double> ewma_stqls_;
+  ewma_stqls_.reserve(num_servers);
+  for (int i = 0; i < num_servers; ++i)
+    ewma_stqls_[i] = 0.0;
 
   std::vector<rt::Thread> th;
   for (int i = 0; i < num_servers; ++i) {
@@ -161,19 +166,20 @@ std::vector<work_unit> ClientWorker(
         w[idx].tsc = ntoh64(rp.tsc_end);
         w[idx].cpu = ntoh32(rp.cpu);
 
-        /*
         // window-based cc
         double new_cwnd = cwnds_[i];
-        uint64_t standing_queue_us = ntoh64(rp.standing_queue_us);
-        metrics[i] = standing_queue_us;
+        int32_t standing_queue_len = ntoh32(rp.standing_queue_len);
+        metrics[i] = standing_queue_len;
 
-        if (standing_queue_us >= 20 && num_outst_reqs[i] < cwnds_[i]) {
-          double window_cut = 1.25 - standing_queue_us/80.0;
-          window_cut = std::min<double>(window_cut, 1.0);
-          window_cut = std::max<double>(window_cut, 0.5);
-          new_cwnd = cwnds_[i] * window_cut;
-        } else if (standing_queue_us < 20) {
-          new_cwnd = cwnds_[i] + 1.0/cwnds_[i];
+        ewma_stqls_[i] = 0.8*ewma_stqls_[i] + 0.2*standing_queue_len;
+
+        if (ewma_stqls_[i] > 2.0) {
+          if (num_outst_reqs[i] <= cwnds_[i])
+            new_cwnd = cwnds_[i] * 0.8;
+        } else if (ewma_stqls_[i] <= 1.0) {
+          new_cwnd = cwnds_[i] + 0.2/cwnds_[i];
+        } else {
+          new_cwnd = cwnds_[i] - 0.2;
         }
 
         if (new_cwnd < 1.0001) new_cwnd = 1.001;
@@ -182,7 +188,6 @@ std::vector<work_unit> ClientWorker(
         cwnds_[i] = new_cwnd;
         num_outst_reqs[i]--;
         ms_[i].Unlock();
-        */
       }
     }));
   }
@@ -220,10 +225,10 @@ std::vector<work_unit> ClientWorker(
     p.index = hton64(i);
 
     int min_idx = -1;
-    uint64_t min_value;
 
     // always first connection
     min_idx = 0;
+   
 /*
     // round-robin
     for (int j = start_idx; j < start_idx + num_servers; ++j) {
@@ -238,6 +243,7 @@ std::vector<work_unit> ClientWorker(
 */
 /*
     // num_req
+    uint64_t min_value;
     for (int j = start_idx; j < start_idx + num_servers; ++j) {
       int real_idx = j % num_servers;
       if (min_idx == -1 || num_outst_reqs[real_idx] < min_value) {
@@ -250,6 +256,7 @@ std::vector<work_unit> ClientWorker(
 */
 /*
     // standing queue
+    int32_t min_value;
     for (int j = start_idx; j < start_idx + num_servers; ++j) {
       int real_idx = j % num_servers;
       if (min_idx == -1 || metrics[real_idx] < min_value) {
@@ -270,12 +277,10 @@ std::vector<work_unit> ClientWorker(
     if (ret != static_cast<ssize_t>(sizeof(payload)))
       panic("write failed, ret = %ld", ret);
 
-    /*
     // window-based cc
     ms_[min_idx].Lock();
     num_outst_reqs[min_idx]++;
     ms_[min_idx].Unlock();
-    */
   }
 
   for (auto &c : cs) c->Shutdown(SHUT_RDWR);
@@ -385,15 +390,15 @@ void SteadyStateExperiment(int num_threads, int num_servers, double offered_rps,
       std::mt19937 dg(rand());
       std::exponential_distribution<double> rd(
           1.0 / (1000000.0 / (offered_rps / static_cast<double>(num_threads))));
-//      std::exponential_distribution<double> wd(1.0 / service_time);
-      return GenerateWork(std::bind(rd, rg), std::bind(GetBimodalRandom, dg), 0, kExperimentTime);
+      std::exponential_distribution<double> wd(1.0 / service_time);
+      return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, kExperimentTime);
   });
 
   PrintStatResults(w, offered_rps, rps, cpu_usage);
 }
 
 void ClientHandler(void *arg) {
-  for (double i = 10000; i <= 400000; i += 10000) {
+  for (double i = 100000; i <= 4000000; i += 100000) {
     SteadyStateExperiment(num_threads, num_servers, i, st);
     rt::Sleep(1000000);
   }
