@@ -14,9 +14,9 @@ namespace rt {
 // Initializes the runtime. If successful, calls @main_func and does not return.
 int RuntimeInit(std::string cfg_path, std::function<void()> main_func);
 
-// Gets the elapsed microseconds the IOKernel has detected a standing queue.
-inline int32_t RuntimeStandingQueueLen() {
-  return runtime_standing_queue_len();
+// Gets rq queueing delay + rxq queueing delay
+inline uint64_t RuntimeQueueingDelayUS() {
+  return runtime_queueing_delay_us();
 }
 
 // Gets an estimate of the instantanious load as measured by the IOKernel.

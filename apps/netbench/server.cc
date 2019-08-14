@@ -78,7 +78,7 @@ struct payload {
   uint64_t index;
   uint64_t tsc_end;
   uint32_t cpu;
-  int32_t standing_queue_len;
+  uint64_t queueing_delay;
 };
 
 class SharedTcpStream {
@@ -119,7 +119,7 @@ void HandleRequest(RequestContext *ctx) {
   if (workn != 0) w->Work(workn);
   p->tsc_end = hton64(rdtscp(&p->cpu));
   p->cpu = hton32(p->cpu);
-  p->standing_queue_len = hton32(rt::RuntimeStandingQueueLen());
+  p->queueing_delay = hton64(rt::RuntimeQueueingDelayUS());
 
   ssize_t ret = ctx->conn->WriteFull(&ctx->p, sizeof(ctx->p));
   if (ret != static_cast<ssize_t>(sizeof(ctx->p))) {

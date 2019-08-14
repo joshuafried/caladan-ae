@@ -77,7 +77,9 @@ struct thread {
 	pid_t			tid;
 	int32_t			park_efd;
 	struct q_ptrs		*q_ptrs;
+  uint32_t    last_rq_tail;
 	uint32_t		last_rq_head;
+  uint32_t    last_rxq_tail;
 	uint32_t		last_rxq_head;
 	unsigned int		core;
 	unsigned int		at_idx;

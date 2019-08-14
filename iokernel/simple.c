@@ -27,7 +27,12 @@ struct simple_data {
 
 	/* congestion info */
 	float			load;
-	int32_t	  standing_queue_len;
+  uint64_t  rq_waiting;
+  uint64_t  rq_elapsed;
+  uint64_t  rq_delay;
+  uint64_t  rxq_waiting;
+  uint64_t  rxq_elapsed;
+  uint64_t  rxq_delay;
 	bool			waking;
 };
 
@@ -220,13 +225,12 @@ static int simple_notify_core_needed(struct proc *p)
 
 #define EWMA_WEIGHT	0.1f
 
-static void simple_update_congestion_info(struct simple_data *sd, uint32_t stqlen)
+static void simple_update_congestion_info(struct simple_data *sd)
 {
 	struct congestion_info *info = sd->p->congestion_info;
 	float instant_load;
 
-  sd->standing_queue_len = stqlen;
-  ACCESS_ONCE(info->standing_queue_len) = stqlen;
+  ACCESS_ONCE(info->queueing_delay) = sd->rq_delay + sd->rxq_delay;
 	/* update the CPU load */
 	/* TODO: handle using more than guaranteed cores */
         instant_load = (float)sd->threads_active / (float)sd->threads_max;
@@ -235,7 +239,8 @@ static void simple_update_congestion_info(struct simple_data *sd, uint32_t stqle
 }
 
 static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
-				    bitmap_ptr_t io, int32_t stqlen)
+				    bitmap_ptr_t io, uint64_t rq_stqlen, uint64_t rq_dequeued,
+            uint64_t rxq_stqlen, uint64_t rxq_dequeued)
 {
 	struct simple_data *sd = (struct simple_data *)p->policy_data;
 	int ret;
@@ -245,6 +250,28 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 		sd->waking = false;
 		goto done;
 	}
+
+  sd->rq_elapsed += IOKERNEL_POLL_INTERVAL;
+  if (sd->rq_waiting <= rq_dequeued) {
+    // wait finish!
+    sd->rq_delay = sd->rq_elapsed;
+    sd->rq_waiting = rq_stqlen;
+    sd->rq_elapsed = IOKERNEL_POLL_INTERVAL / 2;
+  } else {
+    // still waiting
+    sd->rq_waiting -= rq_dequeued;
+  }
+
+  sd->rxq_elapsed += IOKERNEL_POLL_INTERVAL;
+  if (sd->rxq_waiting <= rxq_dequeued) {
+    // wait finish
+    sd->rxq_delay = sd->rxq_elapsed;
+    sd->rxq_waiting = rxq_stqlen;
+    sd->rxq_elapsed = IOKERNEL_POLL_INTERVAL / 2;
+  } else {
+    // still waiting
+    sd->rxq_waiting -= rxq_dequeued;
+  }
 
 	/* check if congested */
 	if (bitmap_popcount(threads, NCPU) +
@@ -266,7 +293,7 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 	simple_mark_congested(sd);
 
 done:
-	simple_update_congestion_info(sd, stqlen);
+	simple_update_congestion_info(sd);
 }
 
 static struct simple_data *simple_choose_kthread(unsigned int core)

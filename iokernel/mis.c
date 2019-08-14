@@ -298,7 +298,7 @@ static void mis_update_congestion_info(struct mis_data *sd)
 		sd->standing_queue_us += IOKERNEL_POLL_INTERVAL;
 	else
 		sd->standing_queue_us = 0;
-	ACCESS_ONCE(info->standing_queue_len) = 0;
+	ACCESS_ONCE(info->queueing_delay) = 0;
 
 	/* update the CPU load */
 	/* TODO: handle using more than guaranteed cores */
@@ -309,7 +309,7 @@ static void mis_update_congestion_info(struct mis_data *sd)
 }
 
 static void mis_notify_congested(struct proc *p, bitmap_ptr_t threads,
-				 bitmap_ptr_t io, int32_t args)
+				 bitmap_ptr_t io, uint64_t arg1, uint64_t arg2, uint64_t arg3, uint64_t arg4)
 {
 	struct mis_data *sd = (struct mis_data *)p->policy_data;
 	int ret;
