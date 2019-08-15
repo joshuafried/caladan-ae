@@ -188,7 +188,7 @@ struct payload {
   uint64_t index;
   uint64_t tsc_end;
   uint32_t cpu;
-  int32_t standing_queue_len;
+  uint64_t queueing_delay;
 };
 
 // The maximum lateness to tolerate before dropping egress samples.
@@ -214,7 +214,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c) {
     if (workn != 0) w->Work(workn);
     p.tsc_end = hton64(rdtscp(&p.cpu));
     p.cpu = hton32(p.cpu);
-    p.standing_queue_len = hton32(rt::RuntimeStandingQueueLen());
+    p.queueing_delay = hton32(rt::RuntimeQueueingDelayUS());
 
     // Send a work response.
     ssize_t sret = c->WriteFull(&p, ret);
@@ -262,7 +262,7 @@ std::vector<work_unit> ClientWorker(
     rt::TcpConn *c, rt::WaitGroup *starter,
     std::function<std::vector<work_unit>()> wf,
     int worker_id,
-    std::vector<std::pair<uint64_t, int32_t>> &queues,
+    std::vector<std::pair<uint64_t, uint64_t>> &queues,
     std::vector<std::pair<uint64_t, double>> &cwnds) {
   constexpr int kBatchSize = 32;
   std::vector<work_unit> w(wf());
@@ -274,7 +274,6 @@ std::vector<work_unit> ClientWorker(
   double cwnd = 4.0;
   // number of outstanding requests
   uint32_t num_outst_req = 0;
-  double ewma_standing_queue_len = 0.0;
   
   rt::Mutex m_;
   rt::CondVar cv_;
@@ -319,24 +318,24 @@ std::vector<work_unit> ClientWorker(
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
 
-      int32_t standing_queue_len = ntoh32(rp.standing_queue_len);
-      ewma_standing_queue_len = 0.8*ewma_standing_queue_len + 0.2*standing_queue_len;
+      uint64_t queueing_delay = ntoh64(rp.queueing_delay);
 
       if (worker_id == 0) {
         queues.emplace_back(duration_cast<sec>(ts - expstart).count(),
-                            standing_queue_len);
+                            queueing_delay);
       }
 
       // window-based CC
       double new_cwnd = cwnd;
+      unsigned int target_us = 100;
 
-      if (ewma_standing_queue_len > 2.0) {
+      if (queueing_delay > (uint64_t)(target_us * 1.5)) {
         if (num_outst_req <= cwnd)
           new_cwnd = cwnd * 0.8;
-      } else if (ewma_standing_queue_len <= 1.0) {
-        new_cwnd = cwnd + 0.2/cwnd;
+      } else if (queueing_delay <= target_us) {
+        new_cwnd = cwnd + 0.5/cwnd;
       } else {
-        new_cwnd = cwnd - 0.2;
+        new_cwnd = cwnd - 0.5;
       }
 
       if (new_cwnd < 1.0001) new_cwnd = 1.0001;
@@ -493,7 +492,7 @@ std::vector<work_unit> RunExperiment(
   rt::WaitGroup starter(threads + 1);
   std::vector<rt::Thread> th;
   std::unique_ptr<std::vector<work_unit>> samples[threads];
-  std::vector<std::pair<uint64_t, int32_t>> queues;
+  std::vector<std::pair<uint64_t, uint64_t>> queues;
   std::vector<std::pair<uint64_t, double>> cwnds;
   for (int i = 0; i < threads; ++i) {
     th.emplace_back(rt::Thread([&, i] {
@@ -611,7 +610,7 @@ std::vector<work_unit> RunExperiment(
       }
       num_req_out = 1;
     }
-    if (next_target > 5000) break;
+    if (next_target > 10000) break;
   }
   agt_out.close();
 
@@ -619,7 +618,7 @@ std::vector<work_unit> RunExperiment(
   std::ofstream q_out;
   q_out.open("q.out");
   for (auto &q : queues) {
-    if (q.first > 5000) break;
+    if (q.first > 10000) break;
     q_out << q.first / 1000.0 << "," << q.second << std::endl;
   }
   q_out.close();
@@ -628,7 +627,7 @@ std::vector<work_unit> RunExperiment(
   std::ofstream cwnd_out;
   cwnd_out.open("cwnd.out");
   for (auto &c : cwnds) {
-    if (c.first > 5000) break;
+    if (c.first > 10000) break;
     cwnd_out << c.first / 1000.0 << "," << c.second << std::endl;
   }
   cwnd_out.close();
@@ -684,6 +683,14 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << max << std::endl;
 }
 
+double GetBimodalRandom(std::mt19937 rgen) {
+  if (rgen() > (unsigned int)0xe6666665) {
+    return 1.0;
+  } else {
+    return 100.0;
+  }
+}
+
 void SteadyStateExperiment(int threads, double offered_rps,
                            double service_time) {
   double rps, cpu_usage;
@@ -692,8 +699,8 @@ void SteadyStateExperiment(int threads, double offered_rps,
     std::mt19937 dg(rand());
     std::exponential_distribution<double> rd(
         1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
-    std::exponential_distribution<double> wd(1.0 / service_time);
-    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, kExperimentTime);
+//    std::exponential_distribution<double> wd(1.0 / service_time);
+    return GenerateWork(std::bind(rd, rg), std::bind(GetBimodalRandom, dg), 0, kExperimentTime);
   });
 
   // Print the results.
@@ -725,7 +732,7 @@ void LoadShiftExperiment(int threads,
 void ClientHandler(void *arg) {
   // LoadShiftExperiment(threads, rates, st);
 #if 1
-  for (double i = 100000; i <= 3000000; i += 100000) {
+  for (double i = 2000000; i <= 2000000; i += 100000) {
     SteadyStateExperiment(threads, i, st);
   }
 #endif
