@@ -4,6 +4,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include <base/stddef.h>
 #include <base/log.h>
@@ -25,13 +26,17 @@ static DEFINE_BITMAP(mis_idle_cores, NCPU);
 static DEFINE_BITMAP(mis_sampled_cores, NCPU);
 
 /* poll the global (system-wide) memory bandwidth over this time interval */
-#define MIS_BW_MEASURE_INTERVAL	        10
+#define MIS_BW_MEASURE_INTERVAL                      5
 /* wait for performance counter results over this time interval */
-#define MIS_BW_PUNISH_INTERVAL	        10
+#define MIS_BW_PUNISH_INTERVAL                       10
 /* FIXME: should not be hard coded */
-#define MIS_PUNISH_HIGH_WATERMARK	0.09
-#define MIS_PUNISH_LOW_WATERMARK	0.08
-#define MIS_UNDER_PUNISH_LOW_WATERMARK_CNT_THRESHOLD 3
+#define MIS_PUNISH_HIGH_WATERMARK                    0.09
+#define MIS_PUNISH_LOW_WATERMARK                     0.08
+
+#define MIS_KICK_OUT_BW_FACTOR                       0.01
+#define MIS_KICK_OUT_THREAD_LIMIT_FACTOR             0.25
+
+#define MIS_UNDER_PUNISH_LOW_WATERMARK_CNT_THRESHOLD 1
 
 // #define DEBUG
 
@@ -528,17 +533,49 @@ static struct mis_data *mis_choose_bandwidth_victim(bool *has_not_ready)
 	return victim;
 }
 
+static inline void mis_kick_core(int core)
+{
+	struct mis_data *sd = cores[core];
+	sd->threads_limit = MAX(0,
+				MIN(sd->threads_limit - 1,
+				    sd->threads_active - 1));
+	if (mis_add_kthread_on_core(core))
+		mis_idle_on_core(core);
+}
+
 static void mis_bandwidth_state_machine(uint64_t now)
 {
 	static int under_punish_low_watermark_cnt = 0;
 	static bool bw_punish_triggered = false;
-	static uint64_t last_tsc = 0, last_bw_measure_ts = 0, last_bw_punish_ts;
+	static uint64_t last_tsc = 0, last_bw_measure_ts = 0, last_bw_punish_ts = 0;
 	static uint32_t last_cas = 0;
 	uint64_t tsc;
 	uint32_t cur_cas;
-	float bw_estimate;
+	static float bw_estimate;
 	unsigned int core, tmp;
+	bool just_preempted = false;
+	int sibling;
+	bool update_fsm = false;
 
+#ifdef DEBUG
+	static int total_kick_out_cnt = 0;
+	static int total_add_back_cnt = 0;
+#endif
+
+	/* check if it's time to sample bandwidth */
+	if (now - last_bw_measure_ts >= MIS_BW_MEASURE_INTERVAL) {
+		/* update the bandwidth estimate */
+		update_fsm = true;
+		barrier();
+		tsc = rdtsc();
+		barrier();
+		cur_cas = get_cas_count_all();
+		bw_estimate = (float)(cur_cas - last_cas) / (float)(tsc - last_tsc);
+		last_bw_measure_ts = now;
+		last_cas = cur_cas;
+		last_tsc = tsc;
+	}
+	
 	/* punish a process that is using too much bandwidth */
 	if (bw_punish_triggered &&
 	    now - last_bw_punish_ts >= MIS_BW_PUNISH_INTERVAL) {
@@ -551,59 +588,55 @@ static void mis_bandwidth_state_machine(uint64_t now)
 			}
 			goto done;
 		}
+		just_preempted = true;
 		bw_punish_triggered = false;
-		sd->threads_limit = MIN(sd->threads_limit - 1,
-					sd->threads_active - 1);
 		mis_unmark_congested(sd);
 		mis_mark_bwlimited(sd);
 
-		/* first prefer lone hyperthreads */
-		sched_for_each_allowed_core(core, tmp) {
-			if (cores[core] == sd &&
-			    cores[sched_siblings[core]] != sd) {
-				if (mis_add_kthread_on_core(core))
-					mis_idle_on_core(core);
-				goto done;
-			}
-		}
-
-		/* then try any core */
+		int kick_cnt = 0;
+		int kick_thresh = MIS_KICK_OUT_THREAD_LIMIT_FACTOR * sd->threads_limit +
+			((bw_estimate - MIS_PUNISH_HIGH_WATERMARK) / MIS_KICK_OUT_BW_FACTOR);
+		// TODO: actually we need to spread kick_thresh among multiple sds
+		// rather than a single sd, for example when all sds are single-threaded.
 		sched_for_each_allowed_core(core, tmp) {
 			if (cores[core] == sd) {
-				if (mis_add_kthread_on_core(core))
-					mis_idle_on_core(core);
+				mis_kick_core(core);
+				kick_cnt++;
+			}
+		 	sibling = sched_siblings[core];
+			if (cores[sibling] == sd) {
+				mis_kick_core(sibling);
+				kick_cnt++;
+			}
+			if (kick_cnt >= kick_thresh) {
+#ifdef DEBUG
+				total_kick_out_cnt += kick_cnt;
+#endif
 				goto done;
 			}
 		}
 	}
-
+	
  done:
-	/* check if it's time to sample bandwidth */
-	if (now - last_bw_measure_ts < MIS_BW_MEASURE_INTERVAL)
+	if (!update_fsm) {
 		return;
-
-	/* update the bandwidth estimate */
-	barrier();
-	tsc = rdtsc();
-	barrier();
-	cur_cas = get_cas_count_all();
-	bw_estimate = (float)(cur_cas - last_cas) / (float)(tsc - last_tsc);
-	last_bw_measure_ts = now;
-	last_cas = cur_cas;
-	last_tsc = tsc;
-
+	}
 	if (bw_estimate < MIS_PUNISH_LOW_WATERMARK) {
 		/* safe to add back kthreads now */
 		under_punish_low_watermark_cnt++;
 		if (under_punish_low_watermark_cnt >=
 		    MIS_UNDER_PUNISH_LOW_WATERMARK_CNT_THRESHOLD) {
 			struct mis_data *sd;
-
+			
 			under_punish_low_watermark_cnt = 0;
 			sd = list_pop(&bwlimited_procs, struct mis_data,
 				      bwlimited_link);
 			if (!sd)
 				return;
+
+#ifdef DEBUG			
+			total_add_back_cnt++;
+#endif
 
 			if (sd->threads_limit <= sd->threads_active) {
 				sd->threads_limit++;
@@ -618,7 +651,7 @@ static void mis_bandwidth_state_machine(uint64_t now)
 		under_punish_low_watermark_cnt = 0;
 		if (bw_estimate > MIS_PUNISH_HIGH_WATERMARK) {
 			/* exceeds the bandwidth limit, start punishing */
-			if (!bw_punish_triggered) {
+			if (!bw_punish_triggered && !just_preempted) {
 				if (mis_sample_pmc(PMC_LLC_MISSES)) {
 					bw_punish_triggered = true;
 					last_bw_punish_ts = microtime();
@@ -626,16 +659,18 @@ static void mis_bandwidth_state_machine(uint64_t now)
 			}
 		}
 	}
-	
+		
 #ifdef DEBUG
 	static uint64_t last_debug_ts = 0;
 	if (now - last_debug_ts > 2000000) {
 		last_debug_ts = now;
 		mis_print_debug_info();
 		log_info("bw_estimate = %f, bw_punish_triggered = %d, "
-			 "under_punish_low_watermark_cnt = %d, ",
+			 "under_punish_low_watermark_cnt = %d, total_kick_out_cnt = %d,"
+			 "total_add_back_cnt = %d",
 			 bw_estimate, bw_punish_triggered,
-			 under_punish_low_watermark_cnt);
+			 under_punish_low_watermark_cnt, total_kick_out_cnt,
+			 total_add_back_cnt);
 	}
 #endif
 }
