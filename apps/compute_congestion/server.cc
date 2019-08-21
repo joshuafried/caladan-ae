@@ -145,9 +145,8 @@ void HandleRequest(RequestContext *ctx,
   }
 }
 
-void ServerWorker(std::shared_ptr<rt::TcpConn> c) {
+void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPool> wpool) {
   auto resp = std::make_shared<SharedTcpStream>(c);
-  auto wpool = std::make_shared<SharedWorkerPool>("stridedmem:3200:64");
 
   /* allocate context */
   auto ctx = new RequestContext(resp);
@@ -178,10 +177,12 @@ void ServerHandler(void *arg) {
       rt::TcpQueue::Listen({0, kServerPort}, 4096));
   if (q == nullptr) panic("couldn't listen for connections");
 
+  auto wpool = std::make_shared<SharedWorkerPool>("stridedmem:3200:64");
+
   while (true) {
     rt::TcpConn *c = q->Accept();
     if (c == nullptr) panic("couldn't accept a connection");
-    rt::Thread([=] { ServerWorker(std::shared_ptr<rt::TcpConn>(c)); }).Detach();
+    rt::Thread([=] { ServerWorker(std::shared_ptr<rt::TcpConn>(c), wpool); }).Detach();
   }
 }
 
