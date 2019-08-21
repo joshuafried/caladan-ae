@@ -1,0 +1,55 @@
+# Makefile for netbench
+ROOT_PATH=../..
+include $(ROOT_PATH)/shared.mk
+
+lib_src = synthetic_worker.cc distribution.cc util.cc
+lib_obj = $(lib_src:.cc=.o)
+
+netbench_src = netbench.cc
+netbench_obj = $(netbench_src:.cc=.o)
+
+loadbalancer_src = loadbalancer.cc
+loadbalancer_obj = $(loadbalancer_src:.cc=.o)
+
+server_src = server.cc
+server_obj = $(server_src:.cc=.o)
+
+librt_libs = $(ROOT_PATH)/bindings/cc/librt++.a
+INC += -I$(ROOT_PATH)/bindings/cc
+
+RUNTIME_LIBS := $(RUNTIME_LIBS) -lnuma
+
+# must be first
+all: netbench loadbalancer server
+
+netbench: $(lib_obj) $(netbench_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(netbench_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
+loadbalancer: $(lib_obj) $(loadbalancer_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(loadbalancer_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
+server: $(lib_obj) $(server_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(server_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
+# general build rules for all targets
+src = $(lib_src) $(netbench_src) $(loadbalancer_src) $(server_src)
+obj = $(src:.cc=.o)
+dep = $(obj:.o=.d)
+
+ifneq ($(MAKECMDGOALS),clean)
+-include $(dep)   # include all dep files in the makefile
+endif
+
+# rule to generate a dep file by using the C preprocessor
+# (see man cpp for details on the -MM and -MT options)
+%.d: %.cc
+	@$(CXX) $(CXXFLAGS) $< -MM -MT $(@:.d=.o) >$@
+%.o: %.cc
+	$(CXX) $(CXXFLAGS) -c $< -o $@
+
+.PHONY: clean
+clean:
+	rm -f $(obj) $(dep) netbench loadbalancer server

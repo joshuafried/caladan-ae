@@ -23,19 +23,13 @@ stress_shm_query_obj = $(stress_shm_query_src:.cc=.o)
 interference_src = interference.cc
 interference_obj = $(interference_src:.cc=.o)
 
-loadbalancer_src = loadbalancer.cc
-loadbalancer_obj = $(loadbalancer_src:.cc=.o)
-
-server_src = server.cc
-server_obj = $(server_src:.cc=.o)
-
 librt_libs = $(ROOT_PATH)/bindings/cc/librt++.a
 INC += -I$(ROOT_PATH)/bindings/cc
 
 RUNTIME_LIBS := $(RUNTIME_LIBS) -lnuma
 
 # must be first
-all: netbench stress interference stress_linux stress_shm stress_shm_query loadbalancer server
+all: netbench stress interference stress_linux stress_shm stress_shm_query
 
 netbench: $(lib_obj) $(netbench_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(netbench_obj) \
@@ -59,17 +53,9 @@ interference: $(lib_obj) $(interference_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(interference_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
 
-loadbalancer: $(lib_obj) $(loadbalancer_obj) $(librt_libs) $(RUNTIME_DEPS)
-	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(loadbalancer_obj) \
-	$(librt_libs) $(RUNTIME_LIBS)
-
-server: $(lib_obj) $(server_obj) $(librt_libs) $(RUNTIME_DEPS)
-	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(server_obj) \
-	$(librt_libs) $(RUNTIME_LIBS)
-
 # general build rules for all targets
 src = $(lib_src) $(netbench_src) $(stress_src) $(interference_src) $(stress_linux_src) \
-        $(stress_shm_src) $(stress_shm_query_src) $(loadbalancer_src) $(server_src)
+        $(stress_shm_src) $(stress_shm_query_src)
 obj = $(src:.cc=.o)
 dep = $(obj:.o=.d)
 
@@ -86,4 +72,4 @@ endif
 
 .PHONY: clean
 clean:
-	rm -f $(obj) $(dep) netbench stress interference stress_linux stress_shm stress_shm_query loadbalancer server
+	rm -f $(obj) $(dep) netbench stress interference stress_linux stress_shm stress_shm_query

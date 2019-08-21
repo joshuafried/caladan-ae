@@ -214,7 +214,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c) {
     if (workn != 0) w->Work(workn);
     p.tsc_end = hton64(rdtscp(&p.cpu));
     p.cpu = hton32(p.cpu);
-    p.queueing_delay = hton32(rt::RuntimeQueueingDelayUS());
+    p.queueing_delay = hton64(rt::RuntimeQueueingDelayUS());
 
     // Send a work response.
     ssize_t sret = c->WriteFull(&p, ret);
@@ -699,8 +699,8 @@ void SteadyStateExperiment(int threads, double offered_rps,
     std::mt19937 dg(rand());
     std::exponential_distribution<double> rd(
         1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
-//    std::exponential_distribution<double> wd(1.0 / service_time);
-    return GenerateWork(std::bind(rd, rg), std::bind(GetBimodalRandom, dg), 0, kExperimentTime);
+    std::exponential_distribution<double> wd(1.0 / service_time);
+    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, kExperimentTime);
   });
 
   // Print the results.
