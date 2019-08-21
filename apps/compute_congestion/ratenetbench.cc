@@ -279,14 +279,25 @@ std::vector<work_unit> ClientWorker(
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
 
-  // window-based CC
-  // current window size
-  double cwnd = 4.0;
-  // number of outstanding requests
+  // rate-based CC
+  // current rate
+  uint64_t cur_rate = 38000; // 10k reqs/s
+  // Token Bucket to control the transmission rate
+  TokenBucket tb(cur_rate);
+  // The time when the rate is updated
+  time_point<steady_clock> last_update;
+  // previous standing queue to calcualate queue_diff;
+  uint64_t prev_standing_queue_us = 0;
+  // increment step
+  uint64_t delta = 20; // rate / us
+  // beta : decrement factor
+  double beta = 0.4;
+  uint32_t num_consecutive_neg_queue_diff = 0;
+  uint64_t ewma_queue_diff = 0;
+  int skip_update = 0;
+
   uint32_t num_outst_req = 0;
-  
   rt::Mutex m_;
-  rt::CondVar cv_;
 
   time_point<steady_clock> expstart;
 
@@ -316,37 +327,36 @@ std::vector<work_unit> ClientWorker(
                             queueing_delay);
       }
 
-      // window-based CC
-      double new_cwnd = cwnd;
-      unsigned int target_us = 25;
+      // rate-based CC
+      uint64_t new_rate = cur_rate;
+      uint64_t elapsed_time_us = duration_cast<microseconds>(ts - last_update).count();
+      unsigned int target_us = 30;
 
-      if (queueing_delay > (uint64_t)(target_us * 1.5)) {
-        if (num_outst_req <= cwnd || cwnd < 1.0)
-          new_cwnd = cwnd * 0.8;
-      } else if (queueing_delay <= target_us) {
-        if (cwnd > 1.0) {
-          new_cwnd = cwnd + 0.2/cwnd;
+      if (queueing_delay > target_us) {
+        if (skip_update > 0) {
+          skip_update--;
         } else {
-          double add_inc = cwnd + 0.002/cwnd;
-          add_inc = std::min<double>(add_inc, 0.02);
-          new_cwnd = cwnd + add_inc;
+          double mul_target = 1.25 - queueing_delay / (4.0 * target_us);
+          mul_target = std::max<double>(mul_target, 0.5);
+          double mul_dec = 1.0 + elapsed_time_us * (mul_target - 1.0) / 500.0;
+          mul_dec = std::max<double>(mul_dec, mul_target);
+          new_rate = cur_rate * mul_dec;
+          skip_update = num_outst_req-1;
+          tb.EmptyToken();
         }
       } else {
-        if (cwnd > 1.0)
-          new_cwnd = cwnd - 0.2;
-        else
-          new_cwnd = cwnd * 0.9;
+        double add_inc = delta * elapsed_time_us;
+        new_rate = cur_rate + add_inc;
       }
 
-      if (worker_id == 0) {
-        cwnds.emplace_back(duration_cast<sec>(ts - expstart).count(),
-                           new_cwnd);
-      }
+      // one flow should be at least 1 req / 1ms
+      new_rate = std::max<uint64_t>(new_rate, 1000);
 
+      cur_rate = new_rate;
+      tb.SetRate(cur_rate);
+      last_update = ts;
       m_.Lock();
       num_outst_req--;
-      cwnd = new_cwnd;
-      cv_.Signal();
       m_.Unlock();
     }
   });
@@ -358,6 +368,7 @@ std::vector<work_unit> ClientWorker(
   barrier();
   expstart = steady_clock::now();
   barrier();
+  last_update = expstart;
 
   payload p[kBatchSize];
   int j = 0;
@@ -379,25 +390,17 @@ std::vector<work_unit> ClientWorker(
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
 
-    // window-based CC
-    m_.Lock();
-    if ((double)(num_outst_req + 1) > cwnd && j > 0) {
+    // rate-based CC
+    while (!tb.RetrieveToken()) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
         panic("write failed, ret = %ld", ret);
       j = 0;
+      tb.SleepUntilNextToken();
+      tb.Update();
     }
 
-    while ((cwnd >= 1.0 && (double)(num_outst_req + 1) > cwnd) || 
-           (cwnd < 1.0 && num_outst_req > 0)) {
-      cv_.Wait(&m_);
-    }
-
-    if (cwnd < 1.0) {
-      double time_to_sleep = 50 / cwnd;
-      time_to_sleep = std::min<double>(time_to_sleep, 10000);
-      rt::Sleep((uint64_t)time_to_sleep);
-    }
+    m_.Lock();
     num_outst_req++;
     m_.Unlock();
 
@@ -421,6 +424,7 @@ std::vector<work_unit> ClientWorker(
     }
   }
 
+  // rt::Sleep(1 * rt::kSeconds);
   c->Shutdown(SHUT_RDWR);
   th.Join();
 
