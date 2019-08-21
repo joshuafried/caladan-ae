@@ -94,6 +94,26 @@ private:
   rt::Mutex sendMutex_;
 };
 
+class SharedWorkerPool {
+public:
+  SharedWorkerPool(std::string s) {
+    unsigned int max_cores = rt::RuntimeMaxCores();
+    idle_workers_.reserve(max_cores);
+    for(unsigned int i = 0 ; i < max_cores ; ++i) {
+      SyntheticWorker *w = SyntheticWorkerFactory(s);
+      std::shared_ptr<SyntheticWorker> shared_w(w);
+      idle_workers_[i] = shared_w;
+    }
+  }
+
+  std::shared_ptr<SyntheticWorker> GetWorker(unsigned int kthread_idx) {
+    return idle_workers_[kthread_idx];
+  }
+
+private:
+  std::vector<std::shared_ptr<SyntheticWorker>> idle_workers_;
+};
+
 class RequestContext {
 public:
   RequestContext(std::shared_ptr<SharedTcpStream> c) : conn(c) {}
@@ -107,13 +127,11 @@ public:
   void operator delete(void *p) { sfree(p); }
 };
 
-void HandleRequest(RequestContext *ctx) {
-  std::unique_ptr<SyntheticWorker> w(
-      SyntheticWorkerFactory("stridedmem:3200:64"));
-  if (w == nullptr) panic("couldn't create worker");
-
+void HandleRequest(RequestContext *ctx,
+                   std::shared_ptr<SharedWorkerPool> wpool) {
+  auto w = wpool->GetWorker(rt::RuntimeKthreadIdx());
   payload *p = &ctx->p;
-  
+
   // perform fake work
   uint64_t workn = ntoh64(p->work_iterations);
   if (workn != 0) w->Work(workn);
@@ -129,6 +147,7 @@ void HandleRequest(RequestContext *ctx) {
 
 void ServerWorker(std::shared_ptr<rt::TcpConn> c) {
   auto resp = std::make_shared<SharedTcpStream>(c);
+  auto wpool = std::make_shared<SharedWorkerPool>("stridedmem:3200:64");
 
   /* allocate context */
   auto ctx = new RequestContext(resp);
@@ -145,7 +164,7 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c) {
     }
 
     rt::Thread([=] {
-      HandleRequest(ctx);
+      HandleRequest(ctx, wpool);
       delete ctx;
     }).Detach();
     ctx = new RequestContext(resp);

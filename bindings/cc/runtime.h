@@ -39,4 +39,9 @@ inline unsigned int RuntimeGuaranteedCores() {
   return runtime_guaranteed_cores();
 }
 
+// Gets the kthread index
+inline unsigned int RuntimeKthreadIdx() {
+  return runtime_kthread_idx();
+}
+
 }; // namespace rt
