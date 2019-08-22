@@ -322,16 +322,16 @@ std::vector<work_unit> ClientWorker(
     }
   });
 
-
   // Start the health check thread
   auto hcth = rt::Thread([&] {
     uint64_t hc_period = 1000000; // 1s
-    int hc_time = static_cast<int>(kExperimentTime/hc_period);
+    int hc_time = static_cast<int>(kExperimentTime/hc_period) + 1;
     for(int i = 0; i < hc_time; ++i) {
       uptime u = ReadUptime();
       m_.Lock();
       load = static_cast<float>(u.load/1000000.0);
-      cv_.Signal();
+      if (load <= 0.95)
+        cv_.Signal();
       m_.Unlock();
 
       rt::Sleep(1000000);
@@ -339,7 +339,7 @@ std::vector<work_unit> ClientWorker(
     m_.Lock();
     load = 0.0;
     running = false;
-    cv_.SignalAll();
+    cv_.Signal();
     m_.Unlock();
   });
 
