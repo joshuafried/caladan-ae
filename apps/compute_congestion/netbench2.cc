@@ -23,6 +23,7 @@ extern "C" {
 #include <string>
 #include <utility>
 #include <vector>
+#include <atomic>
 
 /**
  *
@@ -137,22 +138,18 @@ public:
   bool RequestSend() {
     if (nif_ >= max_nif_)
       return false;
-    m_.Lock();
     nif_++;
-    m_.Unlock();
     return true;
   }
 
   void RecvResponse() {
-    m_.Lock();
     nif_--;
-    m_.Unlock();
   }
 
 private:
   // the number of in-flight requests
   uint32_t max_nif_;
-  uint32_t nif_;
+  std::atomic<uint32_t> nif_;
   rt::Mutex m_;
 };
 
@@ -407,7 +404,7 @@ std::vector<work_unit> RunExperiment(
   }
 
   // Create Cental Nreq monitor
-  auto monitor = std::make_shared<StatMonitor>(30);
+  auto monitor = std::make_shared<StatMonitor>(35);
 
   // Launch a worker thread for each connection.
   rt::WaitGroup starter(threads + 1);
