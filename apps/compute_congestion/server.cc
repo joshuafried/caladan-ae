@@ -16,6 +16,58 @@ extern "C" {
 #include <sstream>
 #include <string>
 #include <utility>
+#include <chrono>
+
+using namespace std::chrono;
+
+constexpr uint64_t kTBMaxToken = 32;
+class TokenBucket {
+public:
+  // rate : requests / sec
+  TokenBucket(uint64_t rate)
+    : refresh_interval_(1000000000 / rate),
+      token_(kTBMaxToken), clock_(steady_clock::now()) {}
+
+  void Update() {
+    barrier();
+    auto now = steady_clock::now();
+    barrier();
+
+    uint64_t elapsed_time_ns = duration_cast<nanoseconds>(now - clock_).count();
+
+    if (elapsed_time_ns >= refresh_interval_) {
+      int new_token = elapsed_time_ns / refresh_interval_;
+      assert(new_token > 0);
+      token_ += new_token;
+      token_ = std::min<uint64_t>(token_, kTBMaxToken);
+      clock_ += nanoseconds(new_token * refresh_interval_);
+    }
+  }
+
+  bool GetToken() {
+    if (token_ > 0) {
+      token_--;
+      return true;
+    }
+    return false;
+  }
+
+  void SetRate(uint64_t rate) {
+    refresh_interval_ = 1000000000 / rate;
+  }
+
+  uint64_t GetRate() {
+    return (1000000000 / refresh_interval_);
+  }
+
+private:
+  // token refill time (ns / req)
+  uint64_t refresh_interval_;
+  // the number of remaining token (reqs)
+  uint64_t token_;
+  // internal timer
+  time_point<steady_clock> clock_;
+};
 
 constexpr uint64_t kUptimePort = 8002;
 constexpr uint64_t kUptimeMagic = 0xDEADBEEF;
