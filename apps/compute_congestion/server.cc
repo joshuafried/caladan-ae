@@ -11,11 +11,118 @@ extern "C" {
 #include "synthetic_worker.h"
 #include "thread.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <utility>
+
+using namespace std::chrono;
+
+constexpr uint64_t kTBMaxToken = 32;
+class TokenBucket {
+public:
+  // rate : requests / sec
+  TokenBucket(uint64_t rate)
+    : refresh_interval_(1000000000 / rate),
+      token_(kTBMaxToken), clock_(steady_clock::now()) {}
+
+  void Update() {
+    barrier();
+    auto now = steady_clock::now();
+    barrier();
+
+    uint64_t elapsed_time_ns = duration_cast<nanoseconds>(now - clock_).count();
+
+    if (elapsed_time_ns >= refresh_interval_) {
+      int new_token = elapsed_time_ns / refresh_interval_;
+      assert(new_token > 0);
+      token_ += new_token;
+      token_ = std::min<uint64_t>(token_, kTBMaxToken);
+      clock_ += nanoseconds(new_token * refresh_interval_);
+    }
+  }
+
+  bool GetToken() {
+    if (token_ > 0) {
+      token_--;
+      return true;
+    }
+    return false;
+  }
+
+  void SetRate(uint64_t rate) {
+    refresh_interval_ = 1000000000 / rate;
+  }
+
+  uint64_t GetRate() {
+    return (1000000000 / refresh_interval_);
+  }
+
+private:
+  // token refill time (ns / req)
+  uint64_t refresh_interval_;
+  // the number of remaining token (reqs)
+  uint64_t token_;
+  // internal timer
+  time_point<steady_clock> clock_;
+};
+
+constexpr uint32_t RCTarget = 100;
+constexpr uint32_t RCInit = 1000;
+constexpr uint32_t RCVSize = 100;
+class RateController {
+public:
+  RateController(std::shared_ptr<TokenBucket> tb) : 
+    tb_(tb), i_(0), ninety_percentile_(RCTarget), cur_rate_(RCInit) {
+      resp_times_.reserve(RCVSize);
+      tb_->SetRate(RCInit); // initial rate setting: 1k req / s
+    }
+
+  void SampleResponseTime(uint64_t response_time_us) {
+    m_.Lock();
+    resp_times_[i_++] = response_time_us;
+    if (i_ == 100) {
+      std::sort(resp_times_.begin(), resp_times_.begin()+RCVSize);
+      ninety_percentile_ = static_cast<uint32_t>(0.7 * ninety_percentile_ + 0.3* resp_times_[89]);
+
+      double err = ((double)ninety_percentile_ - (double)RCTarget) / (double)RCTarget;
+      uint32_t new_rate = cur_rate_;
+      if (err > 0) {
+        new_rate = static_cast<uint32_t>(cur_rate_ / 1.2);
+      } else if (err < - 0.5) {
+        new_rate = static_cast<uint32_t>(cur_rate_ - (err + 0.1) * 2.0);
+      }
+      new_rate = std::max<uint32_t>(new_rate, 1);
+      new_rate = std::min<uint32_t>(new_rate, 1000000);
+      cur_rate_ = new_rate;
+      tb_->SetRate(cur_rate_);
+      i_ = 0;
+    }
+    m_.Unlock();
+  }
+
+  bool RequestSend() {
+    bool ret;
+    m_.Lock();
+    tb_->Update();
+    ret = tb_->GetToken();
+    m_.Unlock();
+
+    return ret;
+  }
+
+private:
+  std::shared_ptr<TokenBucket> tb_;
+  std::atomic<uint32_t> i_;
+  uint32_t ninety_percentile_;
+  uint32_t cur_rate_;
+  std::vector<uint32_t> resp_times_;
+  rt::Mutex m_;
+};
 
 constexpr uint64_t kUptimePort = 8002;
 constexpr uint64_t kUptimeMagic = 0xDEADBEEF;
@@ -145,7 +252,8 @@ void HandleRequest(RequestContext *ctx,
   }
 }
 
-void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPool> wpool) {
+void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPool> wpool,
+                  std::shared_ptr<RateController> rc) {
   auto resp = std::make_shared<SharedTcpStream>(c);
 
   /* allocate context */
@@ -162,9 +270,20 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
       return;
     }
 
+    if (!rc->RequestSend()) {
+      delete ctx;
+      ctx = new RequestContext(resp);
+      continue;
+    }
+
+    barrier();
+    time_point<steady_clock> start_time = steady_clock::now();
+    barrier();
     rt::Thread([=] {
       HandleRequest(ctx, wpool);
       delete ctx;
+      auto now = steady_clock::now();
+      rc->SampleResponseTime(duration_cast<microseconds>(now - start_time).count());
     }).Detach();
     ctx = new RequestContext(resp);
   }
@@ -178,11 +297,13 @@ void ServerHandler(void *arg) {
   if (q == nullptr) panic("couldn't listen for connections");
 
   auto wpool = std::make_shared<SharedWorkerPool>("stridedmem:3200:64");
+  TokenBucket *tb = new TokenBucket(1000);
+  auto rc = std::make_shared<RateController>(std::shared_ptr<TokenBucket>(tb));
 
   while (true) {
     rt::TcpConn *c = q->Accept();
     if (c == nullptr) panic("couldn't accept a connection");
-    rt::Thread([=] { ServerWorker(std::shared_ptr<rt::TcpConn>(c), wpool); }).Detach();
+    rt::Thread([=] { ServerWorker(std::shared_ptr<rt::TcpConn>(c), wpool, rc); }).Detach();
   }
 }
 
