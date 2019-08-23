@@ -23,6 +23,7 @@ extern "C" {
 #include <string>
 #include <utility>
 #include <vector>
+#include <atomic>
 
 /**
  *
@@ -128,6 +129,28 @@ private:
   uint64_t token_; 
   // internal timer
   time_point<steady_clock> clock_;
+};
+
+class StatMonitor {
+public:
+  StatMonitor(uint32_t max_nif) : max_nif_(max_nif), nif_(0) {}
+
+  bool RequestSend() {
+    if (nif_ >= max_nif_)
+      return false;
+    nif_++;
+    return true;
+  }
+
+  void RecvResponse() {
+    nif_--;
+  }
+
+private:
+  // the number of in-flight requests
+  uint32_t max_nif_;
+  std::atomic<uint32_t> nif_;
+  rt::Mutex m_;
 };
 
 constexpr uint64_t kUptimePort = 8002;
@@ -279,22 +302,11 @@ std::vector<work_unit> ClientWorker(
     rt::TcpConn *c, rt::WaitGroup *starter,
     std::function<std::vector<work_unit>()> wf,
     int worker_id,
-    std::vector<std::pair<uint64_t, uint64_t>> &queues,
-    std::vector<std::pair<uint64_t, double>> &cwnds) {
+    std::shared_ptr<StatMonitor> monitor) {
   constexpr int kBatchSize = 32;
   std::vector<work_unit> w(wf());
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
-
-  // window-based CC
-  // current window size
-  // number of outstanding request
-  double cwnd = 1.0;
-  // number of outstanding requests
-  uint32_t num_outst_req = 0;
-  
-  rt::Mutex m_;
-  rt::CondVar cv_;
 
   time_point<steady_clock> expstart;
 
@@ -317,17 +329,7 @@ std::vector<work_unit> ClientWorker(
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
 
-      uint64_t queueing_delay = ntoh64(rp.queueing_delay);
-
-      if (worker_id == 0) {
-        queues.emplace_back(duration_cast<sec>(ts - expstart).count(),
-                            queueing_delay);
-      }
-
-      m_.Lock();
-      num_outst_req--;
-      cv_.Signal();
-      m_.Unlock();
+      monitor->RecvResponse();
     }
   });
 
@@ -348,8 +350,6 @@ std::vector<work_unit> ClientWorker(
     auto now = steady_clock::now();
     barrier();
 
-    if (duration_cast<sec>(now - expstart).count() > kExperimentTime) break;
-
     if (duration_cast<sec>(now - expstart).count() < w[i].start_us) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
@@ -359,27 +359,12 @@ std::vector<work_unit> ClientWorker(
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
 
-    // window-based CC
-    m_.Lock();
-    if ((double)(num_outst_req + 1) > cwnd && j > 0) {
-      ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
-      if (ret != static_cast<ssize_t>(sizeof(payload) * j))
-        panic("write failed, ret = %ld", ret);
-      j = 0;
-    }
+    if (duration_cast<sec>(now - expstart).count() - w[i].start_us > kMaxCatchUpUS)
+      continue;
 
-    while ((cwnd >= 1.0 && (double)(num_outst_req + 1) > cwnd) || 
-           (cwnd < 1.0 && num_outst_req > 0)) {
-      cv_.Wait(&m_);
+    if (!monitor->RequestSend()) {
+      continue;
     }
-
-    if (cwnd < 1.0) {
-      double time_to_sleep = 50 / cwnd;
-      time_to_sleep = std::min<double>(time_to_sleep, 10000);
-      rt::Sleep((uint64_t)time_to_sleep);
-    }
-    num_outst_req++;
-    m_.Unlock();
 
     barrier();
     timings[i] = steady_clock::now();
@@ -418,15 +403,16 @@ std::vector<work_unit> RunExperiment(
     conns.emplace_back(std::move(outc));
   }
 
+  // Create Cental Nreq monitor
+  auto monitor = std::make_shared<StatMonitor>(35);
+
   // Launch a worker thread for each connection.
   rt::WaitGroup starter(threads + 1);
   std::vector<rt::Thread> th;
   std::unique_ptr<std::vector<work_unit>> samples[threads];
-  std::vector<std::pair<uint64_t, uint64_t>> queues;
-  std::vector<std::pair<uint64_t, double>> cwnds;
   for (int i = 0; i < threads; ++i) {
     th.emplace_back(rt::Thread([&, i] {
-      auto v = ClientWorker(conns[i].get(), &starter, wf, i, queues, cwnds);
+      auto v = ClientWorker(conns[i].get(), &starter, wf, i, monitor);
       samples[i].reset(new std::vector<work_unit>(std::move(v)));
     }));
   }
@@ -513,7 +499,7 @@ std::vector<work_unit> RunExperiment(
     std::cout << std::endl;
   }
 */
-
+/*
 // Print aggregated throughput
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.timing == 0; }),
@@ -543,7 +529,8 @@ std::vector<work_unit> RunExperiment(
     if (next_target > 10000) break;
   }
   agt_out.close();
-
+*/
+/*
   // Print queue info for flow 0
   std::ofstream q_out;
   q_out.open("q.out");
@@ -561,7 +548,7 @@ std::vector<work_unit> RunExperiment(
     cwnd_out << c.first / 1000.0 << "," << c.second << std::endl;
   }
   cwnd_out.close();
-
+*/
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),

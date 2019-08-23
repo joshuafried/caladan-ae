@@ -285,13 +285,9 @@ std::vector<work_unit> ClientWorker(
   std::vector<work_unit> w(wf());
   std::vector<time_point<steady_clock>> timings;
   timings.reserve(w.size());
-  
-  rt::Mutex m_;
-  rt::CondVar cv_;
 
   time_point<steady_clock> expstart;
   float load = 0.0;
-  bool running = true;
 
   // Start the receiver thread.
   auto th = rt::Thread([&] {
@@ -322,25 +318,16 @@ std::vector<work_unit> ClientWorker(
     }
   });
 
-
   // Start the health check thread
   auto hcth = rt::Thread([&] {
-    uint64_t hc_period = 1000000; // 1s
-    int hc_time = static_cast<int>(kExperimentTime/hc_period);
+    uint64_t hc_period = 50000; // 1ms
+    int hc_time = static_cast<int>(kExperimentTime/hc_period) + 1;
     for(int i = 0; i < hc_time; ++i) {
       uptime u = ReadUptime();
-      m_.Lock();
       load = static_cast<float>(u.load/1000000.0);
-      cv_.Signal();
-      m_.Unlock();
 
-      rt::Sleep(1000000);
+      rt::Sleep(hc_period);
     }
-    m_.Lock();
-    load = 0.0;
-    running = false;
-    cv_.SignalAll();
-    m_.Unlock();
   });
 
   // Synchronized start of load generation.
@@ -360,8 +347,6 @@ std::vector<work_unit> ClientWorker(
     auto now = steady_clock::now();
     barrier();
 
-    if (duration_cast<sec>(now - expstart).count() > kExperimentTime) break;
-
     if (duration_cast<sec>(now - expstart).count() < w[i].start_us) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
@@ -370,18 +355,12 @@ std::vector<work_unit> ClientWorker(
       now = steady_clock::now();
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
-    
-    m_.Lock();
-    if (load > 0.95 && j > 0) {
-      ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
-      panic("write failed, ret = %ld", ret);
-      j = 0;
-    }
 
-    while (load > 0.95 && running) cv_.Wait(&m_);
-    m_.Unlock();
+    if (duration_cast<sec>(now - expstart).count() - w[i].start_us > kMaxCatchUpUS)
+      continue;
 
-    if (!running) break;
+    if (load > 0.9999)
+      continue;
 
     barrier();
     timings[i] = steady_clock::now();
@@ -663,7 +642,7 @@ void LoadShiftExperiment(int threads,
 void ClientHandler(void *arg) {
   // LoadShiftExperiment(threads, rates, st);
 #if 1
-  for (double i = 2400000; i <= 3000000; i += 100000) {
+  for (double i = 100000; i <= 3000000; i += 100000) {
     SteadyStateExperiment(threads, i, st);
   }
 #endif
