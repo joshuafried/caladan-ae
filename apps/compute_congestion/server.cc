@@ -11,12 +11,14 @@ extern "C" {
 #include "synthetic_worker.h"
 #include "thread.h"
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
 #include <utility>
-#include <chrono>
 
 using namespace std::chrono;
 
@@ -67,6 +69,60 @@ private:
   uint64_t token_;
   // internal timer
   time_point<steady_clock> clock_;
+};
+
+constexpr uint32_t RCTarget = 100;
+constexpr uint32_t RCInit = 1000;
+class RateController {
+public:
+  RateController(std::shared_ptr<TokenBucket> tb) : 
+    tb_(tb), i_(0), ninety_percentile_(0), cur_rate_(RCInit) {
+      resp_times_.reserve(100);
+      tb_->SetRate(RCInit); // initial rate setting: 1k req / s
+    }
+
+  void SampleResponseTime(uint64_t response_time_us) {
+    m_.Lock();
+    resp_times_[i_++] = response_time_us;
+
+    if (i_ == 100) {
+      std::sort(resp_times_.begin(), resp_times_.end(),
+                [](const uint32_t &t1, const uint32_t &t2) { return t1 < t2; });
+      ninety_percentile_ = static_cast<uint32_t>(0.7 * ninety_percentile_ + 0.3* resp_times_[89]);
+
+      double err = (ninety_percentile_ - RCTarget) / (double)RCTarget;
+      uint32_t new_rate = cur_rate_;
+      if (err > 0) {
+        new_rate = static_cast<uint32_t>(cur_rate_ / 1.2);
+      } else if (err < - 0.5) {
+        new_rate = static_cast<uint32_t>(cur_rate_ - (err + 0.1) * 2.0);
+      }
+      new_rate = std::max<uint32_t>(new_rate, 1);
+      new_rate = std::min<uint32_t>(new_rate, 1000000);
+      cur_rate_ = new_rate;
+      tb_->SetRate(cur_rate_);
+      i_ = 0;
+    }
+    m_.Unlock();
+  }
+
+  bool RequestSend() {
+    bool ret;
+    m_.Lock();
+    tb_->Update();
+    ret = tb_->GetToken();
+    m_.Unlock();
+
+    return ret;
+  }
+
+private:
+  std::shared_ptr<TokenBucket> tb_;
+  std::atomic<uint32_t> i_;
+  uint32_t ninety_percentile_;
+  uint32_t cur_rate_;
+  std::vector<uint32_t> resp_times_;
+  rt::Mutex m_;
 };
 
 constexpr uint64_t kUptimePort = 8002;
