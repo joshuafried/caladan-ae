@@ -404,7 +404,7 @@ std::vector<work_unit> RunExperiment(
   }
 
   // Create Cental Nreq monitor
-  auto monitor = std::make_shared<StatMonitor>(35);
+  auto monitor = std::make_shared<StatMonitor>(20);
 
   // Launch a worker thread for each connection.
   rt::WaitGroup starter(threads + 1);
@@ -602,9 +602,9 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
 
 double GetBimodalRandom(std::mt19937 rgen) {
   if (rgen() > (unsigned int)0xe6666665) {
-    return 1.0;
+    return 1000.0;
   } else {
-    return 100.0;
+    return 10.0;
   }
 }
 

@@ -595,9 +595,9 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
 
 double GetBimodalRandom(std::mt19937 rgen) {
   if (rgen() > (unsigned int)0xe6666665) {
-    return 1.0;
+    return 1000.0;
   } else {
-    return 100.0;
+    return 10.0;
   }
 }
 

@@ -400,7 +400,7 @@ std::vector<work_unit> ClientWorker(
     }
     num_outst_req++;
     m_.Unlock();
-
+    
     barrier();
     timings[i] = steady_clock::now();
     barrier();
@@ -635,9 +635,9 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
 
 double GetBimodalRandom(std::mt19937 rgen) {
   if (rgen() > (unsigned int)0xe6666665) {
-    return 1.0;
+    return 1000.0;
   } else {
-    return 100.0;
+    return 10.0;
   }
 }
 
@@ -682,7 +682,7 @@ void LoadShiftExperiment(int threads,
 void ClientHandler(void *arg) {
   // LoadShiftExperiment(threads, rates, st);
 #if 1
-  for (double i = 2000000; i <= 2000000; i += 100000) {
+  for (double i = 100000; i <= 3000000; i += 100000) {
     SteadyStateExperiment(threads, i, st);
   }
 #endif
