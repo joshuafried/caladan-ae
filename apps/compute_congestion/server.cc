@@ -71,8 +71,8 @@ private:
   time_point<steady_clock> clock_;
 };
 
-constexpr uint32_t RCTarget = 100;
-constexpr uint32_t RCInit = 1000;
+constexpr uint32_t RCTarget = 10000;
+constexpr uint32_t RCInit = 10000;
 constexpr uint32_t RCVSize = 100;
 class RateController {
 public:
@@ -94,7 +94,7 @@ public:
       if (err > 0) {
         new_rate = static_cast<uint32_t>(cur_rate_ / 1.2);
       } else if (err < - 0.5) {
-        new_rate = static_cast<uint32_t>(cur_rate_ - (err + 0.1) * 2.0);
+        new_rate = static_cast<uint32_t>(cur_rate_ - (err + 0.1) * 200.0);
       }
       new_rate = std::max<uint32_t>(new_rate, 1);
       new_rate = std::min<uint32_t>(new_rate, 1000000);
@@ -129,6 +129,7 @@ constexpr uint64_t kUptimeMagic = 0xDEADBEEF;
 struct uptime {
   uint64_t idle;
   uint64_t busy;
+//  uint32_t load;
 };
 
 void UptimeWorker(std::unique_ptr<rt::TcpConn> c) {
@@ -157,6 +158,7 @@ void UptimeWorker(std::unique_ptr<rt::TcpConn> c) {
         steal >> guest >> guest_nice;
     uptime u = {hton64(idle + iowait),
                 hton64(user + nice + system + irq + softirq + steal)};
+//                hton32(static_cast<uint32_t>(rt::RuntimeLoad() * 1000000.0))};
 
     // Send an uptime response.
     ssize_t sret = c->WriteFull(&u, sizeof(u));
@@ -269,7 +271,20 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
       delete ctx;
       return;
     }
-
+/*
+    if (rt::RuntimeLoad() > 0.9999){
+      delete ctx;
+      ctx = new RequestContext(resp);
+      continue;
+    }
+    */
+/*
+    if (rt::RuntimeQueueingDelayUS() > 100) {
+      delete ctx;
+      ctx = new RequestContext(resp);
+      continue;
+    }*/
+/*
     if (!rc->RequestSend()) {
       delete ctx;
       ctx = new RequestContext(resp);
@@ -277,13 +292,14 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
     }
 
     barrier();
-    time_point<steady_clock> start_time = steady_clock::now();
+    auto now = steady_clock::now();
     barrier();
+*/
     rt::Thread([=] {
       HandleRequest(ctx, wpool);
       delete ctx;
-      auto now = steady_clock::now();
-      rc->SampleResponseTime(duration_cast<microseconds>(now - start_time).count());
+//      auto ts = steady_clock::now();
+//      rc->SampleResponseTime(duration_cast<microseconds>(ts - now).count());
     }).Detach();
     ctx = new RequestContext(resp);
   }
