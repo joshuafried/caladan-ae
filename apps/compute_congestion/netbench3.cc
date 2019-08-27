@@ -593,7 +593,7 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << max << std::endl;
 }
 
-double GetBimodalRandom(std::mt19937 rgen) {
+double GetBimodalRandom(std::mt19937 &rgen) {
   if (rgen() > (unsigned int)0xe6666665) {
     return 1000.0;
   } else {
