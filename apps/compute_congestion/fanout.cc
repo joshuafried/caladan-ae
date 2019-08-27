@@ -15,6 +15,7 @@ extern "C" {
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -25,6 +26,8 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
+// Port number of the Fanout node
+constexpr uint64_t kFanoutPort = 8001;
 // Port number of the leaf node server
 constexpr uint64_t kLeafPort = 8001;
 // A prime number as hash size gives a better distribution of values in buckets
@@ -215,8 +218,98 @@ private:
   const size_t hashSize;
 };
 
-void FanoutHandler(void *arg) {
+class SharedTcpStream {
+public:
+  SharedTcpStream(std::shared_ptr<rt::TcpConn> c) : c_(c) {}
+  ssize_t WriteFull(const void *buf, size_t len) {
+    rt::ScopedLock<rt::Mutex> lock(&sendMutex_);
+    return c_->WriteFull(buf, len);
+  }
 
+private:
+  std::shared_ptr<rt::TcpConn> c_;
+  rt::Mutex sendMutex_;
+};
+
+struct payload {
+  uint64_t work_iterations;
+  uint64_t index;
+  uint64_t tsc_end;
+  uint32_t cpu;
+  uint64_t queueing_delay;
+};
+
+void FanoutWorker(std::shared_ptr<rt::TcpConn> c) {
+  // tracker_by_id
+//  auto tracker_by_id = std::make_shared<HashMap<uint64_t, FanoutTracker*>>();
+
+  // Connection to the parent node
+  auto parent = std::make_shared<SharedTcpStream>(c);
+
+  // Connection to the leaf nodes
+  std::vector<std::unique_ptr<rt::TcpConn>> children;
+  children.reserve(num_leafs);
+
+  // Receiver threads
+  std::vector<rt::Thread> th; 
+
+  // Dial to the leaf nodes
+  for (int i = 0; i < num_leafs; ++i) {
+    std::unique_ptr<rt::TcpConn> leafc(rt::TcpConn::Dial({0, 0}, laddrs[i]));
+    if (unlikely(leafc == nullptr)) panic("couldn't connect to leaf node.");
+    children.emplace_back(std::move(leafc));
+  }
+
+  // Start the receiver thread for leaf nodes
+  for (int i = 0; i < num_leafs; ++i) {
+    th.emplace_back(rt::Thread([&, i] {
+      payload rp;
+
+      while (true) {
+        ssize_t ret = children[i]->ReadFull(&rp, sizeof(rp));
+        if (ret != static_cast<ssize_t>(sizeof(rp))) {
+          if (ret == 0 || ret < 0) break;
+          panic("read failed, ret = %ld", ret);
+        }
+
+        // tracket_by_id [index] and decrement the wait counter
+        //
+        // if wait coutner == 0 ; return response to parent
+        // parent->WriteFull();
+      }
+    }));
+  }
+
+  payload p;
+  
+  while (true) {
+    ssize_t ret = c->ReadFull(&p, sizeof(p));
+    if (ret != static_cast<ssize_t>(sizeof(p))) {
+      if (ret == 0 || ret < 0) break;
+      panic("read failed, ret = %ld", ret);
+    }
+
+    // Create tracker and assign tracker_by_id;
+    // Fanout to the leafnodes
+  }
+
+  for (int i = 0; i < num_leafs; ++i)
+    children[i]->Shutdown(SHUT_RDWR);
+  for (auto &t : th) t.Join();
+
+  // clean tracker_by_id;
+}
+
+void FanoutHandler(void *arg) {
+  std::unique_ptr<rt::TcpQueue> q(
+      rt::TcpQueue::Listen({0, kFanoutPort}, 4096));
+  if (q == nullptr) panic("couldn't listen for connections");
+
+  while (true) {
+    rt::TcpConn *c = q->Accept();
+    if (c == nullptr) panic("couldn't accept a connection");
+    rt::Thread([=] { FanoutWorker(std::shared_ptr<rt::TcpConn>(c)); }).Detach();
+  }
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {
