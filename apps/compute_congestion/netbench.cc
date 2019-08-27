@@ -261,6 +261,7 @@ template <class Arrival, class Service>
 std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
                                     double last_us) {
   std::vector<work_unit> w;
+
   while (cur_us < last_us) {
     cur_us += a();
     w.emplace_back(work_unit{cur_us, s(), 0, 0});
@@ -368,7 +369,7 @@ std::vector<work_unit> ClientWorker(
     auto now = steady_clock::now();
     barrier();
 
-    if (duration_cast<sec>(now - expstart).count() > kExperimentTime) break;
+    //if (duration_cast<sec>(now - expstart).count() > kExperimentTime) break;
 
     if (duration_cast<sec>(now - expstart).count() < w[i].start_us) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
@@ -379,6 +380,20 @@ std::vector<work_unit> ClientWorker(
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
 
+    if (duration_cast<sec>(now - expstart).count() - w[i].start_us > kMaxCatchUpUS)
+      continue;
+
+    if (((cwnd >= 1.0) && ((double)(num_outst_req + 1) > cwnd)) ||
+        ((cwnd < 1.0) && (num_outst_req > 0)))
+      continue;
+
+    if (cwnd < 1.0) {
+      double time_to_sleep = 50.0 / cwnd;
+      time_to_sleep = std::min<double>(time_to_sleep, 10000);
+      rt::Sleep(static_cast<uint64_t>(time_to_sleep));
+    }
+
+    /*
     // window-based CC
     m_.Lock();
     if ((double)(num_outst_req + 1) > cwnd && j > 0) {
@@ -398,6 +413,11 @@ std::vector<work_unit> ClientWorker(
       time_to_sleep = std::min<double>(time_to_sleep, 10000);
       rt::Sleep((uint64_t)time_to_sleep);
     }
+    num_outst_req++;
+    m_.Unlock();
+    */
+
+    m_.Lock();
     num_outst_req++;
     m_.Unlock();
     
@@ -533,7 +553,7 @@ std::vector<work_unit> RunExperiment(
     std::cout << std::endl;
   }
 */
-
+/*
 // Print aggregated throughput
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.timing == 0; }),
@@ -563,7 +583,8 @@ std::vector<work_unit> RunExperiment(
     if (next_target > 10000) break;
   }
   agt_out.close();
-
+*/
+/*
   // Print queue info for flow 0
   std::ofstream q_out;
   q_out.open("q.out");
@@ -572,7 +593,8 @@ std::vector<work_unit> RunExperiment(
     q_out << q.first / 1000.0 << "," << q.second << std::endl;
   }
   q_out.close();
-
+*/
+/*
   // Print cwnd info for flow 0
   std::ofstream cwnd_out;
   cwnd_out.open("cwnd.out");
@@ -581,7 +603,7 @@ std::vector<work_unit> RunExperiment(
     cwnd_out << c.first / 1000.0 << "," << c.second << std::endl;
   }
   cwnd_out.close();
-
+*/
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),
@@ -633,7 +655,7 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << max << std::endl;
 }
 
-double GetBimodalRandom(std::mt19937 rgen) {
+double GetBimodalRandom(std::mt19937 &rgen) {
   if (rgen() > (unsigned int)0xe6666665) {
     return 1000.0;
   } else {
