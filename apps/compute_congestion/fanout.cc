@@ -73,7 +73,7 @@ public:
   bool find(const K &key, V &value) {
     // A shared mutex is used to enable mutiple concurrent reads
     {
-      rt::ScopedLock<rt::Mutex> lk(bucket_lock_);
+      rt::ScopedLock<rt::Mutex> lk(&bucket_lock_);
       HashNode<K, V> * node = head;
 
       while (node != nullptr) {
@@ -92,7 +92,7 @@ public:
   void insert(const K &key, const V &value) {
     // Exclusive lock to enable single write in the bucket
     {
-      rt::ScopedLock<rt::Mutex> lk(bucket_lock_);
+      rt::ScopedLock<rt::Mutex> lk(&bucket_lock_);
       HashNode<K, V> * prev = nullptr;
       HashNode<K, V> * node = head;
 
@@ -120,7 +120,7 @@ public:
   void erase(const K &key) {
     // Exclusive lock to enable single write in the bucket
     {
-      rt::ScopedLock<rt::Mutex> lk(bucket_lock_);
+      rt::ScopedLock<rt::Mutex> lk(&bucket_lock_);
       HashNode<K, V> *prev  = nullptr;
       HashNode<K, V> * node = head;
 
@@ -147,7 +147,7 @@ public:
   // Clear the bucket
   void clear() {
     {
-      rt::ScopedLock<rt::Mutex> lk(bucket_lock_);
+      rt::ScopedLock<rt::Mutex> lk(&bucket_lock_);
       HashNode<K, V> * prev = nullptr;
       HashNode<K, V> * node = head;
       while(node != nullptr) {
@@ -166,7 +166,7 @@ private:
   rt::Mutex bucket_lock_;
 };
 
-// Per-bucket HashMap
+// Per-bucket Lock HashMap
 template <typename K, typename V, typename F = std::hash<K> >
 class HashMap {
 public:
@@ -218,6 +218,54 @@ private:
   const size_t hashSize;
 };
 
+constexpr int kFanoutSize = 4;
+// Upstream Payload
+struct payloadu {
+  uint64_t work_iterations[kFanoutSize];
+  uint64_t index;
+  uint64_t tsc_end;
+  uint32_t cpu;
+  uint64_t queueing_delay;
+};
+
+// Downstream Payload
+struct payloadd {
+  uint64_t work_iterations;
+  uint64_t index;
+  uint64_t tsc_end;
+  uint32_t cpu;
+  uint64_t queueing_delay;
+};
+
+class FanoutTracker {
+public:
+  FanoutTracker(int fanout_size, payloadu p) : 
+    response_waiting_(fanout_size), p_(p), max_delay_(0) {}
+
+  int ReceiveResponse(uint64_t queueing_delay) {
+    rt::ScopedLock<rt::Spin> l(&s_);
+    response_waiting_--;
+    if (queueing_delay > max_delay_)
+      max_delay_ = queueing_delay;
+    return response_waiting_;
+  }
+
+  payloadu GetPayload() {
+    p_.queueing_delay = hton64(rt::RuntimeQueueingDelayUS() + max_delay_);
+    return p_;
+  }
+
+private:
+  // Spin lock for response_waiting_
+  rt::Spin s_;
+  // The number of downstream responses waiting for
+  int response_waiting_;
+  // Upstream response payload
+  payloadu p_;
+  // Maximum queueing delay of the responses
+  uint64_t max_delay_;
+};
+
 class SharedTcpStream {
 public:
   SharedTcpStream(std::shared_ptr<rt::TcpConn> c) : c_(c) {}
@@ -231,17 +279,12 @@ private:
   rt::Mutex sendMutex_;
 };
 
-struct payload {
-  uint64_t work_iterations;
-  uint64_t index;
-  uint64_t tsc_end;
-  uint32_t cpu;
-  uint64_t queueing_delay;
-};
-
 void FanoutWorker(std::shared_ptr<rt::TcpConn> c) {
   // tracker_by_id
-//  auto tracker_by_id = std::make_shared<HashMap<uint64_t, FanoutTracker*>>();
+  auto tracker_by_id = std::make_shared<HashMap<uint64_t, FanoutTracker*>>();
+
+  // downstream index
+  uint64_t next_index = 0;
 
   // Connection to the parent node
   auto parent = std::make_shared<SharedTcpStream>(c);
@@ -263,7 +306,7 @@ void FanoutWorker(std::shared_ptr<rt::TcpConn> c) {
   // Start the receiver thread for leaf nodes
   for (int i = 0; i < num_leafs; ++i) {
     th.emplace_back(rt::Thread([&, i] {
-      payload rp;
+      payloadd rp;
 
       while (true) {
         ssize_t ret = children[i]->ReadFull(&rp, sizeof(rp));
@@ -272,15 +315,32 @@ void FanoutWorker(std::shared_ptr<rt::TcpConn> c) {
           panic("read failed, ret = %ld", ret);
         }
 
-        // tracket_by_id [index] and decrement the wait counter
-        //
-        // if wait coutner == 0 ; return response to parent
-        // parent->WriteFull();
+        uint64_t index = ntoh64(rp.index);
+        uint64_t queueing_delay = ntoh64(rp.queueing_delay);
+        int remaining_response;
+        FanoutTracker* ft = nullptr;
+
+        tracker_by_id->find(index, ft);
+        assert(ft);
+        remaining_response = ft->ReceiveResponse(queueing_delay);
+
+        if (remaining_response == 0) {
+          payloadu up = ft->GetPayload();
+          tracker_by_id->erase(index);
+          delete ft;
+
+          ssize_t sret = parent->WriteFull(&up, sizeof(up));
+          if (sret != static_cast<ssize_t>(sizeof(up))) {
+            if (sret == -EPIPE || sret == -ECONNRESET) break;
+            log_err("write failed, ret = %ld", sret);
+            break;
+          }
+        }
       }
     }));
   }
 
-  payload p;
+  payloadu p;
   
   while (true) {
     ssize_t ret = c->ReadFull(&p, sizeof(p));
@@ -290,14 +350,33 @@ void FanoutWorker(std::shared_ptr<rt::TcpConn> c) {
     }
 
     // Create tracker and assign tracker_by_id;
+    FanoutTracker *ft = new FanoutTracker(kFanoutSize, p);
+
     // Fanout to the leafnodes
+    for (int i = 0; i < kFanoutSize; ++i) {
+      tracker_by_id->insert(next_index, ft);
+      payloadd pd;
+      pd.work_iterations = p.work_iterations[i];
+      pd.index = hton64(next_index);
+
+      // Send downstream request
+      ssize_t sret = children[i]->WriteFull(&pd, sizeof(pd));
+      if (sret != static_cast<ssize_t>(sizeof(pd))) {
+        if (sret == -EPIPE || sret == -ECONNRESET) break;
+        log_err("write failed, ret = %ld", sret);
+        break;
+      }
+
+      next_index++;
+    }
   }
 
   for (int i = 0; i < num_leafs; ++i)
     children[i]->Shutdown(SHUT_RDWR);
   for (auto &t : th) t.Join();
 
-  // clean tracker_by_id;
+  // clear tracker_by_id
+  tracker_by_id->clear();
 }
 
 void FanoutHandler(void *arg) {
