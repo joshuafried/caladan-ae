@@ -199,6 +199,7 @@ struct payload {
   uint64_t tsc_end;
   uint32_t cpu;
   uint64_t queueing_delay;
+  uint64_t processing_time;
 };
 
 // The maximum lateness to tolerate before dropping egress samples.
@@ -290,6 +291,7 @@ std::vector<work_unit> ClientWorker(
   rt::CondVar cv_;
 
   time_point<steady_clock> expstart;
+  unsigned int target_us = 25;
 
   // Start the receiver thread.
   auto th = rt::Thread([&] {
@@ -311,6 +313,10 @@ std::vector<work_unit> ClientWorker(
       w[idx].cpu = ntoh32(rp.cpu);
 
       uint64_t queueing_delay = ntoh64(rp.queueing_delay);
+      uint64_t processing_time = ntoh64(rp.processing_time);
+      uint64_t new_target_us = std::max<uint64_t>(
+                                   static_cast<uint64_t>(0.8*target_us + 0.2*processing_time),
+                                   25);
 
       if (worker_id == 0) {
         queues.emplace_back(duration_cast<sec>(ts - expstart).count(),
@@ -319,7 +325,6 @@ std::vector<work_unit> ClientWorker(
 
       // window-based CC
       double new_cwnd = cwnd;
-      unsigned int target_us = 25;
 
       if (queueing_delay > (uint64_t)(target_us * 1.5)) {
         if (num_outst_req <= cwnd || cwnd < 1.0)
@@ -345,6 +350,7 @@ std::vector<work_unit> ClientWorker(
       }
 
       m_.Lock();
+      target_us = new_target_us;
       num_outst_req--;
       cwnd = new_cwnd;
       cv_.Signal();
@@ -369,7 +375,7 @@ std::vector<work_unit> ClientWorker(
     auto now = steady_clock::now();
     barrier();
 
-    //if (duration_cast<sec>(now - expstart).count() > kExperimentTime) break;
+//    if (duration_cast<sec>(now - expstart).count() > kExperimentTime) break;
 
     if (duration_cast<sec>(now - expstart).count() < w[i].start_us) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
@@ -393,7 +399,11 @@ std::vector<work_unit> ClientWorker(
       rt::Sleep(static_cast<uint64_t>(time_to_sleep));
     }
 
-    /*
+    m_.Lock();
+    num_outst_req++;
+    m_.Unlock();
+
+/*
     // window-based CC
     m_.Lock();
     if ((double)(num_outst_req + 1) > cwnd && j > 0) {
@@ -415,12 +425,7 @@ std::vector<work_unit> ClientWorker(
     }
     num_outst_req++;
     m_.Unlock();
-    */
-
-    m_.Lock();
-    num_outst_req++;
-    m_.Unlock();
-    
+*/
     barrier();
     timings[i] = steady_clock::now();
     barrier();
