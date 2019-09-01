@@ -722,7 +722,6 @@ std::vector<work_unit> RunExperiment(
   // Print cwnd info for flow 0
   std::ofstream cwnd_out;
   cwnd_out.open("cwnd.out");
-  granularity = 10000;
   next_target = granularity;
 
   double sum_cwnd = 0;
@@ -733,7 +732,7 @@ std::vector<work_unit> RunExperiment(
       sum_cwnd += c.second;
       cnt_cwnd++;
     } else {
-      cwnd_out << next_target / 1000000.0 << "," << std::fixed << sum_cwnd/double(cnt_cwnd) << std::endl;
+      cwnd_out << next_target / 1000000.0 << "," << sum_cwnd/double(cnt_cwnd) << std::endl;
       next_target += granularity;
       while (c.first > next_target) {
         cwnd_out << next_target / 1000000.0 << "," << std::endl;
@@ -750,6 +749,40 @@ std::vector<work_unit> RunExperiment(
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),
           w.end());
+
+  // Print 99p latency time-scale
+  std::ofstream p99_out;
+  p99_out.open("p99.out");
+  std::sort(w.begin(), w.end(),
+            [](const work_unit &s1, work_unit &s2) { return (s1.timing + s1.duration_us) < (s2.timing + s2.duration_us); });
+  granularity = 100000;
+  next_target = granularity;
+
+  std::vector<uint64_t> durations;
+  uint64_t last_recv_time = 0;
+  for (auto &s : w) {
+    if (s.timing + s.duration_us < next_target) {
+      durations.push_back(s.duration_us);
+      last_recv_time = s.timing + s.duration_us;
+    } else {
+      ssize_t dsize = durations.size();
+      std::sort(durations.begin(), durations.end());
+      
+      if (dsize >= 100)
+        p99_out << last_recv_time / 1000000.0 << "," << durations[dsize * 0.99] << std::endl;
+      else if (dsize >= 10)
+        p99_out << last_recv_time / 1000000.0 << "," << durations[dsize * 0.9] << std::endl;
+      else if (dsize > 1)
+        p99_out << last_recv_time / 1000000.0 << "," << durations[dsize - 2] << std::endl;
+      durations.clear();
+      while (s.timing + s.duration_us > next_target)
+        next_target += granularity;
+
+      durations.push_back(s.duration_us);
+      last_recv_time = s.timing + s.duration_us;
+    }
+  }
+  p99_out.close();
 
   // Report results.
   double elapsed = duration_cast<sec>(finish - start).count();
