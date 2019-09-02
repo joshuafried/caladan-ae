@@ -51,7 +51,8 @@ constexpr uint64_t kIterationsPerUS = 88;
 // Number of seconds to warmup at rate 0
 constexpr uint64_t kWarmupUpSeconds = 5;
 
-constexpr uint64_t kExperimentTime = 5000000;
+constexpr uint64_t kExperimentDuration = 5000000;
+constexpr uint64_t kSLOUS = 100000; // 100ms
 
 static std::vector<std::pair<double, uint64_t>> rates;
 
@@ -133,24 +134,40 @@ private:
 
 class StatMonitor {
 public:
-  StatMonitor(uint32_t max_nif) : max_nif_(max_nif), nif_(0) {}
+  StatMonitor(uint32_t max_nif) : running_(true), max_nif_(max_nif), nif_(0) {}
 
   bool RequestSend() {
-    if (nif_ >= max_nif_)
-      return false;
+    m_.Lock();
+    while (running_ && nif_ >= max_nif_) {
+      cv_.Wait(&m_);
+    }
     nif_++;
-    return true;
+    m_.Unlock();
+
+    return running_;
   }
 
   void RecvResponse() {
+    m_.Lock();
     nif_--;
+    cv_.Signal();
+    m_.Unlock();
+  }
+
+  void Finish() {
+    m_.Lock();
+    running_ = false;
+    cv_.SignalAll();
+    m_.Unlock();
   }
 
 private:
   // the number of in-flight requests
+  bool running_;
   uint32_t max_nif_;
-  std::atomic<uint32_t> nif_;
+  uint32_t nif_;
   rt::Mutex m_;
+  rt::CondVar cv_;
 };
 
 constexpr uint64_t kUptimePort = 8002;
@@ -229,6 +246,7 @@ struct payload {
   uint64_t tsc_end;
   uint32_t cpu;
   uint64_t queueing_delay;
+  uint64_t processing_time;
 };
 
 // The maximum lateness to tolerate before dropping egress samples.
@@ -281,7 +299,7 @@ void ServerHandler(void *arg) {
 }
 
 struct work_unit {
-  double start_us, work_us, duration_us;
+  double start_us, work_us, duration_us, latency_us;
   uint64_t timing;
   uint64_t tsc;
   uint32_t cpu;
@@ -293,7 +311,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
   std::vector<work_unit> w;
   while (cur_us < last_us) {
     cur_us += a();
-    w.emplace_back(work_unit{cur_us, s(), 0, 0});
+    w.emplace_back(work_unit{cur_us, s(), 0, 0, 0});
   }
   return w;
 }
@@ -325,7 +343,10 @@ std::vector<work_unit> ClientWorker(
       auto ts = steady_clock::now();
       barrier();
       uint64_t idx = ntoh64(rp.index);
+      // execution time
       w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
+      // execution time + client queueing delay
+      w[idx].latency_us = duration_cast<sec>(ts - expstart).count() - w[idx].start_us;
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
 
@@ -350,21 +371,37 @@ std::vector<work_unit> ClientWorker(
     auto now = steady_clock::now();
     barrier();
 
+    if (duration_cast<sec>(now - expstart).count() > kExperimentDuration)
+      break;
+
     if (duration_cast<sec>(now - expstart).count() < w[i].start_us) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
         panic("write failed, ret = %ld", ret);
       j = 0;
       now = steady_clock::now();
-      rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
+
+      double time_to_sleep = w[i].start_us - duration_cast<sec>(now - expstart).count();
+      rt::Sleep(time_to_sleep);
     }
 
-    if (duration_cast<sec>(now - expstart).count() - w[i].start_us > kMaxCatchUpUS)
-      continue;
-
-    if (!monitor->RequestSend()) {
-      continue;
+    if (j > 0) {
+      ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
+      if (ret != static_cast<ssize_t>(sizeof(payload) * j))
+        panic("write failed, ret = %ld", ret);
+      j = 0;
     }
+
+    if(!monitor->RequestSend()) break;
+
+    barrier();
+    now = steady_clock::now();
+    barrier();
+
+    while (duration_cast<sec>(now - expstart).count() - w[i].start_us > kSLOUS)
+      i++;
+
+    if (i >= wsize) break;
 
     barrier();
     timings[i] = steady_clock::now();
@@ -386,6 +423,9 @@ std::vector<work_unit> ClientWorker(
     }
   }
 
+  //rt::Sleep(1000);
+  monitor->Finish();
+
   c->Shutdown(SHUT_RDWR);
   th.Join();
 
@@ -393,7 +433,7 @@ std::vector<work_unit> ClientWorker(
 }
 
 std::vector<work_unit> RunExperiment(
-    int threads, double *reqs_per_sec, double *cpu_usage,
+    int threads, double *cpu_usage,
     std::function<std::vector<work_unit>()> wf) {
   // Create one TCP connection per thread.
   std::vector<std::unique_ptr<rt::TcpConn>> conns;
@@ -404,7 +444,7 @@ std::vector<work_unit> RunExperiment(
   }
 
   // Create Cental Nreq monitor
-  auto monitor = std::make_shared<StatMonitor>(20);
+  auto monitor = std::make_shared<StatMonitor>(8);
 
   // Launch a worker thread for each connection.
   rt::WaitGroup starter(threads + 1);
@@ -549,15 +589,17 @@ std::vector<work_unit> RunExperiment(
   }
   cwnd_out.close();
 */
+/*
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),
           w.end());
+*/
 
   // Report results.
-  double elapsed = duration_cast<sec>(finish - start).count();
-  if (reqs_per_sec != nullptr)
-    *reqs_per_sec = static_cast<double>(w.size()) / elapsed * 1000000;
+//  double elapsed = duration_cast<sec>(finish - start).count();
+//  if (reqs_per_sec != nullptr)
+//    *reqs_per_sec = static_cast<double>(w.size()) / elapsed * 1000000;
   uint64_t idle = u2.idle - u1.idle;
   uint64_t busy = u2.busy - u1.busy;
   if (cpu_usage != nullptr)
@@ -575,7 +617,7 @@ void PrintRawResults(std::vector<work_unit> w) {
   }
 }
 
-void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
+void PrintStatResultsDuration(std::vector<work_unit> w, double offered_rps, double rps,
                       double cpu_usage) {
   std::sort(w.begin(), w.end(), [](const work_unit &s1, work_unit &s2) {
     return s1.duration_us < s2.duration_us;
@@ -600,6 +642,46 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << max << std::endl;
 }
 
+void PrintStatResultsLatency(std::vector<work_unit> w, double offered_rps,
+                      double cpu_usage) {
+  double total = static_cast<double>(w.size());
+
+  // Remove requests that did not complete.
+  w.erase(std::remove_if(w.begin(), w.end(),
+                         [](const work_unit &s) { return s.duration_us == 0; }),
+          w.end());
+
+  double rps = static_cast<double>(w.size()) / (double)kExperimentDuration * 1000000;
+  
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, work_unit &s2) {
+    return s1.latency_us < s2.latency_us;
+  });
+  double sum = std::accumulate(
+      w.begin(), w.end(), 0.0,
+      [](double s, const work_unit &c) { return s + c.latency_us; });
+  double mean = sum / w.size();
+  double count = static_cast<double>(w.size());
+  double p90 = w[count * 0.9].latency_us;
+  double p99 = w[count * 0.99].latency_us;
+  double p999 = w[count * 0.999].latency_us;
+  double p9999 = w[count * 0.9999].latency_us;
+  double min = w[0].latency_us;
+  double max = w[w.size() - 1].latency_us;
+
+  double slo_success = static_cast<double>(std::count_if(w.begin(), w.end(),
+                           [](const work_unit &s) { return s.latency_us < kSLOUS; }));
+  double gps = slo_success / (double)kExperimentDuration * 1000000;
+  double slo_rate = slo_success / total;
+
+  std::cout  //<<
+             //"#threads,offered_rps,rps,cpu_usage,samples,min,mean,p90,p99,p999,p9999,max"
+             //<< std::endl
+      << std::setprecision(4) << std::fixed << threads << "," << offered_rps
+      << "," << rps << "," << gps << "," << cpu_usage << "," << slo_rate << ","
+      << w.size() << "," << min << "," << mean << "," << p90 << "," << p99
+      << "," << p999 << "," << p9999 << "," << max << std::endl;
+}
+
 double GetBimodalRandom(std::mt19937 &rgen) {
   if (rgen() > (unsigned int)0xe6666665) {
     return 1000.0;
@@ -610,49 +692,24 @@ double GetBimodalRandom(std::mt19937 &rgen) {
 
 void SteadyStateExperiment(int threads, double offered_rps,
                            double service_time) {
-  double rps, cpu_usage;
-  std::vector<work_unit> w = RunExperiment(threads, &rps, &cpu_usage, [=] {
+  double cpu_usage;
+  std::vector<work_unit> w = RunExperiment(threads, &cpu_usage, [=] {
     std::mt19937 rg(rand());
     std::mt19937 dg(rand());
     std::exponential_distribution<double> rd(
         1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
     std::exponential_distribution<double> wd(1.0 / service_time);
-    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, kExperimentTime);
+    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, kExperimentDuration);
   });
 
   // Print the results.
-  PrintStatResults(w, offered_rps, rps, cpu_usage);
-}
-
-void LoadShiftExperiment(int threads,
-                         const std::vector<std::pair<double, uint64_t>> &rates,
-                         double service_time) {
-  auto w = RunExperiment(threads, nullptr, nullptr, [=] {
-    std::mt19937 rg(rand());
-    std::mt19937 wg(rand());
-    std::exponential_distribution<double> wd(1.0 / service_time);
-    std::vector<work_unit> w1;
-    uint64_t last_us = 0;
-    for (auto &r : rates) {
-      std::exponential_distribution<double> rd(
-          1.0 / (1000000.0 / (r.first / static_cast<double>(threads))));
-      auto work = GenerateWork(std::bind(rd, rg), std::bind(wd, wg), last_us,
-                               last_us + r.second);
-      last_us = work.back().start_us;
-      w1.insert(w1.end(), work.begin(), work.end());
-    }
-    return w1;
-  });
-  PrintRawResults(w);
+  PrintStatResultsLatency(w, offered_rps, cpu_usage);
 }
 
 void ClientHandler(void *arg) {
-  // LoadShiftExperiment(threads, rates, st);
-#if 1
   for (double i = 100000; i <= 3000000; i += 100000) {
     SteadyStateExperiment(threads, i, st);
   }
-#endif
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {
