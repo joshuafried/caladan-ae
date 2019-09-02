@@ -355,6 +355,9 @@ std::vector<work_unit> ClientWorker(
                            new_cwnd);
       }
 
+      if (new_cwnd < 1.0)
+        new_cwnd = 1.0;
+
       m_.Lock();
       recent_rtt = new_recent_rtt;
       target_us = new_target_us;
@@ -412,14 +415,16 @@ std::vector<work_unit> ClientWorker(
  */
 
     // window-based CC
-    m_.Lock();
-    if ((double)(num_outst_req + 1) > cwnd && j > 0) {
+//    m_.Lock();
+//    if ((double)(num_outst_req + 1) > cwnd && j > 0) {
+    if (j > 0) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
         panic("write failed, ret = %ld", ret);
       j = 0;
     }
 
+    m_.Lock();
     while ((cwnd >= 1.0 && (double)(num_outst_req + 1) > cwnd) || 
            (cwnd < 1.0 && num_outst_req > 0)) {
       cv_.Wait(&m_);
@@ -428,14 +433,15 @@ std::vector<work_unit> ClientWorker(
     now = steady_clock::now();
     barrier();
 
-    while (duration_cast<sec>(now - expstart).count() - w[i].start_us > kSLOUS)
-      i++;
-
     if (cwnd < 1.0) {
       double time_to_sleep = recent_rtt / cwnd;
       time_to_sleep = std::min<double>(time_to_sleep, 10000);
       rt::Sleep((uint64_t)time_to_sleep);
     }
+
+    while (duration_cast<sec>(now - expstart).count() - w[i].start_us > kSLOUS)
+      i++;
+
     num_outst_req++;
     m_.Unlock();
 
@@ -724,14 +730,14 @@ double GetBimodalRandom(std::mt19937 &rgen) {
 
 void SteadyStateExperiment(int threads, double offered_rps,
                            double service_time) {
-  double rps, cpu_usage;
+  double cpu_usage;
   std::vector<work_unit> w = RunExperiment(threads, &cpu_usage, [=] {
     std::mt19937 rg(rand());
     std::mt19937 dg(rand());
     std::exponential_distribution<double> rd(
         1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
     std::exponential_distribution<double> wd(1.0 / service_time);
-    return GenerateWork(std::bind(rd, rg), std::bind(GetBimodalRandom, dg), 0, kExperimentDuration);
+    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, kExperimentDuration);
   });
 
   // Print the results.
@@ -741,9 +747,8 @@ void SteadyStateExperiment(int threads, double offered_rps,
 void ClientHandler(void *arg) {
   // LoadShiftExperiment(threads, rates, st);
 #if 1
-  for (double i = 10000; i <= 300000; i += 10000) {
+  for (double i = 100000; i <= 3000000; i += 100000) {
     SteadyStateExperiment(threads, i, st);
-    rt::Sleep(1000000);
   }
 #endif
 }
