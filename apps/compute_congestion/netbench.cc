@@ -43,7 +43,8 @@ constexpr uint64_t kIterationsPerUS = 88;
 // Number of seconds to warmup at rate 0
 constexpr uint64_t kWarmupUpSeconds = 5;
 
-constexpr uint64_t kExperimentTime = 5000000;
+constexpr uint64_t kExperimentDuration = 5000000;
+constexpr uint64_t kSLOUS = 100000;
 
 static std::vector<std::pair<double, uint64_t>> rates;
 
@@ -252,7 +253,7 @@ void ServerHandler(void *arg) {
 }
 
 struct work_unit {
-  double start_us, work_us, duration_us;
+  double start_us, work_us, duration_us, latency_us;
   uint64_t timing;
   uint64_t tsc;
   uint32_t cpu;
@@ -265,7 +266,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
 
   while (cur_us < last_us) {
     cur_us += a();
-    w.emplace_back(work_unit{cur_us, s(), 0, 0});
+    w.emplace_back(work_unit{cur_us, s(), 0, 0, 0});
   }
   return w;
 }
@@ -286,6 +287,7 @@ std::vector<work_unit> ClientWorker(
   double cwnd = 4.0;
   // number of outstanding requests
   uint32_t num_outst_req = 0;
+  double recent_rtt = 25.0;
   
   rt::Mutex m_;
   rt::CondVar cv_;
@@ -308,7 +310,10 @@ std::vector<work_unit> ClientWorker(
       auto ts = steady_clock::now();
       barrier();
       uint64_t idx = ntoh64(rp.index);
+      // execution time
       w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
+      // execution time + client queueing delay
+      w[idx].latency_us = duration_cast<sec>(ts - expstart).count() - w[idx].start_us;
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
 
@@ -317,6 +322,7 @@ std::vector<work_unit> ClientWorker(
       uint64_t new_target_us = std::max<uint64_t>(
                                    static_cast<uint64_t>(0.8*target_us + 0.2*processing_time),
                                    25);
+      double new_recent_rtt = 0.8*recent_rtt + 0.2* w[idx].duration_us;
 
       if (worker_id == 0) {
         queues.emplace_back(duration_cast<sec>(ts - expstart).count(),
@@ -350,6 +356,7 @@ std::vector<work_unit> ClientWorker(
       }
 
       m_.Lock();
+      recent_rtt = new_recent_rtt;
       target_us = new_target_us;
       num_outst_req--;
       cwnd = new_cwnd;
@@ -375,7 +382,7 @@ std::vector<work_unit> ClientWorker(
     auto now = steady_clock::now();
     barrier();
 
-//    if (duration_cast<sec>(now - expstart).count() > kExperimentTime) break;
+    if (duration_cast<sec>(now - expstart).count() > kExperimentDuration) break;
 
     if (duration_cast<sec>(now - expstart).count() < w[i].start_us) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
@@ -385,8 +392,8 @@ std::vector<work_unit> ClientWorker(
       now = steady_clock::now();
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
-
-    if (duration_cast<sec>(now - expstart).count() - w[i].start_us > kMaxCatchUpUS)
+/*
+    if (duration_cast<sec>(now - expstart).count() - w[i].start_us > kSLOUS)
       continue;
 
     if (((cwnd >= 1.0) && ((double)(num_outst_req + 1) > cwnd)) ||
@@ -402,8 +409,8 @@ std::vector<work_unit> ClientWorker(
     m_.Lock();
     num_outst_req++;
     m_.Unlock();
+ */
 
-/*
     // window-based CC
     m_.Lock();
     if ((double)(num_outst_req + 1) > cwnd && j > 0) {
@@ -417,15 +424,21 @@ std::vector<work_unit> ClientWorker(
            (cwnd < 1.0 && num_outst_req > 0)) {
       cv_.Wait(&m_);
     }
+    barrier();
+    now = steady_clock::now();
+    barrier();
+
+    while (duration_cast<sec>(now - expstart).count() - w[i].start_us > kSLOUS)
+      i++;
 
     if (cwnd < 1.0) {
-      double time_to_sleep = 50 / cwnd;
+      double time_to_sleep = recent_rtt / cwnd;
       time_to_sleep = std::min<double>(time_to_sleep, 10000);
       rt::Sleep((uint64_t)time_to_sleep);
     }
     num_outst_req++;
     m_.Unlock();
-*/
+
     barrier();
     timings[i] = steady_clock::now();
     barrier();
@@ -453,7 +466,7 @@ std::vector<work_unit> ClientWorker(
 }
 
 std::vector<work_unit> RunExperiment(
-    int threads, double *reqs_per_sec, double *cpu_usage,
+    int threads, double *cpu_usage,
     std::function<std::vector<work_unit>()> wf) {
   // Create one TCP connection per thread.
   std::vector<std::unique_ptr<rt::TcpConn>> conns;
@@ -609,15 +622,16 @@ std::vector<work_unit> RunExperiment(
   }
   cwnd_out.close();
 */
+/*
   // Remove requests that did not complete.
   w.erase(std::remove_if(w.begin(), w.end(),
                          [](const work_unit &s) { return s.duration_us == 0; }),
           w.end());
-
+*/
   // Report results.
-  double elapsed = duration_cast<sec>(finish - start).count();
-  if (reqs_per_sec != nullptr)
-    *reqs_per_sec = static_cast<double>(w.size()) / elapsed * 1000000;
+//  double elapsed = duration_cast<sec>(finish - start).count();
+//  if (reqs_per_sec != nullptr)
+//    *reqs_per_sec = static_cast<double>(w.size()) / elapsed * 1000000;
   uint64_t idle = u2.idle - u1.idle;
   uint64_t busy = u2.busy - u1.busy;
   if (cpu_usage != nullptr)
@@ -635,8 +649,8 @@ void PrintRawResults(std::vector<work_unit> w) {
   }
 }
 
-void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
-                      double cpu_usage) {
+void PrintStatResultsDuration(std::vector<work_unit> w, double offered_rps, double rps,
+                              double cpu_usage) {
   std::sort(w.begin(), w.end(), [](const work_unit &s1, work_unit &s2) {
     return s1.duration_us < s2.duration_us;
   });
@@ -660,6 +674,46 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << max << std::endl;
 }
 
+void PrintStatResultsLatency(std::vector<work_unit> w, double offered_rps,
+                             double cpu_usage) {
+  double total = static_cast<double>(w.size());
+
+  // Remove requests that did not complete.
+  w.erase(std::remove_if(w.begin(), w.end(),
+                         [](const work_unit &s) { return s.duration_us == 0; }),
+          w.end());
+
+  double rps = static_cast<double>(w.size()) / (double)kExperimentDuration * 1000000;
+
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, work_unit &s2) {
+    return s1.latency_us < s2.latency_us;
+  });
+  double sum = std::accumulate(
+      w.begin(), w.end(), 0.0,
+      [](double s, const work_unit &c) { return s + c.latency_us; });
+  double mean = sum / w.size();
+  double count = static_cast<double>(w.size());
+  double p90 = w[count * 0.9].latency_us;
+  double p99 = w[count * 0.99].latency_us;
+  double p999 = w[count * 0.999].latency_us;
+  double p9999 = w[count * 0.9999].latency_us;
+  double min = w[0].latency_us;
+  double max = w[w.size() - 1].latency_us;
+
+  double slo_success = static_cast<double>(std::count_if(w.begin(), w.end(), 
+                           [](const work_unit &s) { return s.latency_us < kSLOUS; }));
+  double gps = slo_success / (double)kExperimentDuration * 1000000;
+  double slo_rate = slo_success / total;
+
+  std::cout  //<<
+             //"#threads,offered_rps,rps,cpu_usage,samples,min,mean,p90,p99,p999,p9999,max"
+             //<< std::endl
+      << std::setprecision(4) << std::fixed << threads << "," << offered_rps
+      << "," << rps << "," << gps << "," << cpu_usage << "," << slo_rate
+      << "," << w.size() << "," << min << "," << mean << "," << p90
+      << "," << p99 << "," << p999 << "," << p9999 << "," << max << std::endl;
+}
+
 double GetBimodalRandom(std::mt19937 &rgen) {
   if (rgen() > (unsigned int)0xe6666665) {
     return 1000.0;
@@ -671,46 +725,25 @@ double GetBimodalRandom(std::mt19937 &rgen) {
 void SteadyStateExperiment(int threads, double offered_rps,
                            double service_time) {
   double rps, cpu_usage;
-  std::vector<work_unit> w = RunExperiment(threads, &rps, &cpu_usage, [=] {
+  std::vector<work_unit> w = RunExperiment(threads, &cpu_usage, [=] {
     std::mt19937 rg(rand());
     std::mt19937 dg(rand());
     std::exponential_distribution<double> rd(
         1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
     std::exponential_distribution<double> wd(1.0 / service_time);
-    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, kExperimentTime);
+    return GenerateWork(std::bind(rd, rg), std::bind(GetBimodalRandom, dg), 0, kExperimentDuration);
   });
 
   // Print the results.
-  PrintStatResults(w, offered_rps, rps, cpu_usage);
-}
-
-void LoadShiftExperiment(int threads,
-                         const std::vector<std::pair<double, uint64_t>> &rates,
-                         double service_time) {
-  auto w = RunExperiment(threads, nullptr, nullptr, [=] {
-    std::mt19937 rg(rand());
-    std::mt19937 wg(rand());
-    std::exponential_distribution<double> wd(1.0 / service_time);
-    std::vector<work_unit> w1;
-    uint64_t last_us = 0;
-    for (auto &r : rates) {
-      std::exponential_distribution<double> rd(
-          1.0 / (1000000.0 / (r.first / static_cast<double>(threads))));
-      auto work = GenerateWork(std::bind(rd, rg), std::bind(wd, wg), last_us,
-                               last_us + r.second);
-      last_us = work.back().start_us;
-      w1.insert(w1.end(), work.begin(), work.end());
-    }
-    return w1;
-  });
-  PrintRawResults(w);
+  PrintStatResultsLatency(w, offered_rps, cpu_usage);
 }
 
 void ClientHandler(void *arg) {
   // LoadShiftExperiment(threads, rates, st);
 #if 1
-  for (double i = 100000; i <= 3000000; i += 100000) {
+  for (double i = 10000; i <= 300000; i += 10000) {
     SteadyStateExperiment(threads, i, st);
+    rt::Sleep(1000000);
   }
 #endif
 }
