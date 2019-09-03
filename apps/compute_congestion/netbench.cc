@@ -195,7 +195,7 @@ uptime ReadUptime() {
 
 constexpr uint64_t kNetbenchPort = 8001;
 struct payload {
-  uint64_t work_iterations;
+  uint64_t work_iterations[4];
   uint64_t index;
   uint64_t tsc_end;
   uint32_t cpu;
@@ -222,7 +222,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c) {
     }
 
     // Perform fake work if requested.
-    uint64_t workn = ntoh64(p.work_iterations);
+    uint64_t workn = ntoh64(p.work_iterations[0]);
     if (workn != 0) w->Work(workn);
     p.tsc_end = hton64(rdtscp(&p.cpu));
     p.cpu = hton32(p.cpu);
@@ -253,7 +253,8 @@ void ServerHandler(void *arg) {
 }
 
 struct work_unit {
-  double start_us, work_us, duration_us, latency_us;
+  double start_us, duration_us, latency_us;
+  double work_us[4];
   uint64_t timing;
   uint64_t tsc;
   uint32_t cpu;
@@ -266,7 +267,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
 
   while (cur_us < last_us) {
     cur_us += a();
-    w.emplace_back(work_unit{cur_us, s(), 0, 0, 0});
+    w.emplace_back(work_unit{cur_us, 0, 0, s(), s(), s(), s(), 0});
   }
   return w;
 }
@@ -289,6 +290,8 @@ std::vector<work_unit> ClientWorker(
   uint32_t num_outst_req = 0;
   double recent_rtt = 25.0;
   
+  uint64_t ewma_exe_time = 0;
+  
   rt::Mutex m_;
   rt::CondVar cv_;
 
@@ -310,12 +313,15 @@ std::vector<work_unit> ClientWorker(
       auto ts = steady_clock::now();
       barrier();
       uint64_t idx = ntoh64(rp.index);
+
       // execution time
       w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
       // execution time + client queueing delay
       w[idx].latency_us = duration_cast<sec>(ts - expstart).count() - w[idx].start_us;
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
+
+      ewma_exe_time = static_cast<uint64_t>(0.8*ewma_exe_time + 0.2*w[idx].latency_us);
 
       uint64_t queueing_delay = ntoh64(rp.queueing_delay);
       uint64_t processing_time = ntoh64(rp.processing_time);
@@ -395,6 +401,7 @@ std::vector<work_unit> ClientWorker(
       now = steady_clock::now();
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
+
 /*
     if (duration_cast<sec>(now - expstart).count() - w[i].start_us > kSLOUS)
       continue;
@@ -439,8 +446,11 @@ std::vector<work_unit> ClientWorker(
       rt::Sleep((uint64_t)time_to_sleep);
     }
 
-    while (duration_cast<sec>(now - expstart).count() - w[i].start_us > kSLOUS)
+    while (duration_cast<sec>(now - expstart).count() - w[i].start_us > (kSLOUS - ewma_exe_time))
       i++;
+
+    if (i >= wsize)
+      break;
 
     num_outst_req++;
     m_.Unlock();
@@ -452,16 +462,16 @@ std::vector<work_unit> ClientWorker(
     w[i].timing = duration_cast<sec>(timings[i] - expstart).count();
 
     // Enqueue a network request.
-    p[j].work_iterations = hton64(w[i].work_us * kIterationsPerUS);
+    for (int k = 0 ; k < 4 ; ++k)
+      p[j].work_iterations[k] = hton64(w[i].work_us[k] * kIterationsPerUS);
     p[j].index = hton64(i);
     j++;
 
-    if (j >= kBatchSize || i == wsize - 1) {
+    if (j >= kBatchSize || i >= wsize - 1) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
         panic("write failed, ret = %ld", ret);
       j = 0;
-      now = steady_clock::now();
     }
   }
 
@@ -503,7 +513,7 @@ std::vector<work_unit> RunExperiment(
   barrier();
   auto start = steady_clock::now();
   barrier();
-  uptime u1 = ReadUptime();
+//  uptime u1 = ReadUptime();
 
   // Wait for the workers to finish.
   for (auto &t : th) t.Join();
@@ -512,7 +522,7 @@ std::vector<work_unit> RunExperiment(
   barrier();
   auto finish = steady_clock::now();
   barrier();
-  uptime u2 = ReadUptime();
+//  uptime u2 = ReadUptime();
 
   // Close the connections.
   for (auto &c : conns) c->Abort();
@@ -628,31 +638,11 @@ std::vector<work_unit> RunExperiment(
   }
   cwnd_out.close();
 */
-/*
-  // Remove requests that did not complete.
-  w.erase(std::remove_if(w.begin(), w.end(),
-                         [](const work_unit &s) { return s.duration_us == 0; }),
-          w.end());
-*/
-  // Report results.
-//  double elapsed = duration_cast<sec>(finish - start).count();
-//  if (reqs_per_sec != nullptr)
-//    *reqs_per_sec = static_cast<double>(w.size()) / elapsed * 1000000;
-  uint64_t idle = u2.idle - u1.idle;
-  uint64_t busy = u2.busy - u1.busy;
-  if (cpu_usage != nullptr)
-    *cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
+//  uint64_t idle = u2.idle - u1.idle;
+//  uint64_t busy = u2.busy - u1.busy;
+//  if (cpu_usage != nullptr)
+//    *cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
   return w;
-}
-
-void PrintRawResults(std::vector<work_unit> w) {
-  std::sort(w.begin(), w.end(),
-            [](const work_unit &s1, work_unit &s2) { return s1.tsc < s2.tsc; });
-  for (const work_unit &u : w) {
-    std::cout << std::setprecision(2) << std::fixed << u.start_us << ","
-              << u.duration_us << "," << u.work_us << "," << u.tsc << ","
-              << u.cpu << std::endl;
-  }
 }
 
 void PrintStatResultsDuration(std::vector<work_unit> w, double offered_rps, double rps,
@@ -745,12 +735,9 @@ void SteadyStateExperiment(int threads, double offered_rps,
 }
 
 void ClientHandler(void *arg) {
-  // LoadShiftExperiment(threads, rates, st);
-#if 1
-  for (double i = 100000; i <= 3000000; i += 100000) {
+  for (double i = 100000; i <= 100000; i += 10000) {
     SteadyStateExperiment(threads, i, st);
   }
-#endif
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {
