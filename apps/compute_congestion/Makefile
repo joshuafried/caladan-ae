@@ -26,13 +26,19 @@ server_obj = $(server_src:.cc=.o)
 fanout_src = fanout.cc
 fanout_obj = $(fanout_src:.cc=.o)
 
+fanout2_src = fanout2.cc
+fanout2_obj = $(fanout2_src:.cc=.o)
+
+fanout3_src = fanout3.cc
+fanout3_obj = $(fanout3_src:.cc=.o)
+
 librt_libs = $(ROOT_PATH)/bindings/cc/librt++.a
 INC += -I$(ROOT_PATH)/bindings/cc
 
 RUNTIME_LIBS := $(RUNTIME_LIBS) -lnuma
 
 # must be first
-all: netbench netbench2 netbench3 netbench4 loadbalancer server fanout
+all: netbench netbench2 netbench3 netbench4 loadbalancer server fanout fanout2 fanout3
 
 netbench: $(lib_obj) $(netbench_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(netbench_obj) \
@@ -62,9 +68,17 @@ fanout: $(lib_obj) $(fanout_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(fanout_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
 
+fanout2: $(lib_obj) $(fanout2_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(fanout2_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
+fanout3: $(lib_obj) $(fanout3_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(fanout3_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
 # general build rules for all targets
 src = $(lib_src) $(netbench_src) $(netbench2_src) $(netbench3_src) $(netbench4_src) \
-		 	$(loadbalancer_src) $(server_src) $(fanout_src)
+		 	$(loadbalancer_src) $(server_src) $(fanout_src) $(fanout2_src) $(fanout3_src)
 obj = $(src:.cc=.o)
 dep = $(obj:.o=.d)
 
@@ -81,4 +95,4 @@ endif
 
 .PHONY: clean
 clean:
-	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 loadbalancer server fanout
+	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 loadbalancer server fanout fanout2 fanout3
