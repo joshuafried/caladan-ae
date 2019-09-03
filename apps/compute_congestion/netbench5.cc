@@ -28,7 +28,6 @@ extern "C" {
 /**
  *
  * Client without any cc / circuit breaker for AQM
- * with retransmission handler
  *
  */
 
@@ -203,7 +202,7 @@ uptime ReadUptime() {
 
 constexpr uint64_t kNetbenchPort = 8001;
 struct payload {
-  uint64_t work_iterations;
+  uint64_t work_iterations[4];
   uint64_t index;
   uint64_t tsc_end;
   uint32_t cpu;
@@ -230,7 +229,7 @@ void ServerWorker(std::unique_ptr<rt::TcpConn> c) {
     }
 
     // Perform fake work if requested.
-    uint64_t workn = ntoh64(p.work_iterations);
+    uint64_t workn = ntoh64(p.work_iterations[0]);
     if (workn != 0) w->Work(workn);
     p.tsc_end = hton64(rdtscp(&p.cpu));
     p.cpu = hton32(p.cpu);
@@ -261,7 +260,8 @@ void ServerHandler(void *arg) {
 }
 
 struct work_unit {
-  double start_us, work_us, duration_us, latency_us;
+  double start_us, duration_us, latency_us;
+  double work_us[4];
   uint64_t timing;
   uint64_t tsc;
   uint32_t cpu;
@@ -273,7 +273,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
   std::vector<work_unit> w;
   while (cur_us < last_us) {
     cur_us += a();
-    w.emplace_back(work_unit{cur_us, s(), 0, 0, 0});
+    w.emplace_back(work_unit{cur_us, 0, 0, s(), s(), s(), s(), 0});
   }
   return w;
 }
@@ -291,8 +291,7 @@ std::vector<work_unit> ClientWorker(
 
   time_point<steady_clock> expstart;
 
-  std::queue<uint64_t> rtx_idx;
-  rt::Mutex rtx_m_;
+  uint64_t ewma_exe_time = 0;
 
   // Start the receiver thread.
   auto th = rt::Thread([&] {
@@ -308,24 +307,15 @@ std::vector<work_unit> ClientWorker(
       uint64_t idx = ntoh64(rp.index);
       uint64_t processing_time = ntoh64(rp.processing_time);
 
-      if (idx >= w.size()) {
-        printf("Something wrong in recv path. idx = %lu, wsize = %lu\n",
-               idx, w.size());
-      }
+      barrier();
+      auto ts = steady_clock::now();
+      barrier();
+      w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
+      w[idx].latency_us = duration_cast<sec>(ts - expstart).count() - w[idx].start_us;
+      w[idx].tsc = ntoh64(rp.tsc_end);
+      w[idx].cpu = ntoh32(rp.cpu);
 
-      if (processing_time > 0) {
-        barrier();
-        auto ts = steady_clock::now();
-        barrier();
-        w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
-        w[idx].latency_us = duration_cast<sec>(ts - expstart).count() - w[idx].start_us;
-        w[idx].tsc = ntoh64(rp.tsc_end);
-        w[idx].cpu = ntoh32(rp.cpu);
-      } else {
-        rtx_m_.Lock();
-        rtx_idx.push(idx);
-        rtx_m_.Unlock();
-      }
+      ewma_exe_time = static_cast<uint64_t>(0.8*ewma_exe_time + 0.2*w[idx].duration_us);
     }
   });
 
@@ -346,25 +336,8 @@ std::vector<work_unit> ClientWorker(
     auto now = steady_clock::now();
     barrier();
 
-    unsigned int idx = i;
-    bool rtx = false;
-
     if (duration_cast<sec>(now - expstart).count() > kExperimentDuration)
       break;
-
-    rtx_m_.Lock();
-    if (!rtx_idx.empty()) {
-      idx = rtx_idx.front();
-      rtx_idx.pop();
-      rtx = true;
-      i--;
-    }
-    rtx_m_.Unlock();
-
-    if (idx >= wsize) {
-      printf("This is something wrong. idx = %u, wsize = %u, rtx = %d\n",
-             idx, wsize, rtx);
-    }
 
     if (j > 0) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
@@ -373,9 +346,9 @@ std::vector<work_unit> ClientWorker(
       j = 0;
     }
 
-    if (duration_cast<sec>(now - expstart).count() < w[idx].start_us) {
+    if (duration_cast<sec>(now - expstart).count() < w[i].start_us) {
       now = steady_clock::now();
-      double time_to_sleep = w[idx].start_us - duration_cast<sec>(now - expstart).count();
+      double time_to_sleep = w[i].start_us - duration_cast<sec>(now - expstart).count();
       rt::Sleep(time_to_sleep);
     }
 
@@ -383,20 +356,19 @@ std::vector<work_unit> ClientWorker(
     now = steady_clock::now();
     barrier();
 
-    if (duration_cast<sec>(now - expstart).count() - w[idx].start_us > kSLOUS)
+    if (duration_cast<sec>(now - expstart).count() - w[i].start_us > (kSLOUS-ewma_exe_time))
       continue;
 
-    if (!rtx) {
-      barrier();
-      timings[idx] = steady_clock::now();
-      barrier();
+    barrier();
+    timings[i] = steady_clock::now();
+    barrier();
 
-      w[idx].timing = duration_cast<sec>(timings[idx] - expstart).count();
-    }
+    w[i].timing = duration_cast<sec>(timings[i] - expstart).count();
 
     // Enqueue a network request.
-    p[j].work_iterations = hton64(w[idx].work_us * kIterationsPerUS);
-    p[j].index = hton64(idx);
+    for (int k = 0; k < 4; ++k)
+      p[j].work_iterations[k] = hton64(w[i].work_us[k] * kIterationsPerUS);
+    p[j].index = hton64(i);
     p[j].processing_time = hton64(0);
     j++;
 
@@ -447,7 +419,7 @@ std::vector<work_unit> RunExperiment(
   barrier();
   auto start = steady_clock::now();
   barrier();
-  uptime u1 = ReadUptime();
+//  uptime u1 = ReadUptime();
 
   // Wait for the workers to finish.
   for (auto &t : th) t.Join();
@@ -456,7 +428,7 @@ std::vector<work_unit> RunExperiment(
   barrier();
   auto finish = steady_clock::now();
   barrier();
-  uptime u2 = ReadUptime();
+//  uptime u2 = ReadUptime();
 
   // Close the connections.
   for (auto &c : conns) c->Abort();
@@ -582,21 +554,11 @@ std::vector<work_unit> RunExperiment(
 //  double elapsed = duration_cast<sec>(finish - start).count();
 //  if (reqs_per_sec != nullptr)
 //    *reqs_per_sec = static_cast<double>(w.size()) / elapsed * 1000000;
-  uint64_t idle = u2.idle - u1.idle;
-  uint64_t busy = u2.busy - u1.busy;
-  if (cpu_usage != nullptr)
-    *cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
+//  uint64_t idle = u2.idle - u1.idle;
+//  uint64_t busy = u2.busy - u1.busy;
+//  if (cpu_usage != nullptr)
+//    *cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
   return w;
-}
-
-void PrintRawResults(std::vector<work_unit> w) {
-  std::sort(w.begin(), w.end(),
-            [](const work_unit &s1, work_unit &s2) { return s1.tsc < s2.tsc; });
-  for (const work_unit &u : w) {
-    std::cout << std::setprecision(2) << std::fixed << u.start_us << ","
-              << u.duration_us << "," << u.work_us << "," << u.tsc << ","
-              << u.cpu << std::endl;
-  }
 }
 
 void PrintStatResultsDuration(std::vector<work_unit> w, double offered_rps, double rps,
@@ -688,7 +650,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
 }
 
 void ClientHandler(void *arg) {
-  for (double i = 1000000; i <= 30000000; i += 1000000) {
+  for (double i = 100; i <= 100; i += 1000000) {
     SteadyStateExperiment(threads, i, st);
   }
 }
