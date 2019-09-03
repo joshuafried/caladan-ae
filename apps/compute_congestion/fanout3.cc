@@ -499,7 +499,7 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Ch
     auto now = steady_clock::now();
     barrier();
 
-    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time))
+    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000))
       continue;
 
     monitor->RequestSend();
@@ -508,7 +508,7 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Ch
     now = steady_clock::now();
     barrier();
 
-    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time)) {
+    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000)) {
       monitor->CancelSend();
       continue;
     }
