@@ -17,11 +17,17 @@ netbench3_obj = $(netbench3_src:.cc=.o)
 netbench4_src = netbench4.cc
 netbench4_obj = $(netbench4_src:.cc=.o)
 
+netbench5_src = netbench5.cc
+netbench5_obj = $(netbench5_src:.cc=.o)
+
 loadbalancer_src = loadbalancer.cc
 loadbalancer_obj = $(loadbalancer_src:.cc=.o)
 
 server_src = server.cc
 server_obj = $(server_src:.cc=.o)
+
+cfserver_src = cfserver.cc
+cfserver_obj = $(cfserver_src:.cc=.o)
 
 fanout_src = fanout.cc
 fanout_obj = $(fanout_src:.cc=.o)
@@ -36,9 +42,13 @@ librt_libs = $(ROOT_PATH)/bindings/cc/librt++.a
 INC += -I$(ROOT_PATH)/bindings/cc
 
 RUNTIME_LIBS := $(RUNTIME_LIBS) -lnuma
+CF_LIBS = -larmadillo -lmlpack -fopenmp
 
 # must be first
-all: netbench netbench2 netbench3 netbench4 loadbalancer server fanout fanout2 fanout3
+all: netbench netbench2 netbench3 netbench4 netbench5 loadbalancer server cfserver fanout fanout2 fanout3
+
+$(cfserver_obj): $(cfserver_src)
+	$(CXX) $(CXXFLAGS) $(INC) -c $(cfserver_src) -o $@ -fopenmp
 
 netbench: $(lib_obj) $(netbench_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(netbench_obj) \
@@ -56,6 +66,10 @@ netbench4: $(lib_obj) $(netbench4_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(netbench4_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
 
+netbench5: $(lib_obj) $(netbench5_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(netbench5_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
 loadbalancer: $(lib_obj) $(loadbalancer_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(loadbalancer_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
@@ -63,6 +77,11 @@ loadbalancer: $(lib_obj) $(loadbalancer_obj) $(librt_libs) $(RUNTIME_DEPS)
 server: $(lib_obj) $(server_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(server_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
+
+cfserver: $(lib_obj) $(cfserver_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cfserver_obj) \
+	$(librt_libs) /users/inhocho/mlpack-3.1.1/build/lib/libmlpack.so.3 \
+ 	$(RUNTIME_LIBS) -larmadillo -fopenmp
 
 fanout: $(lib_obj) $(fanout_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(fanout_obj) \
@@ -78,7 +97,8 @@ fanout3: $(lib_obj) $(fanout3_obj) $(librt_libs) $(RUNTIME_DEPS)
 
 # general build rules for all targets
 src = $(lib_src) $(netbench_src) $(netbench2_src) $(netbench3_src) $(netbench4_src) \
-		 	$(loadbalancer_src) $(server_src) $(fanout_src) $(fanout2_src) $(fanout3_src)
+		  $(netbench5_src) $(loadbalancer_src) $(server_src) $(cfserver_src) $(fanout_src) \
+		 	$(fanout2_src) $(fanout3_src)
 obj = $(src:.cc=.o)
 dep = $(obj:.o=.d)
 
@@ -95,4 +115,5 @@ endif
 
 .PHONY: clean
 clean:
-	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 loadbalancer server fanout fanout2 fanout3
+	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 netbench5 loadbalancer \
+	 	server cfserver fanout fanout2 fanout3
