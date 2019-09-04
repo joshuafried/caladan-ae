@@ -31,6 +31,36 @@ using namespace mlpack::cf;
 
 using sec = duration<double, std::micro>;
 
+static float htonf(float value) {
+  union v {
+    float f;
+    unsigned int i;
+  };
+
+  union v val;
+  unsigned int temp;
+
+  val.f = value;
+  temp = hton32(val.i);
+
+  return *(float*)&temp;
+}
+
+static float ntohf(float value) {
+  union v {
+    float f;
+    unsigned int i;
+  };
+
+  union v val;
+  unsigned int temp;
+
+  val.f = value;
+  temp = ntoh32(val.i);
+
+  return *(float*)&temp;
+}
+
 constexpr uint64_t kTBMaxToken = 32;
 class TokenBucket {
 public:
@@ -192,12 +222,12 @@ void UptimeServer() {
 
 constexpr uint64_t kServerPort = 8001;
 struct payload {
-  uint64_t work_iterations;
-  uint64_t index;
-  uint64_t tsc_end;
-  uint32_t cpu;
+  uint64_t user_id;
+  uint64_t movie_id;
+  uint64_t request_index;
   uint64_t queueing_delay;
   uint64_t processing_time;
+  float rating;
 };
 
 class SharedTcpStream {
@@ -254,16 +284,17 @@ void HandleRequest(RequestContext *ctx,
 
   // perform fake work
   auto start = steady_clock::now();
-  uint64_t workn = ntoh64(p->work_iterations);
-//  if (workn != 0) w->Work(workn);
-  double rating = cf->Predict(1,100);
+  uint64_t uid = ntoh64(p->user_id);
+  uint64_t mid = ntoh64(p->movie_id);
+  double rating = cf->Predict(uid,mid);
   barrier();
   auto finish = steady_clock::now();
   barrier();
-  p->tsc_end = hton64(rdtscp(&p->cpu));
-  p->cpu = hton32(p->cpu);
+//  p->tsc_end = hton64(rdtscp(&p->cpu));
+//  p->cpu = hton32(p->cpu);
   p->queueing_delay = hton64(rt::RuntimeQueueingDelayUS());
   p->processing_time = hton64(duration_cast<microseconds>(finish - start).count());
+  p->rating = htonf(rating);
 
   ssize_t ret = ctx->conn->WriteFull(&ctx->p, sizeof(ctx->p));
   if (ret != static_cast<ssize_t>(sizeof(ctx->p))) {
