@@ -499,7 +499,7 @@ public:
     }
   }
 
-  void BroadcastCancel(uint64_t idx, FanoutTracker* ft) {
+  void BroadcastCancel(FanoutTracker* ft) {
     for (int i = 0; i < kFanoutSize; ++i) {
       if (ft->outstanding[i]) {
         // need to cancel request
@@ -569,7 +569,28 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
     pd = cq->DequeRequest();
 
     uint64_t idx = ntoh64(pd.request_index);
+    uint64_t user_id = ntoh64(pd.user_id);
+    uint64_t movie_id = ntoh64(pd.movie_id);
+
     FanoutTracker *ft = cq->GetTrackerByIdx(idx);
+
+    if (ft == nullptr) {
+      // response already handled.
+      continue;
+    }
+
+    if (user_id == 0 && movie_id == 0) {
+      // revoke msg: send message right away
+      ssize_t sret = c->WriteFull(&pd, sizeof(pd));
+      if (sret != static_cast<ssize_t>(sizeof(pd))) {
+        if (sret == -EPIPE || sret == -ECONNRESET) break;
+        log_err("write failed, ret = %ld", sret);
+        break;
+      }
+      ft->outstanding[worker_id] = true;
+      continue;
+    }
+
     barrier();
     auto now = steady_clock::now();
     barrier();
@@ -578,7 +599,7 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
         ft->timed_out) {
       if (!ft->MarkTimedOut()) {
         // broadcast cancel msg
-        fm->BroadcastCancel(idx, ft);
+        fm->BroadcastCancel(ft);
       }
       continue;
     }
@@ -593,7 +614,7 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
         ft->timed_out) {
       if (!ft->MarkTimedOut()) {
         // broadcast cancle msg
-        fm->BroadcastCancel(idx, ft);
+        fm->BroadcastCancel(ft);
       }
       monitor->CancelSend();
       continue;
