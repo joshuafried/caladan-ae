@@ -15,6 +15,9 @@ extern "C" {
 #include <mlpack/methods/cf/cf.hpp>
 #include <mlpack/methods/cf/decomposition_policies/randomized_svd_method.hpp>
 #include <mlpack/methods/cf/decomposition_policies/regularized_svd_method.hpp>
+#include <mlpack/methods/cf/neighbor_search_policies/lmetric_search.hpp>
+#include <mlpack/methods/cf/neighbor_search_policies/cosine_search.hpp>
+#include <mlpack/methods/cf/neighbor_search_policies/pearson_search.hpp>
 
 #include <algorithm>
 #include <atomic>
@@ -30,6 +33,195 @@ using namespace mlpack;
 using namespace mlpack::cf;
 
 using sec = duration<double, std::micro>;
+
+// A prime number as hash size gives a better distribution of values in buckets
+constexpr uint64_t HASH_SIZE_DEFAULT = 10009;
+
+// Class representing a templatized hash node
+template <typename K, typename V>
+class HashNode
+{
+  public:
+    HashNode() : next(nullptr) {}
+    HashNode(K key_, V value_) : next(nullptr), key(key_), value(value_) {}
+    ~HashNode() {
+        next = nullptr;
+    }
+
+    const K& getKey() const {return key;}
+    void setValue(V value_) {value = value_;}
+    const V& getValue() const {return value;}
+
+    // Pointer to the next node in the same bucket
+    HashNode *next;
+  private:
+    K key;
+    V value;
+};
+
+// Class representing a hash bucket. The bucket is implemented as a singly linked list.
+// A bucket is always constructed with a dummy head node
+template <typename K, typename V>
+class HashBucket {
+public:
+  HashBucket() : head(nullptr) {}
+
+  ~HashBucket() {
+    // delete the bucket
+    clear();
+  }
+
+  // Find an entry in the bucket matching the key
+  // If key is found, the corresponding value is copied into the parameter "value" and function returns true.
+  // If key is not found, function returns false
+  bool find(const K &key, V &value) {
+    // A shared mutex is used to enable mutiple concurrent reads
+    {
+      rt::ScopedLock<rt::Mutex> lk(&bucket_lock_);
+      HashNode<K, V> * node = head;
+
+      while (node != nullptr) {
+        if (node->getKey() == key) {
+          value = node->getValue();
+          return true;
+        }
+        node = node->next;
+      }
+      return false;
+    }
+  }
+
+  // Insert into the bucket
+  // If key already exists, update the value, else insert a new node in the bucket with the <key, value> pair
+  void insert(const K &key, const V &value) {
+    // Exclusive lock to enable single write in the bucket
+    {
+      rt::ScopedLock<rt::Mutex> lk(&bucket_lock_);
+      HashNode<K, V> * prev = nullptr;
+      HashNode<K, V> * node = head;
+
+      while (node != nullptr && node->getKey() != key) {
+        prev = node;
+        node = node->next;
+      }
+
+      if (nullptr == node) {
+        // New entry, create a node and add to bucket
+
+        if(nullptr == head) {
+          head = new HashNode<K, V>(key, value);
+        } else {
+          prev->next = new HashNode<K, V>(key, value);                 
+        }
+      } else {
+        // Key found in bucket, update the value
+        node->setValue(value); 
+      }
+    }
+  }
+
+  // Remove an entry from the bucket, if found
+  void erase(const K &key) {
+    // Exclusive lock to enable single write in the bucket
+    {
+      rt::ScopedLock<rt::Mutex> lk(&bucket_lock_);
+      HashNode<K, V> *prev  = nullptr;
+      HashNode<K, V> * node = head;
+
+      while (node != nullptr && node->getKey() != key) {
+        prev = node;
+        node = node->next;
+      }
+
+      if (nullptr == node) {
+        // Key not found, nothing to be done
+          return;
+      } else {
+        // Remove the node from the bucket
+        if(head == node) {
+          head = node->next;
+        } else {
+          prev->next = node->next; 
+        }
+        delete node;
+      }
+    }
+  }
+
+  // Clear the bucket
+  void clear() {
+    {
+      rt::ScopedLock<rt::Mutex> lk(&bucket_lock_);
+      HashNode<K, V> * prev = nullptr;
+      HashNode<K, V> * node = head;
+      while(node != nullptr) {
+        prev = node;
+        node = node->next;
+        delete prev;
+      }
+      head = nullptr;
+    }
+  }
+
+private:
+  // The head node of the bucket
+  HashNode<K, V> * head;
+  // Per-bucket lock
+  rt::Mutex bucket_lock_;
+};
+
+// Per-bucket Lock HashMap
+template <typename K, typename V, typename F = std::hash<K> >
+class HashMap {
+public:
+  HashMap(size_t hashSize_ = HASH_SIZE_DEFAULT) : hashSize(hashSize_) {
+    // Create the hash table as an array of hash buckets
+    hashTable = new HashBucket<K, V>[hashSize];
+  }
+
+  ~HashMap() {
+    delete [] hashTable;
+  }
+  // Copy and Move of the HashMap are not supported at this moment
+  HashMap(const HashMap&) = delete;
+  HashMap(HashMap&&) = delete;
+  HashMap& operator=(const HashMap&) = delete;  
+  HashMap& operator=(HashMap&&) = delete;
+
+  // Find an entry in the hash map matching the key.
+  // If key is found, the corresponding value is copied into the parameter "value" and function returns true.
+  // If key is not found, function returns false.
+  bool find(const K &key, V &value) const  {
+    size_t hashValue = hashFn(key) % hashSize ;
+    return hashTable[hashValue].find(key, value);
+  }
+
+  // Insert into the hash map.
+  // If key already exists, update the value, else insert a new node in the bucket with the <key, value> pair.
+  void insert(const K &key, const V &value) {
+    size_t hashValue = hashFn(key) % hashSize ;
+    hashTable[hashValue].insert(key, value);
+  }
+
+  // Remove an entry from the bucket, if found
+  void erase(const K &key) {
+    size_t hashValue = hashFn(key) % hashSize ;
+    hashTable[hashValue].erase(key);
+  }   
+
+  // Clean up the hash map
+  void clear() {
+    for(size_t i = 0; i < hashSize; i++) {
+      (hashTable[i]).clear();
+    }
+  }
+
+private:
+  HashBucket<K, V> * hashTable;
+  F hashFn;
+  const size_t hashSize;
+};
+
 
 static float htonf(float value) {
   union v {
@@ -265,8 +457,9 @@ private:
 
 class RequestContext {
 public:
-  RequestContext(std::shared_ptr<SharedTcpStream> c) : conn(c) {}
+  RequestContext(std::shared_ptr<SharedTcpStream> c) : timed_out(false), conn(c) {}
   payload p;
+  bool timed_out;
   std::shared_ptr<SharedTcpStream> conn;
   void *operator new(size_t size) {
     void *p = smalloc(size);
@@ -282,6 +475,8 @@ void HandleRequest(RequestContext *ctx,
   auto w = wpool->GetWorker(rt::RuntimeKthreadIdx());
   payload *p = &ctx->p;
 
+  if (ctx->timed_out)
+    return;
   // perform fake work
   auto start = steady_clock::now();
   uint64_t uid = ntoh64(p->user_id);
@@ -290,10 +485,12 @@ void HandleRequest(RequestContext *ctx,
   barrier();
   auto finish = steady_clock::now();
   barrier();
-//  p->tsc_end = hton64(rdtscp(&p->cpu));
-//  p->cpu = hton32(p->cpu);
+
+  uint64_t processing_time = duration_cast<microseconds>(finish - start).count();
+
+//  std::cout << rating << " / " << processing_time << std::endl;
   p->queueing_delay = hton64(rt::RuntimeQueueingDelayUS());
-  p->processing_time = hton64(duration_cast<microseconds>(finish - start).count());
+  p->processing_time = hton64(processing_time);
   p->rating = htonf(rating);
 
   ssize_t ret = ctx->conn->WriteFull(&ctx->p, sizeof(ctx->p));
@@ -303,7 +500,8 @@ void HandleRequest(RequestContext *ctx,
 }
 
 void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPool> wpool,
-                  std::shared_ptr<RateController> rc, CFType<> *cf) {
+                  std::shared_ptr<RateController> rc, CFType<> *cf,
+                  std::shared_ptr<HashMap<uint64_t, RequestContext *>> context_by_id) {
   auto resp = std::make_shared<SharedTcpStream>(c);
 
   /* allocate context */
@@ -343,8 +541,23 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
     auto now = steady_clock::now();
     barrier();
 */
+    uint64_t user_id = ntoh64(p->user_id);
+    uint64_t movie_id = ntoh64(p->movie_id);
+    uint64_t index = ntoh64(p->request_index);
+
+    if (user_id == 0 && movie_id == 0) {
+      // mark context as timeout
+      RequestContext *to_ctx;
+      if (context_by_id->find(index, to_ctx)) {
+        to_ctx->timed_out = true;
+      }
+    } else {
+      context_by_id->insert(index, ctx);
+    }
+
     rt::Thread([=] {
       HandleRequest(ctx, wpool, cf);
+      context_by_id->erase(index);
       delete ctx;
 //      auto ts = steady_clock::now();
 //      rc->SampleResponseTime(duration_cast<microseconds>(ts - now).count());
@@ -357,6 +570,7 @@ void ServerHandler(void *arg) {
   auto wpool = std::make_shared<SharedWorkerPool>("stridedmem:3200:64");
   TokenBucket *tb = new TokenBucket(1000);
   auto rc = std::make_shared<RateController>(std::shared_ptr<TokenBucket>(tb));
+  auto context_by_id = std::make_shared<HashMap<uint64_t, RequestContext*>>();
 
   // Load sharded data
   std::cout << "Loading Data..." << std::endl;
@@ -379,7 +593,7 @@ void ServerHandler(void *arg) {
   while (true) {
     rt::TcpConn *c = q->Accept();
     if (c == nullptr) panic("couldn't accept a connection");
-    rt::Thread([=] { ServerWorker(std::shared_ptr<rt::TcpConn>(c), wpool, rc, cf); }).Detach();
+    rt::Thread([=] { ServerWorker(std::shared_ptr<rt::TcpConn>(c), wpool, rc, cf, context_by_id); }).Detach();
   }
 }
 
