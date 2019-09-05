@@ -332,12 +332,18 @@ private:
 class FanoutTracker {
 public:
   FanoutTracker(std::shared_ptr<SharedTcpStream> c) : 
+    timed_out(false),
     response_waiting_(kFanoutSize), max_delay_(0),
-    sum_processing_time_(0), sum_rating_(0), conn_(c) {}
+    sum_processing_time_(0), sum_rating_(0), conn_(c) {
+      for (int i = 0; i < kFanoutSize; ++i) {
+        outstanding[i] = false;
+      }
+    }
 
-  int ReceiveResponse(uint64_t queueing_delay, uint64_t processing_time, float rating) {
+  int ReceiveResponse(uint64_t queueing_delay, uint64_t processing_time, float rating, int worker_id) {
     int rw;
 
+    outstanding[worker_id] = false;
     s_.Lock();
     response_waiting_--;
     if (queueing_delay > max_delay_)
@@ -362,11 +368,24 @@ public:
     return rw;
   }
 
+  bool MarkTimedOut() {
+    bool ret;
+    s_.Lock();
+    ret = timed_out;
+    timed_out = true;
+    s_.Unlock();
+
+    return ret;
+  }
+
   // Upstream response payload
   payload p;
 
   time_point<steady_clock> start_time;
   time_point<steady_clock> timings[kFanoutSize];
+  bool outstanding[kFanoutSize];
+  bool timed_out;
+  uint64_t child_index[kFanoutSize];
 
 private:
   // Spin lock for response_waiting_
@@ -388,12 +407,11 @@ public:
     tracker_by_id = new HashMap<uint64_t, FanoutTracker*>();
   }
 
-  void EnqueueRequest(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
+  uint64_t EnqueueRequest(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
     uint64_t idx;
 
     m_.Lock();
     idx = next_index_++;
-
     payload pd;
     pd.user_id = hton64(user_id);
     pd.movie_id = hton64(movie_id);
@@ -403,17 +421,36 @@ public:
     m_.Unlock();
 
     tracker_by_id->insert(idx, ft);
+
+    return idx;
+  }
+
+  void CancelRequest(uint64_t idx) {
+    m_.Lock();
+    payload pd;
+    pd.user_id = hton64(0);
+    pd.movie_id = hton64(0);
+    pd.request_index = hton64(idx);
+    cancel_q_.push(pd);
+    cv_.Signal();
+    m_.Unlock();
   }
 
   payload DequeRequest() {
     m_.Lock();
     payload ret;
-    while (q_.empty()){
+    while (cancel_q_.empty() && q_.empty()){
       cv_.Wait(&m_);
     }
 
-    ret = q_.front();
-    q_.pop();
+    if (!cancel_q_.empty()) {
+      ret = cancel_q_.front();
+      cancel_q_.pop();
+    } else {
+      ret = q_.front();
+      q_.pop();
+    }
+
     m_.Unlock();
 
     return ret;
@@ -434,8 +471,9 @@ public:
 
 private:
   HashMap<uint64_t, FanoutTracker *> *tracker_by_id;
-  std::queue<payload> q_;
   uint64_t next_index_;
+  std::queue<payload> q_;
+  std::queue<payload> cancel_q_;
   rt::CondVar cv_;
   rt::Mutex m_;
 };
@@ -456,7 +494,18 @@ public:
 
   void FanoutAll(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
     for (int i = 0; i < kFanoutSize; ++i) {
-      child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
+      uint64_t child_idx = child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
+      ft->child_index[i] = child_idx;
+    }
+  }
+
+  void BroadcastCancel(uint64_t idx, FanoutTracker* ft) {
+    for (int i = 0; i < kFanoutSize; ++i) {
+      if (ft->outstanding[i]) {
+        // need to cancel request
+        child_qs_[i]->CancelRequest(ft->child_index[i]);
+        ft->outstanding[i] = false;
+      }
     }
   }
 
@@ -464,7 +513,8 @@ private:
   std::vector<std::shared_ptr<ChildQueue>> child_qs_;
 };
 
-void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<ChildQueue> cq, int worker_id) {
+void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<FanoutManager> fm, int worker_id) {
+  std::shared_ptr<ChildQueue> cq = fm->GetChildQueue(worker_id);
   StatMonitor *monitor = new StatMonitor(20);
 
   uint64_t ewma_exe_time = 0;
@@ -502,7 +552,7 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Ch
       ewma_exe_time = static_cast<uint64_t>(0.8*ewma_exe_time + 0.2*latency_us);
 
       // tracker->ReceiveResponse
-      if (ft->ReceiveResponse(queueing_delay, processing_time, rating) == 0)
+      if (ft->ReceiveResponse(queueing_delay, processing_time, rating, worker_id) == 0)
         delete ft;
 
       monitor->RecvResponse();
@@ -524,8 +574,14 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Ch
     auto now = steady_clock::now();
     barrier();
 
-    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000))
+    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000) ||
+        ft->timed_out) {
+      if (!ft->MarkTimedOut()) {
+        // broadcast cancel msg
+        fm->BroadcastCancel(idx, ft);
+      }
       continue;
+    }
 
     monitor->RequestSend();
 
@@ -533,7 +589,12 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Ch
     now = steady_clock::now();
     barrier();
 
-    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000)) {
+    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000) ||
+        ft->timed_out) {
+      if (!ft->MarkTimedOut()) {
+        // broadcast cancle msg
+        fm->BroadcastCancel(idx, ft);
+      }
       monitor->CancelSend();
       continue;
     }
@@ -547,6 +608,8 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Ch
       log_err("write failed, ret = %ld", sret);
       break;
     }
+
+    ft->outstanding[worker_id] = true;
   }
 
   c->Shutdown(SHUT_RDWR);
@@ -571,8 +634,12 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
       delete ft;
       break;
     }
+
+    uint64_t user_id = ntoh64(p->user_id);
+    uint64_t movie_id = ntoh64(p->movie_id);
+
     ft->start_time = steady_clock::now();
-    fm->FanoutAll(ntoh64(p->user_id), ntoh64(p->movie_id), ft);
+    fm->FanoutAll(user_id, movie_id, ft);
     
     ft = new FanoutTracker(uc);
   }
@@ -610,7 +677,7 @@ void FanoutHandler(void *arg) {
 
   for (int i = 0; i < kFanoutSize; ++i) {
     th.emplace_back(rt::Thread([&, i] {
-      DownstreamWorker(child_conns[i].get(), &starter, fm->GetChildQueue(i), i);
+      DownstreamWorker(child_conns[i].get(), &starter, fm, i);
     }));
   }
 
