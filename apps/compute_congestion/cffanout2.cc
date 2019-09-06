@@ -279,6 +279,7 @@ public:
   void CancelSend() {
     m_.Lock();
     nif_--;
+    cv_.Signal();
     m_.Unlock();
   }
 
@@ -354,7 +355,7 @@ public:
     s_.Unlock();
 
     // send response back to the upstream
-    if (rw == 0) {
+    if (rw == 0 && !timed_out) {
       p.queueing_delay = hton64(rt::RuntimeQueueingDelayUS() + max_delay_);
       p.processing_time = hton64(static_cast<uint64_t>(sum_processing_time_ / kFanoutSize));
       p.rating = htonf(sum_rating_ / kFanoutSize);
@@ -484,12 +485,17 @@ public:
     child_qs_.reserve(kFanoutSize);
   }
 
-  void AddFanoutNode(std::shared_ptr<ChildQueue> cq) {
+  void AddFanoutNode(std::shared_ptr<ChildQueue> cq, std::shared_ptr<StatMonitor> m) {
     child_qs_.push_back(cq);
+    monitors_.push_back(m);
   }
 
   std::shared_ptr<ChildQueue> GetChildQueue(unsigned int idx) {
     return child_qs_[idx];
+  }
+
+  std::shared_ptr<StatMonitor> GetMonitor(unsigned int idx) {
+    return monitors_[idx];
   }
 
   void FanoutAll(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
@@ -504,18 +510,21 @@ public:
       if (ft->outstanding[i]) {
         // need to cancel request
         child_qs_[i]->CancelRequest(ft->child_index[i]);
+        monitors_[i]->CancelSend();
         ft->outstanding[i] = false;
       }
+      child_qs_[i]->EraseTrackerByIdx(ft->child_index[i]);
     }
   }
 
 private:
   std::vector<std::shared_ptr<ChildQueue>> child_qs_;
+  std::vector<std::shared_ptr<StatMonitor>> monitors_;
 };
 
 void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<FanoutManager> fm, int worker_id) {
   std::shared_ptr<ChildQueue> cq = fm->GetChildQueue(worker_id);
-  StatMonitor *monitor = new StatMonitor(20);
+  std::shared_ptr<StatMonitor> monitor = fm->GetMonitor(worker_id);
 
   uint64_t ewma_exe_time = 0;
 
@@ -544,13 +553,14 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
         continue;
       cq->EraseTrackerByIdx(index);
 
-      barrier();
-      auto now = steady_clock::now();
-      barrier();
-      double latency_us = duration_cast<sec>(now - ft->timings[worker_id]).count();
-
-      ewma_exe_time = static_cast<uint64_t>(0.8*ewma_exe_time + 0.2*latency_us);
-
+      if (processing_time > 0) {
+        barrier();
+        auto now = steady_clock::now();
+        barrier();
+        double latency_us = duration_cast<sec>(now - ft->timings[worker_id]).count();
+  
+        ewma_exe_time = static_cast<uint64_t>(0.8*ewma_exe_time + 0.2*latency_us);
+      }
       // tracker->ReceiveResponse
       if (ft->ReceiveResponse(queueing_delay, processing_time, rating, worker_id) == 0)
         delete ft;
@@ -682,7 +692,7 @@ void FanoutHandler(void *arg) {
   auto fm = std::make_shared<FanoutManager>();
 
   for (int i = 0; i < num_leafs; ++i) {
-    fm->AddFanoutNode(std::make_shared<ChildQueue>());
+    fm->AddFanoutNode(std::make_shared<ChildQueue>(), std::make_shared<StatMonitor>(20));
   }
 
   std::vector<std::unique_ptr<rt::TcpConn>> child_conns;
