@@ -237,7 +237,7 @@ static uint32_t hwq_find_head(struct hwq *h, uint32_t cur_tail, uint32_t last_he
 	return i + start_idx;
 }
 
-static bool hardware_queue_congested(struct thread *th, struct hwq *h,
+static bool hardware_queue_congested(struct proc *p, struct thread *th, struct hwq *h,
 				bool update_pointers)
 {
 	uint32_t cur_tail, cur_head, last_head;
@@ -255,7 +255,7 @@ static bool hardware_queue_congested(struct thread *th, struct hwq *h,
 		h->last_head = cur_head;
 	}
 
-	return th->active ? wraps_lt(cur_tail, last_head) :
+	return (th->active || (h->queue_steering && p->active_thread_count)) ? wraps_lt(cur_tail, last_head) :
 				 cur_head != cur_tail;
 }
 
@@ -296,10 +296,10 @@ static void sched_detect_congestion(struct proc *p)
 			bitmap_set(ios, i);
 		}
 
-		if (hardware_queue_congested(th, &th->directpath_hwq, true))
+		if (hardware_queue_congested(p, th, &th->directpath_hwq, true))
 			bitmap_set(ios, i);
 
-		if (hardware_queue_congested(th, &th->storage_hwq, true))
+		if (hardware_queue_congested(p, th, &th->storage_hwq, true))
 			bitmap_set(ios, i);
 	}
 
@@ -332,7 +332,7 @@ static void sched_detect_io_for_idle_runtime(struct proc *p)
 	for (i = 0; i < p->thread_count; i++) {
 		th = &p->threads[i];
 
-		if (hardware_queue_congested(th, &th->directpath_hwq, false)) {
+		if (hardware_queue_congested(p, th, &th->directpath_hwq, false)) {
 			sched_add_core(p);
 			return;
 		}
