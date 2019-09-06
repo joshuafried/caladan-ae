@@ -474,21 +474,20 @@ void HandleRequest(RequestContext *ctx,
                    CFType<> *cf) {
   auto w = wpool->GetWorker(rt::RuntimeKthreadIdx());
   payload *p = &ctx->p;
-  uint64_t processing_time = 0;
-  double rating = 0;
 
-  if (!ctx->timed_out) {
-    // perform fake work
-    auto start = steady_clock::now();
-    uint64_t uid = ntoh64(p->user_id);
-    uint64_t mid = ntoh64(p->movie_id);
-    rating = cf->Predict(uid,mid);
-    barrier();
-    auto finish = steady_clock::now();
-    barrier();
+  if (ctx->timed_out)
+    return;
+
+  // perform fake work
+  auto start = steady_clock::now();
+  uint64_t uid = ntoh64(p->user_id);
+  uint64_t mid = ntoh64(p->movie_id);
+  double rating = cf->Predict(uid,mid);
+  barrier();
+  auto finish = steady_clock::now();
+  barrier();
   
-    processing_time = duration_cast<microseconds>(finish - start).count();
-  }
+  uint64_t processing_time = duration_cast<microseconds>(finish - start).count();
 
   p->queueing_delay = hton64(rt::RuntimeQueueingDelayUS());
   p->processing_time = hton64(processing_time);
