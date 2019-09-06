@@ -618,6 +618,11 @@ static int deregister_flow_iokernel(struct trans_entry *e, void *handle)
 	return 0;
 }
 
+static int iokernel_has_work(struct hardware_q *rxq)
+{
+	return 0;
+}
+
 static struct net_driver_ops iokernel_ops = {
 	.rx_batch = rx_batch_iokernel,
 	.tx_single = net_tx_iokernel,
@@ -625,6 +630,7 @@ static struct net_driver_ops iokernel_ops = {
 	.register_flow =  register_flow_iokernel,
 	.deregister_flow = deregister_flow_iokernel,
 	.get_flow_affinity = compute_flow_affinity,
+	.rxq_has_work = iokernel_has_work,
 };
 
 /**
