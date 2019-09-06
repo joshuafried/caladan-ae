@@ -10,6 +10,7 @@ extern "C" {
 #include "sync.h"
 #include "thread.h"
 
+#include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -344,8 +345,10 @@ public:
   int ReceiveResponse(uint64_t queueing_delay, uint64_t processing_time, float rating, int worker_id) {
     int rw;
 
-    outstanding[worker_id] = false;
     s_.Lock();
+    if (!outstanding[worker_id])
+      printf("[WARNING] I received not outstanding response.\n");
+    outstanding[worker_id] = false;
     response_waiting_--;
     if (queueing_delay > max_delay_)
       max_delay_ = queueing_delay;
@@ -377,6 +380,24 @@ public:
     s_.Unlock();
 
     return ret;
+  }
+
+  bool MarkNotOutstandingIfOutstanding(int idx) {
+    bool ret = outstanding[idx];
+    s_.Lock();
+    if (ret)
+      outstanding[idx] = false;
+    s_.Unlock();
+
+    return ret;
+  }
+
+  void MarkOutstanding(int idx) {
+    s_.Lock();
+    if (outstanding[idx])
+      printf("[WARNING] Marking outstanding to already outstanding\n");
+    outstanding[idx] = true;
+    s_.Unlock();
   }
 
   // Upstream response payload
@@ -507,12 +528,14 @@ public:
 
   void BroadcastCancel(FanoutTracker* ft) {
     for (int i = 0; i < kFanoutSize; ++i) {
-      if (ft->outstanding[i]) {
+
+      if (ft->MarkNotOutstandingIfOutstanding(i)) {
+//      if (ft->outstanding[i]) {
         // need to cancel request
         child_qs_[i]->CancelRequest(ft->child_index[i]);
         monitors_[i]->CancelSend();
-        ft->outstanding[i] = false;
-      }
+//        ft->outstanding[i] = false;
+      } 
       child_qs_[i]->EraseTrackerByIdx(ft->child_index[i]);
     }
   }
@@ -601,35 +624,30 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
       continue;
     }
 
-    barrier();
-    auto now = steady_clock::now();
-    barrier();
-
-    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000) ||
-        ft->timed_out) {
-      if (!ft->MarkTimedOut()) {
-        // broadcast cancel msg
-        fm->BroadcastCancel(ft);
-      }
+    // Skip the timed out request.
+    if (ft->timed_out)
       continue;
-    }
 
     monitor->RequestSend();
 
     barrier();
-    now = steady_clock::now();
+    auto now = steady_clock::now();
     barrier();
 
-    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000) ||
-        ft->timed_out) {
+    // queueing delay + exepected execution time + 1ms > SLO Limit, drop the request.
+    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000)) {
+      ft->MarkTimedOut();
+      fm->BroadcastCancel(ft);
+      /*
       if (!ft->MarkTimedOut()) {
         // broadcast cancle msg
         fm->BroadcastCancel(ft);
-      }
+      }*/
       monitor->CancelSend();
       continue;
     }
 
+    ft->outstanding[worker_id] = true;
     ft->timings[worker_id] = now;
 
     // send to downstream
@@ -640,7 +658,6 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
       break;
     }
 
-    ft->outstanding[worker_id] = true;
   }
 
   c->Shutdown(SHUT_RDWR);
@@ -674,7 +691,6 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
     
     ft = new FanoutTracker(uc);
   }
-
 }
 
 void UpstreamHandler(std::shared_ptr<FanoutManager> fm) {
