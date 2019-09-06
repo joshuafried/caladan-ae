@@ -34,6 +34,7 @@ using sec = duration<double, std::micro>;
 // <- ARGUMENTS FOR EXPERIMENT ->
 // the number of worker threads to spawn.
 int threads;
+double offered_load;
 // the remote UDP address of the server.
 netaddr raddr;
 // the mean service time in us.
@@ -172,19 +173,8 @@ std::vector<work_unit> ClientWorker(
   timings.reserve(w.size());
 
   // window-based CC
-  // current window size
-  double cwnd = 4.0;
-  // number of outstanding requests
-  uint32_t num_outst_req = 0;
-  double recent_rtt = 25.0;
-  
-  uint64_t ewma_exe_time = 0;
-  
-  rt::Mutex m_;
-  rt::CondVar cv_;
 
   time_point<steady_clock> expstart;
-  unsigned int target_us = 25;
 
   // Start the receiver thread.
   auto th = rt::Thread([&] {
@@ -206,57 +196,6 @@ std::vector<work_unit> ClientWorker(
       w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
       // execution time + client queueing delay
       w[idx].latency_us = duration_cast<sec>(ts - expstart).count() - w[idx].start_us;
-
-      ewma_exe_time = static_cast<uint64_t>(0.8*ewma_exe_time + 0.2*w[idx].latency_us);
-
-      uint64_t queueing_delay = ntoh64(rp.queueing_delay);
-      uint64_t processing_time = ntoh64(rp.processing_time);
-      uint64_t new_target_us = std::max<uint64_t>(
-                                   static_cast<uint64_t>(0.8*target_us + 0.2*processing_time),
-                                   25);
-      double new_recent_rtt = 0.8*recent_rtt + 0.2* w[idx].duration_us;
-
-      if (worker_id == 0) {
-        queues.emplace_back(duration_cast<sec>(ts - expstart).count(),
-                            queueing_delay);
-      }
-
-      // window-based CC
-      double new_cwnd = cwnd;
-
-      if (queueing_delay > (uint64_t)(target_us * 1.5)) {
-        if (num_outst_req <= cwnd || cwnd < 1.0)
-          new_cwnd = cwnd * 0.8;
-      } else if (queueing_delay <= target_us) {
-        if (cwnd > 1.0) {
-          new_cwnd = cwnd + 0.2/cwnd;
-        } else {
-          double add_inc = cwnd + 0.002/cwnd;
-          add_inc = std::min<double>(add_inc, 0.02);
-          new_cwnd = cwnd + add_inc;
-        }
-      } else {
-        if (cwnd > 1.0)
-          new_cwnd = cwnd - 0.2;
-        else
-          new_cwnd = cwnd * 0.9;
-      }
-
-      if (worker_id == 0) {
-        cwnds.emplace_back(duration_cast<sec>(ts - expstart).count(),
-                           new_cwnd);
-      }
-
-      if (new_cwnd < 1.0)
-        new_cwnd = 1.0;
-
-      m_.Lock();
-      recent_rtt = new_recent_rtt;
-      target_us = new_target_us;
-      num_outst_req--;
-      cwnd = new_cwnd;
-      cv_.Signal();
-      m_.Unlock();
     }
   });
 
@@ -288,57 +227,12 @@ std::vector<work_unit> ClientWorker(
       rt::Sleep(w[i].start_us - duration_cast<sec>(now - expstart).count());
     }
 
-/*
-    if (duration_cast<sec>(now - expstart).count() - w[i].start_us > kSLOUS)
-      continue;
-
-    if (((cwnd >= 1.0) && ((double)(num_outst_req + 1) > cwnd)) ||
-        ((cwnd < 1.0) && (num_outst_req > 0)))
-      continue;
-
-    if (cwnd < 1.0) {
-      double time_to_sleep = 50.0 / cwnd;
-      time_to_sleep = std::min<double>(time_to_sleep, 10000);
-      rt::Sleep(static_cast<uint64_t>(time_to_sleep));
-    }
-
-    m_.Lock();
-    num_outst_req++;
-    m_.Unlock();
- */
-
-    // window-based CC
-//    m_.Lock();
-//    if ((double)(num_outst_req + 1) > cwnd && j > 0) {
     if (j > 0) {
       ssize_t ret = c->WriteFull(p, sizeof(payload) * j);
       if (ret != static_cast<ssize_t>(sizeof(payload) * j))
         panic("write failed, ret = %ld", ret);
       j = 0;
     }
-
-    m_.Lock();
-    while ((cwnd >= 1.0 && (double)(num_outst_req + 1) > cwnd) || 
-           (cwnd < 1.0 && num_outst_req > 0)) {
-      cv_.Wait(&m_);
-    }
-    barrier();
-    now = steady_clock::now();
-    barrier();
-
-    if (cwnd < 1.0) {
-      double time_to_sleep = recent_rtt / cwnd;
-      time_to_sleep = std::min<double>(time_to_sleep, 10000);
-      rt::Sleep((uint64_t)time_to_sleep);
-    }
-
-    if (duration_cast<sec>(now - expstart).count() - w[i].start_us > (kSLOUS - ewma_exe_time)) {
-      m_.Unlock();
-      continue;
-    }
-
-    num_outst_req++;
-    m_.Unlock();
 
     barrier();
     timings[i] = steady_clock::now();
@@ -620,9 +514,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
 }
 
 void ClientHandler(void *arg) {
-  for (double i = 1000; i <= 20000; i += 1000) {
-    SteadyStateExperiment(threads, i, st);
-  }
+    SteadyStateExperiment(threads, offered_load, st);
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {
@@ -675,7 +567,8 @@ int main(int argc, char *argv[]) {
   raddr.port = kNetbenchPort;
 
   st = std::stod(argv[5], nullptr);
-
+  offered_load = std::stod(argv[6], nullptr);
+/*
   for (i = 6; i < argc; i++) {
     std::vector<std::string> tokens = split(argv[i], ':');
     if (tokens.size() != 2) return -EINVAL;
@@ -688,7 +581,8 @@ int main(int argc, char *argv[]) {
 #endif
     rates.emplace_back(rate, duration);
   }
-
+*/
+  
   std::ifstream movie_file("movie.csv");
   uint64_t movie_id;
   while (movie_file >> movie_id) {

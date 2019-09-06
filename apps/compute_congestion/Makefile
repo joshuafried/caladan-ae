@@ -23,6 +23,9 @@ netbench5_obj = $(netbench5_src:.cc=.o)
 cfclient_src = cfclient.cc
 cfclient_obj = $(cfclient_src:.cc=.o)
 
+cfclient2_src = cfclient2.cc
+cfclient2_obj = $(cfclient2_src:.cc=.o)
+
 loadbalancer_src = loadbalancer.cc
 loadbalancer_obj = $(loadbalancer_src:.cc=.o)
 
@@ -54,7 +57,7 @@ RUNTIME_LIBS := $(RUNTIME_LIBS) -lnuma
 CF_LIBS = -larmadillo -lmlpack -fopenmp
 
 # must be first
-all: netbench netbench2 netbench3 netbench4 netbench5 cfclient \
+all: netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 \
  	loadbalancer server cfserver fanout fanout2 fanout3 cffanout cffanout2
 
 $(cfserver_obj): $(cfserver_src)
@@ -82,6 +85,10 @@ netbench5: $(lib_obj) $(netbench5_obj) $(librt_libs) $(RUNTIME_DEPS)
 
 cfclient: $(lib_obj) $(cfclient_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cfclient_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
+cfclient2: $(lib_obj) $(cfclient2_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cfclient2_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
 
 loadbalancer: $(lib_obj) $(loadbalancer_obj) $(librt_libs) $(RUNTIME_DEPS)
@@ -119,8 +126,8 @@ cffanout2: $(lib_obj) $(cffanout2_obj) $(librt_libs) $(RUNTIME_DEPS)
 
 # general build rules for all targets
 src = $(lib_src) $(netbench_src) $(netbench2_src) $(netbench3_src) $(netbench4_src) \
-		  $(netbench5_src) $(cfclient_src) $(loadbalancer_src) $(server_src) $(cfserver_src) \
-		 	$(fanout_src) $(fanout2_src) $(fanout3_src) $(cffanout_src) $(cffanout2_src)
+		  $(netbench5_src) $(cfclient_src) $(cfclient2_src) $(loadbalancer_src) $(server_src) \
+		 	$(cfserver_src)	$(fanout_src) $(fanout2_src) $(fanout3_src) $(cffanout_src) $(cffanout2_src)
 obj = $(src:.cc=.o)
 dep = $(obj:.o=.d)
 
@@ -137,5 +144,5 @@ endif
 
 .PHONY: clean
 clean:
-	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 netbench5 cfclient \
+	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 \
 		loadbalancer server cfserver fanout fanout2 fanout3 cffanout cffanout2
