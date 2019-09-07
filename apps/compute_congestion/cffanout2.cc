@@ -425,7 +425,7 @@ private:
 
 class ChildQueue {
 public:
-  ChildQueue(): next_index_(0) {
+  ChildQueue(): queueing_delay_(0), next_index_(0) {
     tracker_by_id = new HashMap<uint64_t, FanoutTracker*>();
   }
 
@@ -445,6 +445,18 @@ public:
     tracker_by_id->insert(idx, ft);
 
     return idx;
+  }
+
+  void ReportQueueingDelay(uint64_t delay_us) {
+    queueing_delay_ = delay_us;
+  }
+
+  uint64_t GetQueueingDelay() {
+    return queueing_delay_;
+  }
+
+  uint64_t GetQueueLength() {
+    return q_.size();
   }
 
   void CancelRequest(uint64_t idx) {
@@ -492,6 +504,7 @@ public:
   }
 
 private:
+  uint64_t queueing_delay_;
   HashMap<uint64_t, FanoutTracker *> *tracker_by_id;
   uint64_t next_index_;
   std::queue<payload> q_;
@@ -524,6 +537,26 @@ public:
       uint64_t child_idx = child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
       ft->child_index[i] = child_idx;
     }
+  }
+
+  uint64_t GetQueueingDelay() {
+    uint64_t max_delay = 0;
+    for (int i = 0; i < kFanoutSize; ++i){
+      uint64_t delay = child_qs_[i]->GetQueueingDelay();
+      if (delay > max_delay)
+        max_delay = delay;
+    }
+    return max_delay;
+  }
+
+  uint64_t GetQueueLength() {
+    uint64_t max_len = 0;
+    for (int i = 0; i < kFanoutSize; ++i) {
+      uint64_t qlen = child_qs_[i]->GetQueueLength();
+      if (qlen > max_len)
+        max_len = qlen;
+    }
+    return max_len;
   }
 
   void BroadcastCancel(FanoutTracker* ft) {
@@ -596,6 +629,8 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
   starter->Wait();
 
   payload pd;
+  int drop_count = 0;
+  time_point<steady_clock> last_send;
   // Sender Loop
   while (true) {
     // If there is enqueued request, send to c
@@ -635,16 +670,20 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
     barrier();
 
     // queueing delay + exepected execution time + 1ms > SLO Limit, drop the request.
-    if (duration_cast<sec>(now - ft->start_time).count() > (kSLOUS - ewma_exe_time - 1000)) {
+    uint64_t queueing_delay = duration_cast<microseconds>(now - ft->start_time).count();
+    uint64_t slo_criteria = queueing_delay + ewma_exe_time + 1000;
+
+    cq->ReportQueueingDelay(slo_criteria);
+
+    if (slo_criteria > kSLOUS) {
       ft->MarkTimedOut();
       fm->BroadcastCancel(ft);
-      /*
-      if (!ft->MarkTimedOut()) {
-        // broadcast cancle msg
-        fm->BroadcastCancel(ft);
-      }*/
       monitor->CancelSend();
+      drop_count++;
       continue;
+    } else {
+      drop_count = 0;
+      last_send = now;
     }
 
     ft->outstanding[worker_id] = true;
@@ -682,6 +721,12 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
       delete ft;
       break;
     }
+
+//    if (fm->GetQueueingDelay() > kSLOUS)
+//      continue;
+
+    if (fm->GetQueueLength() > 10)
+      continue;
 
     uint64_t user_id = ntoh64(p->user_id);
     uint64_t movie_id = ntoh64(p->movie_id);
