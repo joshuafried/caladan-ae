@@ -447,8 +447,8 @@ public:
     return idx;
   }
 
-  void ReportQueueingDelay(uint64_t delay_us) {
-    queueing_delay_ = delay_us;
+  void ReportQueueingDelay(uint64_t delay) {
+    queueing_delay_ = delay;
   }
 
   uint64_t GetQueueingDelay() {
@@ -629,8 +629,7 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
   starter->Wait();
 
   payload pd;
-  int drop_count = 0;
-  time_point<steady_clock> last_send;
+
   // Sender Loop
   while (true) {
     // If there is enqueued request, send to c
@@ -671,21 +670,17 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
 
     // queueing delay + exepected execution time + 1ms > SLO Limit, drop the request.
     uint64_t queueing_delay = duration_cast<microseconds>(now - ft->start_time).count();
-    uint64_t slo_criteria = queueing_delay + ewma_exe_time + 1000;
+    uint64_t slo_criteria = queueing_delay + ewma_exe_time + 5000;
 
     cq->ReportQueueingDelay(slo_criteria);
-
+/*
     if (slo_criteria > kSLOUS) {
       ft->MarkTimedOut();
       fm->BroadcastCancel(ft);
       monitor->CancelSend();
-      drop_count++;
       continue;
-    } else {
-      drop_count = 0;
-      last_send = now;
     }
-
+*/
     ft->outstanding[worker_id] = true;
     ft->timings[worker_id] = now;
 
@@ -722,10 +717,10 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
       break;
     }
 
-//    if (fm->GetQueueingDelay() > kSLOUS)
-//      continue;
+    uint64_t delay = fm->GetQueueingDelay();
+    uint64_t qlen = fm->GetQueueLength();
 
-    if (fm->GetQueueLength() > 10)
+    if (delay > kSLOUS && qlen > 0)
       continue;
 
     uint64_t user_id = ntoh64(p->user_id);
