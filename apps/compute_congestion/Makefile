@@ -50,6 +50,9 @@ cffanout_obj = $(cffanout_src:.cc=.o)
 cffanout2_src = cffanout2.cc
 cffanout2_obj = $(cffanout2_src:.cc=.o)
 
+cffanout3_src = cffanout3.cc
+cffanout3_obj = $(cffanout3_src:.cc=.o)
+
 librt_libs = $(ROOT_PATH)/bindings/cc/librt++.a
 INC += -I$(ROOT_PATH)/bindings/cc
 
@@ -58,7 +61,7 @@ CF_LIBS = -larmadillo -lmlpack -fopenmp
 
 # must be first
 all: netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 \
- 	loadbalancer server cfserver fanout fanout2 fanout3 cffanout cffanout2
+ 	loadbalancer server cfserver fanout fanout2 fanout3 cffanout cffanout2 cffanout3
 
 $(cfserver_obj): $(cfserver_src)
 	$(CXX) $(CXXFLAGS) $(INC) -c $(cfserver_src) -o $@ -fopenmp
@@ -124,10 +127,15 @@ cffanout2: $(lib_obj) $(cffanout2_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cffanout2_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
 
+cffanout3: $(lib_obj) $(cffanout3_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cffanout3_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
 # general build rules for all targets
 src = $(lib_src) $(netbench_src) $(netbench2_src) $(netbench3_src) $(netbench4_src) \
 		  $(netbench5_src) $(cfclient_src) $(cfclient2_src) $(loadbalancer_src) $(server_src) \
-		 	$(cfserver_src)	$(fanout_src) $(fanout2_src) $(fanout3_src) $(cffanout_src) $(cffanout2_src)
+		 	$(cfserver_src)	$(fanout_src) $(fanout2_src) $(fanout3_src) $(cffanout_src) $(cffanout2_src) \
+			$(cffanout3_src)
 obj = $(src:.cc=.o)
 dep = $(obj:.o=.d)
 
@@ -145,4 +153,4 @@ endif
 .PHONY: clean
 clean:
 	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 \
-		loadbalancer server cfserver fanout fanout2 fanout3 cffanout cffanout2
+		loadbalancer server cfserver fanout fanout2 fanout3 cffanout cffanout2 cffanout3
