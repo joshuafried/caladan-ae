@@ -35,6 +35,9 @@ server_obj = $(server_src:.cc=.o)
 cfserver_src = cfserver.cc
 cfserver_obj = $(cfserver_src:.cc=.o)
 
+cfserver2_src = cfserver2.cc
+cfserver2_obj = $(cfserver2_src:.cc=.o)
+
 fanout_src = fanout.cc
 fanout_obj = $(fanout_src:.cc=.o)
 
@@ -61,10 +64,14 @@ CF_LIBS = -larmadillo -lmlpack -fopenmp
 
 # must be first
 all: netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 \
- 	loadbalancer server cfserver fanout fanout2 fanout3 cffanout cffanout2 cffanout3
+ 	loadbalancer server cfserver cfserver2 fanout fanout2 fanout3 cffanout \
+	cffanout2 cffanout3
 
 $(cfserver_obj): $(cfserver_src)
-	$(CXX) $(CXXFLAGS) $(INC) -c $(cfserver_src) -o $@ -fopenmp
+	$(CXX) $(CXXFLAGS) $(INC) -c $(cfserver_src) -o $@ -fopenmp -lmlpack
+
+$(cfserver2_obj): $(cfserver2_src)
+	$(CXX) $(CXXFLAGS) $(INC) -c $(cfserver2_src) -o $@ -fopenmp -lmlpack
 
 netbench: $(lib_obj) $(netbench_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(netbench_obj) \
@@ -104,8 +111,11 @@ server: $(lib_obj) $(server_obj) $(librt_libs) $(RUNTIME_DEPS)
 
 cfserver: $(lib_obj) $(cfserver_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cfserver_obj) \
-	$(librt_libs) /users/inhocho/mlpack-3.1.1/build/lib/libmlpack.so.3 \
- 	$(RUNTIME_LIBS) -larmadillo -fopenmp
+	$(librt_libs) $(RUNTIME_LIBS) -larmadillo -fopenmp -lmlpack
+
+cfserver2: $(lib_obj) $(cfserver2_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cfserver2_obj) \
+	$(librt_libs) $(RUNTIME_LIBS) -larmadillo -fopenmp -lmlpack
 
 fanout: $(lib_obj) $(fanout_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(fanout_obj) \
@@ -134,8 +144,8 @@ cffanout3: $(lib_obj) $(cffanout3_obj) $(librt_libs) $(RUNTIME_DEPS)
 # general build rules for all targets
 src = $(lib_src) $(netbench_src) $(netbench2_src) $(netbench3_src) $(netbench4_src) \
 		  $(netbench5_src) $(cfclient_src) $(cfclient2_src) $(loadbalancer_src) $(server_src) \
-		 	$(cfserver_src)	$(fanout_src) $(fanout2_src) $(fanout3_src) $(cffanout_src) $(cffanout2_src) \
-			$(cffanout3_src)
+		 	$(cfserver_src) $(cfserver2_src)	$(fanout_src) $(fanout2_src) $(fanout3_src) \
+		 	$(cffanout_src) $(cffanout2_src) $(cffanout3_src)
 obj = $(src:.cc=.o)
 dep = $(obj:.o=.d)
 
@@ -153,4 +163,4 @@ endif
 .PHONY: clean
 clean:
 	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 \
-		loadbalancer server cfserver fanout fanout2 fanout3 cffanout cffanout2 cffanout3
+		loadbalancer server cfserver cfserver2 fanout fanout2 fanout3 cffanout cffanout2 cffanout3

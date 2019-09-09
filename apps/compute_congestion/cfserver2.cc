@@ -28,6 +28,14 @@ extern "C" {
 #include <string>
 #include <utility>
 
+/**
+ *
+ *
+ * Collaborative Filltering server with health check and AQM
+ *
+ *
+ */
+
 using namespace std::chrono;
 using namespace mlpack;
 using namespace mlpack::cf;
@@ -355,6 +363,51 @@ private:
   rt::Mutex m_;
 };
 
+constexpr uint64_t kHealthCheckPort = 8002;
+constexpr uint64_t kHealthCheckMagic = 0xDEADBEEF;
+struct healthcheck {
+  uint64_t load;
+//  uint64_t busy;
+//  uint32_t load;
+};
+
+void HealthCheckWorker(std::unique_ptr<rt::TcpConn> c) {
+  while (true) {
+    // Receive an uptime request.
+    uint64_t magic;
+    ssize_t ret = c->ReadFull(&magic, sizeof(magic));
+    if (ret != static_cast<ssize_t>(sizeof(magic))) {
+      if (ret == 0 || ret == -ECONNRESET) break;
+      log_err("read failed, ret = %ld", ret);
+      break;
+    }
+
+    // Check for the right magic value.
+    if (ntoh64(magic) != kHealthCheckMagic) break;
+
+    healthcheck h = {hton64(static_cast<uint64_t>(rt::RuntimeLoad() * 1000000.0))};
+
+    // Send an uptime response.
+    ssize_t sret = c->WriteFull(&h, sizeof(h));
+    if (sret != sizeof(h)) {
+      if (sret == -EPIPE || sret == -ECONNRESET) break;
+      log_err("write failed, ret = %ld", sret);
+      break;
+    }
+  }
+}
+
+void HealthCheckServer() {
+  std::unique_ptr<rt::TcpQueue> q(rt::TcpQueue::Listen({0, kHealthCheckPort}, 4096));
+  if (q == nullptr) panic("couldn't listen for connections");
+
+  while (true) {
+    rt::TcpConn *c = q->Accept();
+    if (c == nullptr) panic("couldn't accept a connection");
+    rt::Thread([=] { HealthCheckWorker(std::unique_ptr<rt::TcpConn>(c)); }).Detach();
+  }
+}
+
 constexpr uint64_t kServerPort = 8001;
 struct payload {
   uint64_t user_id;
@@ -418,8 +471,21 @@ void HandleRequest(RequestContext *ctx,
   auto w = wpool->GetWorker(rt::RuntimeKthreadIdx());
   payload *p = &ctx->p;
 
+  // If the request is canceled, just ignore the request
   if (ctx->timed_out)
     return;
+
+  // AQM Logic
+  if (rt::RuntimeLoad() > 0.9999) {
+    p->processing_time = hton64(0);
+
+    // return the request.
+    ssize_t ret = ctx->conn->WriteFull(p, sizeof(*p));
+    if (ret != static_cast<ssize_t>(sizeof(*p))) {
+      if (ret != -EPIPE && ret != -ECONNRESET) log_err("tcp_write failed");
+    }
+    return;
+  }
 
   // perform fake work
   auto start = steady_clock::now();
@@ -430,7 +496,7 @@ void HandleRequest(RequestContext *ctx,
   auto finish = steady_clock::now();
   barrier();
   
-  uint64_t processing_time = duration_cast<microseconds>(finish - start).count();
+  uint64_t processing_time = std::max<uint64_t>(duration_cast<microseconds>(finish - start).count(), 1);
 
   p->queueing_delay = hton64(rt::RuntimeQueueingDelayUS());
   p->processing_time = hton64(processing_time);
@@ -460,13 +526,20 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
       delete ctx;
       return;
     }
-/*
+
+    // AQM Logic
     if (rt::RuntimeLoad() > 0.9999){
-      delete ctx;
-      ctx = new RequestContext(resp);
+      p->processing_time = hton64(0);
+
+      // return the request.
+      ssize_t ret = ctx->conn->WriteFull(p, sizeof(*p));
+      if (ret != static_cast<ssize_t>(sizeof(*p))) {
+        if (ret != -EPIPE && ret != -ECONNRESET) log_err("tcp_write failed");
+      }
+      
       continue;
     }
-    */
+
 /*
     if (rt::RuntimeQueueingDelayUS() > 100) {
       delete ctx;
@@ -526,6 +599,8 @@ void ServerHandler(void *arg) {
   std::cout << "Data Loaded. Training time = "
     << duration_cast<duration<double>>(finish - start).count() << " s" << std::endl;
   std::cout << "Starting server..." << std::endl;
+
+  rt::Thread([] { HealthCheckServer(); }).Detach();
 
   std::unique_ptr<rt::TcpQueue> q(
       rt::TcpQueue::Listen({0, kServerPort}, 4096));
