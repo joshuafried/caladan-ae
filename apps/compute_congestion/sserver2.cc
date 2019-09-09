@@ -39,6 +39,7 @@ static uint64_t MAX_SERVICE_TIME_IDX;
 // A prime number as hash size gives a better distribution of values in buckets
 constexpr uint64_t HASH_SIZE_DEFAULT = 10009;
 constexpr uint64_t kIterationsPerUS = 88;
+constexpr uint64_t kAQMThresh = 10000; // 10ms
 
 // Class representing a templatized hash node
 template <typename K, typename V>
@@ -361,7 +362,7 @@ private:
 constexpr uint64_t kHealthCheckPort = 8002;
 constexpr uint64_t kHealthCheckMagic = 0xDEADBEEF;
 struct healthcheck {
-  uint64_t load;
+  uint64_t queueing_delay;
 //  uint64_t busy;
 //  uint32_t load;
 };
@@ -380,7 +381,7 @@ void HealthCheckWorker(std::unique_ptr<rt::TcpConn> c) {
     // Check for the right magic value.
     if (ntoh64(magic) != kHealthCheckMagic) break;
 
-    healthcheck h = {hton64(static_cast<uint64_t>(rt::RuntimeLoad() * 1000000.0))};
+    healthcheck h = {hton64(static_cast<uint64_t>(rt::RuntimeQueueingDelayUS()))};
 
     // Send an uptime response.
     ssize_t sret = c->WriteFull(&h, sizeof(h));
@@ -470,7 +471,7 @@ void HandleRequest(RequestContext *ctx,
     return;
 
   // AQM Logic
-  if (rt::RuntimeLoad() > 0.9999) {
+  if (rt::RuntimeQueueingDelayUS() > kAQMThresh) {
     p->processing_time = hton64(0);
 
     // return the request.
@@ -524,7 +525,7 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
     }
 
     // AQM Logic
-    if (rt::RuntimeLoad() > 0.9999){
+    if (rt::RuntimeQueueingDelayUS() > kAQMThresh) {
       p->processing_time = hton64(0);
 
       // return the request.
