@@ -9,6 +9,7 @@ extern "C" {
 #include "runtime.h"
 #include "sync.h"
 #include "thread.h"
+#include "timer.h"
 
 #include <atomic>
 #include <algorithm>
@@ -25,7 +26,7 @@ extern "C" {
 /*
  *
  * Fanout Implementation with FanoutManager
- * for proxy-based circuit breaker
+ * for server-based circuit breaker
  *
  */
 
@@ -334,21 +335,22 @@ private:
 class FanoutTracker {
 public:
   FanoutTracker(std::shared_ptr<SharedTcpStream> c) : 
-    timed_out(false),
+    timed_out_(false),
     response_waiting_(kFanoutSize), max_delay_(0),
     sum_processing_time_(0), sum_rating_(0), conn_(c) {
       for (int i = 0; i < kFanoutSize; ++i) {
-        outstanding[i] = false;
+        outstanding_[i] = false;
       }
-    }
+  }
+
+  bool IsTimedOut() {
+    return timed_out_;
+  }
 
   int ReceiveResponse(uint64_t queueing_delay, uint64_t processing_time, float rating, int worker_id) {
     int rw;
 
     s_.Lock();
-    if (!outstanding[worker_id])
-      printf("[WARNING] I received not outstanding response.\n");
-    outstanding[worker_id] = false;
     response_waiting_--;
     if (queueing_delay > max_delay_)
       max_delay_ = queueing_delay;
@@ -358,7 +360,7 @@ public:
     s_.Unlock();
 
     // send response back to the upstream
-    if (rw == 0 && !timed_out) {
+    if (rw == 0 && !timed_out_) {
       p.queueing_delay = hton64(rt::RuntimeQueueingDelayUS() + max_delay_);
       p.processing_time = hton64(static_cast<uint64_t>(sum_processing_time_ / kFanoutSize));
       p.rating = htonf(sum_rating_ / kFanoutSize);
@@ -375,18 +377,8 @@ public:
   bool MarkTimedOut() {
     bool ret;
     s_.Lock();
-    ret = timed_out;
-    timed_out = true;
-    s_.Unlock();
-
-    return ret;
-  }
-
-  bool MarkNotOutstandingIfOutstanding(int idx) {
-    bool ret = outstanding[idx];
-    s_.Lock();
-    if (ret)
-      outstanding[idx] = false;
+    ret = timed_out_;
+    timed_out_ = true;
     s_.Unlock();
 
     return ret;
@@ -394,10 +386,18 @@ public:
 
   void MarkOutstanding(int idx) {
     s_.Lock();
-    if (outstanding[idx])
-      printf("[WARNING] Marking outstanding to already outstanding\n");
-    outstanding[idx] = true;
+    outstanding_[idx] = true;
     s_.Unlock();
+  }
+
+  void MarkNotOutstanding(int idx) {
+    s_.Lock();
+    outstanding_[idx] = false;
+    s_.Unlock();
+  }
+
+  bool IsOutstanding(int idx) {
+    return outstanding_[idx];
   }
 
   // Upstream response payload
@@ -405,13 +405,12 @@ public:
 
   time_point<steady_clock> start_time;
   time_point<steady_clock> timings[kFanoutSize];
-  bool outstanding[kFanoutSize];
-  bool timed_out;
   uint64_t child_index[kFanoutSize];
 
 private:
   // Spin lock for response_waiting_
   rt::Spin s_;
+  bool timed_out_;
   // The number of downstream responses waiting for
   int response_waiting_;
   // Maximum queueing delay of the responses
@@ -421,12 +420,39 @@ private:
   float sum_rating_;
   // upstream connection
   std::shared_ptr<SharedTcpStream> conn_;
+  bool outstanding_[kFanoutSize];
 };
 
 class ChildQueue {
 public:
-  ChildQueue(): queueing_delay_(0), next_index_(0) {
+  ChildQueue(): queueing_delay_(0), next_index_(0), tripped_(false) {
     tracker_by_id = new HashMap<uint64_t, FanoutTracker*>();
+  }
+
+  void MarkHealthy() {
+    if (!tripped_)
+      return;
+
+    m_.Lock();
+    tripped_ = false;
+    cv_.Signal();
+    m_.Unlock();
+  }
+
+  void MarkUnhealthy() {
+    if (tripped_)
+      return;
+
+    m_.Lock();
+    tripped_ = true;
+    m_.Unlock();
+  }
+
+  void RescheduleRequest(payload p) {
+    m_.Lock();
+    rtx_q_.push(p);
+    cv_.Signal();
+    m_.Unlock();
   }
 
   uint64_t EnqueueRequest(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
@@ -473,13 +499,17 @@ public:
   payload DequeRequest() {
     m_.Lock();
     payload ret;
-    while (cancel_q_.empty() && q_.empty()){
+    while ((tripped_ && cancel_q_.empty()) ||
+           (!tripped_ && cancel_q_.empty() && rtx_q_.empty() && q_.empty())) {
       cv_.Wait(&m_);
     }
 
     if (!cancel_q_.empty()) {
       ret = cancel_q_.front();
       cancel_q_.pop();
+    } else if (!rtx_q_.empty()) {
+      ret = rtx_q_.front();
+      rtx_q_.pop();
     } else {
       ret = q_.front();
       q_.pop();
@@ -508,9 +538,11 @@ private:
   HashMap<uint64_t, FanoutTracker *> *tracker_by_id;
   uint64_t next_index_;
   std::queue<payload> q_;
+  std::queue<payload> rtx_q_;
   std::queue<payload> cancel_q_;
   rt::CondVar cv_;
   rt::Mutex m_;
+  bool tripped_;
 };
 
 class FanoutManager {
@@ -519,19 +551,19 @@ public:
     child_qs_.reserve(kFanoutSize);
   }
 
-  void AddFanoutNode(std::shared_ptr<ChildQueue> cq, std::shared_ptr<StatMonitor> m) {
+  void AddFanoutNode(std::shared_ptr<ChildQueue> cq) {
     child_qs_.push_back(cq);
-    monitors_.push_back(m);
+    //monitors_.push_back(m);
   }
 
   std::shared_ptr<ChildQueue> GetChildQueue(unsigned int idx) {
     return child_qs_[idx];
   }
-
+/*
   std::shared_ptr<StatMonitor> GetMonitor(unsigned int idx) {
     return monitors_[idx];
   }
-
+*/
   void FanoutAll(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
     for (int i = 0; i < kFanoutSize; ++i) {
       uint64_t child_idx = child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
@@ -562,12 +594,10 @@ public:
   void BroadcastCancel(FanoutTracker* ft) {
     for (int i = 0; i < kFanoutSize; ++i) {
 
-      if (ft->MarkNotOutstandingIfOutstanding(i)) {
-//      if (ft->outstanding[i]) {
+      if (ft->IsOutstanding(i)) {
         // need to cancel request
+        ft->MarkNotOutstanding(i);
         child_qs_[i]->CancelRequest(ft->child_index[i]);
-        monitors_[i]->CancelSend();
-//        ft->outstanding[i] = false;
       } 
       child_qs_[i]->EraseTrackerByIdx(ft->child_index[i]);
     }
@@ -575,12 +605,49 @@ public:
 
 private:
   std::vector<std::shared_ptr<ChildQueue>> child_qs_;
-  std::vector<std::shared_ptr<StatMonitor>> monitors_;
+//  std::vector<std::shared_ptr<StatMonitor>> monitors_;
 };
+
+constexpr uint64_t kHealthCheckPort = 8002;
+constexpr uint64_t kHealthCheckMagic = 0xDEADBEEF;
+constexpr uint64_t kHealthCheckInterval = 1000; // 1 ms
+struct healthcheck {
+  uint64_t load;
+};
+
+healthcheck HealthCheck(int child_id) {
+  std::unique_ptr<rt::TcpConn> c(
+      rt::TcpConn::Dial({0, 0}, {laddrs[child_id].ip, kHealthCheckPort}));
+  uint64_t magic = hton64(kHealthCheckMagic);
+  ssize_t ret = c->WriteFull(&magic, sizeof(magic));
+  if (ret != static_cast<ssize_t>(sizeof(magic)))
+    panic("healthcheck request failed, ret = %ld", ret);
+  healthcheck h;
+  ret = c->ReadFull(&h, sizeof(h));
+  if (ret != static_cast<ssize_t>(sizeof(h)))
+    panic("healthcheck response failed, ret = %lu", ret);
+  return healthcheck{ntoh64(h.load)};
+}
+
+void HealthCheckWorker(std::shared_ptr<FanoutManager> fm) {
+  while (true) {
+    for(int i = 0; i < kFanoutSize; ++i) {
+      auto cq = fm->GetChildQueue(i);
+      healthcheck h = HealthCheck(i);
+      float load = h.load / 1000000.0;
+      if (load > 0.9999){
+        cq->MarkUnhealthy();
+      } else {
+        cq->MarkHealthy();
+      }
+    }
+    rt::Sleep(kHealthCheckInterval);
+  }
+}
 
 void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<FanoutManager> fm, int worker_id) {
   std::shared_ptr<ChildQueue> cq = fm->GetChildQueue(worker_id);
-  std::shared_ptr<StatMonitor> monitor = fm->GetMonitor(worker_id);
+//  std::shared_ptr<StatMonitor> monitor = fm->GetMonitor(worker_id);
 
   uint64_t ewma_exe_time = 0;
 
@@ -600,28 +667,36 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
       uint64_t index = ntoh64(drp.request_index);
       uint64_t queueing_delay = ntoh64(drp.queueing_delay);
       uint64_t processing_time = ntoh64(drp.processing_time);
-      float rating = ntohf(drp.rating);
       
       // find tracker from tracker_by_id
       FanoutTracker* ft = cq->GetTrackerByIdx(index);
 
       if (ft == nullptr)
         continue;
-      cq->EraseTrackerByIdx(index);
+
+      ft->MarkNotOutstanding(worker_id);
 
       if (processing_time > 0) {
+        // Legitimate response
+        
+        float rating = ntohf(drp.rating);
         barrier();
         auto now = steady_clock::now();
         barrier();
         double latency_us = duration_cast<sec>(now - ft->timings[worker_id]).count();
   
         ewma_exe_time = static_cast<uint64_t>(0.8*ewma_exe_time + 0.2*latency_us);
-      }
-      // tracker->ReceiveResponse
-      if (ft->ReceiveResponse(queueing_delay, processing_time, rating, worker_id) == 0)
-        delete ft;
 
-      monitor->RecvResponse();
+        cq->EraseTrackerByIdx(index);
+
+        // tracker->ReceiveResponse
+
+        if (ft->ReceiveResponse(queueing_delay, processing_time, rating, worker_id) == 0)
+          delete ft;
+      } else { // processing_time == 0
+        // Retransmission response
+        cq->RescheduleRequest(drp);
+      }
     }
   });
 
@@ -654,15 +729,12 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
         log_err("write failed, ret = %ld", sret);
         break;
       }
-      ft->outstanding[worker_id] = true;
       continue;
     }
 
     // Skip the timed out request.
-    if (ft->timed_out)
+    if (ft->IsTimedOut())
       continue;
-
-    monitor->RequestSend();
 
     barrier();
     auto now = steady_clock::now();
@@ -677,11 +749,10 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
     if (slo_criteria + 1000 > kSLOUS) {
       ft->MarkTimedOut();
       fm->BroadcastCancel(ft);
-      monitor->CancelSend();
       continue;
     }
 */
-    ft->outstanding[worker_id] = true;
+    ft->MarkOutstanding(worker_id);
     ft->timings[worker_id] = now;
 
     // send to downstream
@@ -691,7 +762,6 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
       log_err("write failed, ret = %ld", sret);
       break;
     }
-
   }
 
   c->Shutdown(SHUT_RDWR);
@@ -744,11 +814,12 @@ void UpstreamHandler(std::shared_ptr<FanoutManager> fm) {
   }
 }
 
+
 void FanoutHandler(void *arg) {
   auto fm = std::make_shared<FanoutManager>();
 
   for (int i = 0; i < num_leafs; ++i) {
-    fm->AddFanoutNode(std::make_shared<ChildQueue>(), std::make_shared<StatMonitor>(20));
+    fm->AddFanoutNode(std::make_shared<ChildQueue>());
   }
 
   std::vector<std::unique_ptr<rt::TcpConn>> child_conns;
@@ -770,6 +841,8 @@ void FanoutHandler(void *arg) {
 
   starter.Done();
   starter.Wait();
+
+  rt::Thread([&] { HealthCheckWorker(fm); }).Detach();
 
   UpstreamHandler(fm);
 
