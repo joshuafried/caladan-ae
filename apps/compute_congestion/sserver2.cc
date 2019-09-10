@@ -39,7 +39,7 @@ static uint64_t MAX_SERVICE_TIME_IDX;
 // A prime number as hash size gives a better distribution of values in buckets
 constexpr uint64_t HASH_SIZE_DEFAULT = 10009;
 constexpr uint64_t kIterationsPerUS = 88;
-constexpr uint64_t kAQMThresh = 20000; // 10ms
+constexpr uint64_t kAQMThresh = 2000; // 10ms
 
 // Class representing a templatized hash node
 template <typename K, typename V>
@@ -523,8 +523,10 @@ void HandleRequest(RequestContext *ctx,
   qdm->Report(qdel);
 
   // AQM Logic
-  if (qdel > kAQMThresh && qlen > 0) {
+  uint64_t movie_id = ntoh64(p->movie_id);
+  if (qdel > kAQMThresh && qlen > 0 && movie_id < 2) {
     p->processing_time = hton64(0);
+    p->movie_id = hton64(ntoh64(p->movie_id) + 1);
 
     // return the request.
     ssize_t ret = ctx->conn->WriteFull(p, sizeof(*p));
@@ -577,9 +579,23 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
       return;
     }
 
+    uint64_t movie_id = ntoh64(p->movie_id);
+    uint64_t user_id = ntoh64(p->user_id);
+    uint64_t index = ntoh64(p->request_index);
+
+    if (user_id == 0 && movie_id == 0) {
+      // mark context as timeout
+      RequestContext *to_ctx;
+      if (context_by_id->find(index, to_ctx)) {
+        to_ctx->timed_out = true;
+      }
+      continue;
+    }
+
     // AQM Logic
-    if (qdm->GetQueueingDelay() > kAQMThresh && qdm->GetQLen() > 0) {
+    if (qdm->GetQueueingDelay() > kAQMThresh && qdm->GetQLen() > 0 && movie_id < 2) {
       p->processing_time = hton64(0);
+      p->movie_id = hton64(ntoh64(p->movie_id) + 1);
 
       // return the request.
       ssize_t ret = ctx->conn->WriteFull(p, sizeof(*p));
@@ -607,18 +623,6 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
     auto now = steady_clock::now();
     barrier();
 */
-    uint64_t user_id = ntoh64(p->user_id);
-    uint64_t movie_id = ntoh64(p->movie_id);
-    uint64_t index = ntoh64(p->request_index);
-
-    if (user_id == 0 && movie_id == 0) {
-      // mark context as timeout
-      RequestContext *to_ctx;
-      if (context_by_id->find(index, to_ctx)) {
-        to_ctx->timed_out = true;
-      }
-      continue;
-    }
 
     context_by_id->insert(index, ctx);
     qdm->IncLen();
