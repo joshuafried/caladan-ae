@@ -378,7 +378,10 @@ public:
   void DecLen() {
     s_.Lock();
     qlen_--;
+    if (qlen_ == 0)
+      queueing_delay_ = 0;
     s_.Unlock();
+    
   }
 
   uint64_t GetQueueingDelay() {
@@ -507,6 +510,8 @@ void HandleRequest(RequestContext *ctx,
   auto w = wpool->GetWorker(rt::RuntimeKthreadIdx());
   payload *p = &ctx->p;
 
+  qdm->DecLen();
+
   // If the request is canceled, just ignore the request
   if (ctx->timed_out)
     return;
@@ -514,11 +519,12 @@ void HandleRequest(RequestContext *ctx,
   auto now = steady_clock::now();
 
   uint64_t qdel = duration_cast<microseconds>(now - ctx->start_time).count();
-  qdm->DecLen();
+  uint64_t qlen = qdm->GetQLen();
   qdm->Report(qdel);
 
+  printf("del = %lu, len= %lu\n",qdel, qlen);
   // AQM Logic
-  if (qdel > kAQMThresh) {
+  if (qdel > kAQMThresh && qlen > 0) {
     p->processing_time = hton64(0);
 
     // return the request.
@@ -573,7 +579,7 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
     }
 
     // AQM Logic
-    if (qdm->GetQueueingDelay() > kAQMThresh) {
+    if (qdm->GetQueueingDelay() > kAQMThresh && qdm->GetQLen() > 0) {
       p->processing_time = hton64(0);
 
       // return the request.
