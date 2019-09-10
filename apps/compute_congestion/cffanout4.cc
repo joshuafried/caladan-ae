@@ -39,7 +39,8 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
-constexpr uint64_t kSLOUS = 100000; // 100ms
+constexpr uint64_t kSLOUS = 40000; // 40ms
+constexpr uint64_t kAQMThresh = 10000; // 10ms
 
 // Port number of the Fanout node
 constexpr uint64_t kFanoutPort = 8001;
@@ -308,7 +309,7 @@ private:
   rt::CondVar cv_;
 };
 
-constexpr int kFanoutSize = 4;
+constexpr int kFanoutSize = 16;
 // Upstream Payload
 struct payload {
   uint64_t user_id;
@@ -566,7 +567,7 @@ public:
 */
   void FanoutAll(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
     for (int i = 0; i < kFanoutSize; ++i) {
-      uint64_t child_idx = child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
+      uint64_t child_idx = child_qs_[i]->EnqueueRequest(user_id, 1, ft);
       ft->child_index[i] = child_idx;
     }
   }
@@ -612,7 +613,8 @@ constexpr uint64_t kHealthCheckPort = 8002;
 constexpr uint64_t kHealthCheckMagic = 0xDEADBEEF;
 constexpr uint64_t kHealthCheckInterval = 1000; // 1 ms
 struct healthcheck {
-  uint64_t load;
+  uint64_t queueing_delay;
+  uint64_t qlen;
 };
 
 healthcheck HealthCheck(int child_id) {
@@ -626,7 +628,7 @@ healthcheck HealthCheck(int child_id) {
   ret = c->ReadFull(&h, sizeof(h));
   if (ret != static_cast<ssize_t>(sizeof(h)))
     panic("healthcheck response failed, ret = %lu", ret);
-  return healthcheck{ntoh64(h.load)};
+  return healthcheck{ntoh64(h.queueing_delay), ntoh64(h.qlen)};
 }
 
 void HealthCheckWorker(std::shared_ptr<FanoutManager> fm) {
@@ -634,8 +636,7 @@ void HealthCheckWorker(std::shared_ptr<FanoutManager> fm) {
     for(int i = 0; i < kFanoutSize; ++i) {
       auto cq = fm->GetChildQueue(i);
       healthcheck h = HealthCheck(i);
-      float load = h.load / 1000000.0;
-      if (load > 0.9999){
+      if (h.queueing_delay > kAQMThresh && h.qlen > 0){
         cq->MarkUnhealthy();
       } else {
         cq->MarkHealthy();
@@ -744,14 +745,14 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
     uint64_t queueing_delay = duration_cast<microseconds>(now - ft->start_time).count();
     uint64_t slo_criteria = queueing_delay + ewma_exe_time;
 
-    cq->ReportQueueingDelay(slo_criteria + 5000);
-/*
-    if (slo_criteria + 1000 > kSLOUS) {
+    cq->ReportQueueingDelay(slo_criteria + 2000);
+
+    if (slo_criteria >= kSLOUS) {
       ft->MarkTimedOut();
       fm->BroadcastCancel(ft);
       continue;
     }
-*/
+
     ft->MarkOutstanding(worker_id);
     ft->timings[worker_id] = now;
 
@@ -828,6 +829,7 @@ void FanoutHandler(void *arg) {
     std::unique_ptr<rt::TcpConn> outc(rt::TcpConn::Dial({0, 0}, laddrs[i]));
     if (unlikely(outc == nullptr)) panic("couldn't connect to child.");
     child_conns.emplace_back(std::move(outc));
+    printf("Child Connection %d connected.\n", i);
   }
 
   rt::WaitGroup starter(kFanoutSize + 1);

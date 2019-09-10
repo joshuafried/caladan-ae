@@ -38,7 +38,7 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
-constexpr uint64_t kSLOUS = 100000; // 100ms
+constexpr uint64_t kSLOUS = 1000000; // 40ms
 
 // Port number of the Fanout node
 constexpr uint64_t kFanoutPort = 8001;
@@ -262,7 +262,7 @@ private:
   const size_t hashSize;
 };
 
-constexpr int kFanoutSize = 4;
+constexpr int kFanoutSize = 1;
 // Upstream Payload
 struct payload {
   uint64_t user_id;
@@ -408,7 +408,7 @@ private:
 
 class FanoutManager {
 public:
-  FanoutManager() : cwnd_(4.0), num_outst_req_(0), target_us_(25), ewma_exe_time_(0) {
+  FanoutManager() : cwnd_(40.0), num_outst_req_(0), target_us_(25), ewma_exe_time_(0) {
     child_qs_.reserve(kFanoutSize);
   }
 
@@ -468,7 +468,7 @@ public:
     uint64_t queueing_delay = ft->max_delay_;
     uint64_t processing_time = ntoh64(p.processing_time);
     uint64_t new_target_us = std::max<uint64_t>(
-                                 static_cast<uint64_t>(0.8*target_us_ + 0.2*processing_time),
+                                 static_cast<uint64_t>(0.8*target_us_ + 0.6*processing_time),
                                  25);
     uint64_t new_ewma_exe_time = static_cast<uint64_t>(0.8*ewma_exe_time_ + 0.2*latency_us);
 
@@ -476,9 +476,9 @@ public:
 
     if (queueing_delay > (uint64_t)(new_target_us * 1.5)) {
       if (num_outst_req_ <= cwnd_)
-        new_cwnd = cwnd_ * 0.8;
+        new_cwnd = cwnd_ * 0.9;
     } else if (queueing_delay <= new_target_us) {
-      new_cwnd = cwnd_ + 0.2/cwnd_;
+      new_cwnd = cwnd_ + 2.0/cwnd_;
     } else {
       new_cwnd = cwnd_ - 0.2;
     }
@@ -636,6 +636,7 @@ void FanoutHandler(void *arg) {
     std::unique_ptr<rt::TcpConn> outc(rt::TcpConn::Dial({0, 0}, laddrs[i]));
     if (unlikely(outc == nullptr)) panic("couldn't connect to child.");
     child_conns.emplace_back(std::move(outc));
+    printf("Child connection %d connected.\n", i);
   }
 
   rt::WaitGroup starter(kFanoutSize + 1);

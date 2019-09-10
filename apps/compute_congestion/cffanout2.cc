@@ -38,7 +38,7 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
-constexpr uint64_t kSLOUS = 100000; // 100ms
+constexpr uint64_t kSLOUS = 40000; // 100ms
 
 // Port number of the Fanout node
 constexpr uint64_t kFanoutPort = 8001;
@@ -307,7 +307,7 @@ private:
   rt::CondVar cv_;
 };
 
-constexpr int kFanoutSize = 4;
+constexpr int kFanoutSize = 16;
 // Upstream Payload
 struct payload {
   uint64_t user_id;
@@ -672,7 +672,7 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
     uint64_t queueing_delay = duration_cast<microseconds>(now - ft->start_time).count();
     uint64_t slo_criteria = queueing_delay + ewma_exe_time;
 
-    cq->ReportQueueingDelay(slo_criteria + 5000);
+    cq->ReportQueueingDelay(slo_criteria + 2000);
 /*
     if (slo_criteria + 1000 > kSLOUS) {
       ft->MarkTimedOut();
@@ -757,6 +757,7 @@ void FanoutHandler(void *arg) {
     std::unique_ptr<rt::TcpConn> outc(rt::TcpConn::Dial({0, 0}, laddrs[i]));
     if (unlikely(outc == nullptr)) panic("couldn't connect to child.");
     child_conns.emplace_back(std::move(outc));
+    printf("Child connection %d connected.\n", i);
   }
 
   rt::WaitGroup starter(kFanoutSize + 1);
