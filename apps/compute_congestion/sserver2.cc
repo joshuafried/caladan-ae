@@ -39,7 +39,7 @@ static uint64_t MAX_SERVICE_TIME_IDX;
 // A prime number as hash size gives a better distribution of values in buckets
 constexpr uint64_t HASH_SIZE_DEFAULT = 10009;
 constexpr uint64_t kIterationsPerUS = 88;
-constexpr uint64_t kAQMThresh = 10000; // 10ms
+constexpr uint64_t kAQMThresh = 20000; // 10ms
 
 // Class representing a templatized hash node
 template <typename K, typename V>
@@ -361,27 +361,45 @@ private:
 
 class QueueingDelayMonitor {
 public:
-  QueueingDelayMonitor(): queueing_delay_(0) {}
+  QueueingDelayMonitor(): queueing_delay_(0), qlen_(0) {}
 
   void Report(uint64_t delay) {
-    m_.Lock();
+    s_.Lock();
     queueing_delay_ = delay;
-    m_.Unlock();
+    s_.Unlock();
+  }
+
+  void IncLen() {
+    s_.Lock();
+    qlen_++;
+    s_.Unlock();
+  }
+
+  void DecLen() {
+    s_.Lock();
+    qlen_--;
+    s_.Unlock();
   }
 
   uint64_t GetQueueingDelay() {
     return queueing_delay_;
   }
 
+  uint64_t GetQLen() {
+    return qlen_;
+  }
+
 private:
   uint64_t queueing_delay_;  
-  rt::Mutex m_;
+  uint64_t qlen_;
+  rt::Spin s_;
 };
 
 constexpr uint64_t kHealthCheckPort = 8002;
 constexpr uint64_t kHealthCheckMagic = 0xDEADBEEF;
 struct healthcheck {
   uint64_t queueing_delay;
+  uint64_t qlen;
 //  uint64_t busy;
 //  uint32_t load;
 };
@@ -400,7 +418,8 @@ void HealthCheckWorker(std::unique_ptr<rt::TcpConn> c, std::shared_ptr<QueueingD
     // Check for the right magic value.
     if (ntoh64(magic) != kHealthCheckMagic) break;
 
-    healthcheck h = {hton64(static_cast<uint64_t>(qdm->GetQueueingDelay()))};
+    healthcheck h = {hton64(static_cast<uint64_t>(qdm->GetQueueingDelay())),
+                     hton64(static_cast<uint64_t>(qdm->GetQLen()))};
 
     // Send an uptime response.
     ssize_t sret = c->WriteFull(&h, sizeof(h));
@@ -495,6 +514,7 @@ void HandleRequest(RequestContext *ctx,
   auto now = steady_clock::now();
 
   uint64_t qdel = duration_cast<microseconds>(now - ctx->start_time).count();
+  qdm->DecLen();
   qdm->Report(qdel);
 
   // AQM Logic
@@ -593,9 +613,10 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
         to_ctx->timed_out = true;
       }
       continue;
-    } else {
-      context_by_id->insert(index, ctx);
     }
+
+    context_by_id->insert(index, ctx);
+    qdm->IncLen();
 
     ctx->start_time = steady_clock::now();
 
