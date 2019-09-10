@@ -522,7 +522,6 @@ void HandleRequest(RequestContext *ctx,
   uint64_t qlen = qdm->GetQLen();
   qdm->Report(qdel);
 
-  printf("del = %lu, len= %lu\n",qdel, qlen);
   // AQM Logic
   if (qdel > kAQMThresh && qlen > 0) {
     p->processing_time = hton64(0);
