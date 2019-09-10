@@ -494,7 +494,7 @@ void HandleRequest(RequestContext *ctx,
 
   auto now = steady_clock::now();
 
-  uint64_t qdel = duration_cast<microseconds>(ctx->start_time - now).count();
+  uint64_t qdel = duration_cast<microseconds>(now - ctx->start_time).count();
   qdm->Report(qdel);
 
   // AQM Logic
