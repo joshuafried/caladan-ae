@@ -361,7 +361,7 @@ private:
 
 class AdmissionController {
 public:
-  AdmissionController(): sum_qdel_(0), sample_qdel_(0), num_pending_reqs_(0), window_(10.0) {
+  AdmissionController(): sum_qdel_(0), sample_qdel_(0), num_pending_reqs_(0), window_(100.0) {
     last_update_ = steady_clock::now();
   }
 
@@ -380,6 +380,8 @@ public:
 
     if (new_window < 10.0)
       new_window = 10.0;
+
+    printf("new_cwnd = %lf\n", new_window);
     
     s_.Lock();
     sum_qdel_ = 0;
@@ -421,6 +423,10 @@ public:
     }
     
     return admission;
+  }
+
+  uint64_t GetWindow() {
+    return static_cast<uint64_t>(window_);
   }
 
 private:
@@ -520,6 +526,7 @@ void HandleRequest(RequestContext *ctx,
   
   uint64_t processing_time = std::max<uint64_t>(duration_cast<microseconds>(finish - start).count(), 1);
 
+  p->movie_id = hton64(monitor->GetWindow());
   p->queueing_delay = hton64(rt::RuntimeQueueingDelayUS());
   p->processing_time = hton64(processing_time);
   p->rating = htonf(rating);
