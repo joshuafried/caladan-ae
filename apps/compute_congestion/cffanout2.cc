@@ -38,7 +38,8 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
-constexpr uint64_t kSLOUS = 40000; // 100ms
+constexpr uint64_t kSLOUS = 1000; // 100ms
+constexpr uint64_t kSLOSLACK = 50;
 
 // Port number of the Fanout node
 constexpr uint64_t kFanoutPort = 8001;
@@ -307,7 +308,7 @@ private:
   rt::CondVar cv_;
 };
 
-constexpr int kFanoutSize = 16;
+constexpr int kFanoutSize = 4;
 // Upstream Payload
 struct payload {
   uint64_t user_id;
@@ -672,15 +673,16 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
     uint64_t queueing_delay = duration_cast<microseconds>(now - ft->start_time).count();
     uint64_t slo_criteria = queueing_delay + ewma_exe_time;
 
-    cq->ReportQueueingDelay(slo_criteria + 2000);
-/*
-    if (slo_criteria + 1000 > kSLOUS) {
+    cq->ReportQueueingDelay(slo_criteria + kSLOSLACK);
+
+    /*
+    if (slo_criteria + kSLOSLACK > kSLOUS) {
       ft->MarkTimedOut();
       fm->BroadcastCancel(ft);
       monitor->CancelSend();
       continue;
-    }
-*/
+    }*/
+
     ft->outstanding[worker_id] = true;
     ft->timings[worker_id] = now;
 
