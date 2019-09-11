@@ -401,10 +401,8 @@ class FanoutManager {
 public:
   FanoutManager(): window_(100), num_outst_reqs_(0) {
     child_qs_.reserve(kFanoutSize);
-    child_window_[0] = 100;
-    child_window_[1] = 100;
-    child_window_[2] = 100;
-    child_window_[3] = 100;
+    for(int i = 0; i < kFanoutSize; ++i)
+      child_window_[i] = 100;
   }
 
   void AddFanoutNode(std::shared_ptr<ChildQueue> cq) {
