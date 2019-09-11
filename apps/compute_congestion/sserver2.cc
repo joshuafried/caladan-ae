@@ -39,7 +39,7 @@ static uint64_t MAX_SERVICE_TIME_IDX;
 // A prime number as hash size gives a better distribution of values in buckets
 constexpr uint64_t HASH_SIZE_DEFAULT = 10009;
 constexpr uint64_t kIterationsPerUS = 88;
-constexpr uint64_t kAQMThresh = 2000; // 10ms
+constexpr uint64_t kAQMThresh = 20000; // 10ms: according to WeChat
 
 // Class representing a templatized hash node
 template <typename K, typename V>
@@ -359,91 +359,78 @@ private:
   rt::Mutex m_;
 };
 
-class QueueingDelayMonitor {
+class AdmissionController {
 public:
-  QueueingDelayMonitor(): queueing_delay_(0), qlen_(0) {}
-
-  void Report(uint64_t delay) {
-    s_.Lock();
-    queueing_delay_ = delay;
-    s_.Unlock();
+  AdmissionController(): sum_qdel_(0), sample_qdel_(0), num_pending_reqs_(0), window_(10.0) {
+    last_update_ = steady_clock::now();
   }
 
-  void IncLen() {
-    s_.Lock();
-    qlen_++;
-    s_.Unlock();
-  }
+  void UpdateWindow(time_point<steady_clock> now) {
+    double avg_qdel = static_cast<double>(sum_qdel_) / static_cast<double>(sample_qdel_);
+    double new_window = window_;
 
-  void DecLen() {
-    s_.Lock();
-    qlen_--;
-    if (qlen_ == 0)
-      queueing_delay_ = 0;
-    s_.Unlock();
+    // If average queueing delay is more than 20ms
+    if (avg_qdel >= 20000.0) {
+      // congested! decrease the window by 5%
+      new_window = 0.95 * window_;
+    } else {
+      // not congested! increase the window by 1%
+      new_window = 1.01 * window_;
+    }
+
+    if (new_window < 10.0)
+      new_window = 10.0;
     
+    s_.Lock();
+    sum_qdel_ = 0;
+    sample_qdel_ = 0;
+    last_update_ = now;
+    window_ = new_window;
+    s_.Unlock();
   }
 
-  uint64_t GetQueueingDelay() {
-    return queueing_delay_;
+  void ReportQueueingDelay(uint64_t delay) {
+    uint64_t num_sample;
+    s_.Lock();
+    sum_qdel_ += delay;
+    num_sample = ++sample_qdel_;
+    s_.Unlock();
+
+    barrier();
+    auto now = steady_clock::now();
+    barrier();
+
+    uint64_t elapsed_time_us = duration_cast<microseconds>(now - last_update_).count();
+    if (num_sample >= 2000 || elapsed_time_us >= 1000000) {
+      UpdateWindow(now);
+    }
   }
 
-  uint64_t GetQLen() {
-    return qlen_;
+  void SentResponse() {
+    s_.Lock();
+    num_pending_reqs_--;
+    s_.Unlock();
+  }
+
+  bool GetAdmission() {
+    bool admission = (static_cast<double>(num_pending_reqs_ + 1) <= window_);
+    if (admission) {
+      s_.Lock();
+      num_pending_reqs_++;
+      s_.Unlock();
+    }
+    
+    return admission;
   }
 
 private:
-  uint64_t queueing_delay_;  
-  uint64_t qlen_;
+  uint64_t sum_qdel_;
+  uint64_t sample_qdel_;
+  uint64_t num_pending_reqs_;
+  double window_;
   rt::Spin s_;
+  time_point<steady_clock> last_update_;
 };
-
-constexpr uint64_t kHealthCheckPort = 8002;
-constexpr uint64_t kHealthCheckMagic = 0xDEADBEEF;
-struct healthcheck {
-  uint64_t queueing_delay;
-  uint64_t qlen;
-//  uint64_t busy;
-//  uint32_t load;
-};
-
-void HealthCheckWorker(std::unique_ptr<rt::TcpConn> c, std::shared_ptr<QueueingDelayMonitor> qdm) {
-  while (true) {
-    // Receive an uptime request.
-    uint64_t magic;
-    ssize_t ret = c->ReadFull(&magic, sizeof(magic));
-    if (ret != static_cast<ssize_t>(sizeof(magic))) {
-      if (ret == 0 || ret == -ECONNRESET) break;
-      log_err("read failed, ret = %ld", ret);
-      break;
-    }
-
-    // Check for the right magic value.
-    if (ntoh64(magic) != kHealthCheckMagic) break;
-
-    healthcheck h = {hton64(static_cast<uint64_t>(qdm->GetQueueingDelay())),
-                     hton64(static_cast<uint64_t>(qdm->GetQLen()))};
-
-    // Send an uptime response.
-    ssize_t sret = c->WriteFull(&h, sizeof(h));
-    if (sret != sizeof(h)) {
-      if (sret == -EPIPE || sret == -ECONNRESET) break;
-      log_err("write failed, ret = %ld", sret);
-      break;
-    }
-  }
-}
-
-void HealthCheckServer(std::shared_ptr<QueueingDelayMonitor> qdm) {
-  std::unique_ptr<rt::TcpQueue> q(rt::TcpQueue::Listen({0, kHealthCheckPort}, 4096));
-  if (q == nullptr) panic("couldn't listen for connections");
-
-  while (true) {
-    rt::TcpConn *c = q->Accept();
-    if (c == nullptr) panic("couldn't accept a connection");
-    rt::Thread([=] { HealthCheckWorker(std::unique_ptr<rt::TcpConn>(c), qdm); }).Detach();
-  }
-}
 
 constexpr uint64_t kServerPort = 8001;
 struct payload {
@@ -506,11 +493,9 @@ public:
 
 void HandleRequest(RequestContext *ctx,
                    std::shared_ptr<SharedWorkerPool> wpool,
-                   std::shared_ptr<QueueingDelayMonitor> qdm) {
+                   std::shared_ptr<AdmissionController> monitor) {
   auto w = wpool->GetWorker(rt::RuntimeKthreadIdx());
   payload *p = &ctx->p;
-
-  qdm->DecLen();
 
   // If the request is canceled, just ignore the request
   if (ctx->timed_out)
@@ -519,22 +504,8 @@ void HandleRequest(RequestContext *ctx,
   auto now = steady_clock::now();
 
   uint64_t qdel = duration_cast<microseconds>(now - ctx->start_time).count();
-  uint64_t qlen = qdm->GetQLen();
-  qdm->Report(qdel);
 
-  // AQM Logic
-  uint64_t movie_id = ntoh64(p->movie_id);
-  if (qdel > kAQMThresh && qlen > 0 && movie_id < 2) {
-    p->processing_time = hton64(0);
-    p->movie_id = hton64(ntoh64(p->movie_id) + 1);
-
-    // return the request.
-    ssize_t ret = ctx->conn->WriteFull(p, sizeof(*p));
-    if (ret != static_cast<ssize_t>(sizeof(*p))) {
-      if (ret != -EPIPE && ret != -ECONNRESET) log_err("tcp_write failed");
-    }
-    return;
-  }
+  monitor->ReportQueueingDelay(qdel);
 
   // perform fake work
   auto start = steady_clock::now();
@@ -562,7 +533,7 @@ void HandleRequest(RequestContext *ctx,
 void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPool> wpool,
                   std::shared_ptr<RateController> rc,
                   std::shared_ptr<HashMap<uint64_t, RequestContext *>> context_by_id,
-                  std::shared_ptr<QueueingDelayMonitor> qdm) {
+                  std::shared_ptr<AdmissionController> monitor) {
   auto resp = std::make_shared<SharedTcpStream>(c);
 
   /* allocate context */
@@ -593,7 +564,12 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
     }
 
     // AQM Logic
-    if (qdm->GetQueueingDelay() > kAQMThresh && qdm->GetQLen() > 0 && movie_id < 2) {
+    if (!monitor->GetAdmission()) {
+      continue;
+    }
+/*
+    // AQM Logic
+    if (monitor->GetQueueingDelay() > kAQMThresh && monitor->GetQLen() > 0 && movie_id < 2) {
       p->processing_time = hton64(0);
       p->movie_id = hton64(ntoh64(p->movie_id) + 1);
 
@@ -605,7 +581,7 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
       
       continue;
     }
-
+*/
 /*
     if (rt::RuntimeQueueingDelayUS() > 100) {
       delete ctx;
@@ -625,13 +601,13 @@ void ServerWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<SharedWorkerPo
 */
 
     context_by_id->insert(index, ctx);
-    qdm->IncLen();
 
     ctx->start_time = steady_clock::now();
 
     rt::Thread([=] {
-      HandleRequest(ctx, wpool, qdm);
+      HandleRequest(ctx, wpool, monitor);
       context_by_id->erase(index);
+      monitor->SentResponse();
       delete ctx;
 //      auto ts = steady_clock::now();
 //      rc->SampleResponseTime(duration_cast<microseconds>(ts - now).count());
@@ -646,7 +622,7 @@ void ServerHandler(void *arg) {
   auto rc = std::make_shared<RateController>(std::shared_ptr<TokenBucket>(tb));
   auto context_by_id = std::make_shared<HashMap<uint64_t, RequestContext*>>();
 
-  auto qdm = std::make_shared<QueueingDelayMonitor>();
+  auto monitor = std::make_shared<AdmissionController>();
 
   std::ifstream stdfile("search.dist");
   uint32_t stu;
@@ -657,7 +633,7 @@ void ServerHandler(void *arg) {
   srand(time(NULL));
   std::cout << "Starting server..." << std::endl;
 
-  rt::Thread([=] { HealthCheckServer(qdm); }).Detach();
+//  rt::Thread([=] { HealthCheckServer(qdm); }).Detach();
 
   std::unique_ptr<rt::TcpQueue> q(
       rt::TcpQueue::Listen({0, kServerPort}, 4096));
@@ -666,7 +642,7 @@ void ServerHandler(void *arg) {
   while (true) {
     rt::TcpConn *c = q->Accept();
     if (c == nullptr) panic("couldn't accept a connection");
-    rt::Thread([=] { ServerWorker(std::shared_ptr<rt::TcpConn>(c), wpool, rc, context_by_id, qdm); }).Detach();
+    rt::Thread([=] { ServerWorker(std::shared_ptr<rt::TcpConn>(c), wpool, rc, context_by_id, monitor); }).Detach();
   }
 }
 } // anonymous namespace
