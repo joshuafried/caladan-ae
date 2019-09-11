@@ -24,6 +24,7 @@ extern "C" {
 /*
  *
  * Fanout Implementation with FanoutManager
+ * for DAGOR-like server-based algorithm
  *
  */
 
