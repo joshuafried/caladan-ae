@@ -38,7 +38,8 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
-constexpr uint64_t kSLOUS = 1000000; // 40ms
+constexpr uint64_t kSLOUS = 40000; // 50 ms
+constexpr uint64_t kSLOSLACK = 2000; // 2.5 ms
 
 // Port number of the Fanout node
 constexpr uint64_t kFanoutPort = 8001;
@@ -262,7 +263,7 @@ private:
   const size_t hashSize;
 };
 
-constexpr int kFanoutSize = 1;
+constexpr int kFanoutSize = 4;
 // Upstream Payload
 struct payload {
   uint64_t user_id;
@@ -441,7 +442,7 @@ public:
     while(!q_.empty()) {
       FanoutTracker *ft = q_.front();
       q_.pop();
-      if (duration_cast<microseconds>(now - ft->start_time).count() <= (kSLOUS - ewma_exe_time_ - 1000)) {
+      if (duration_cast<microseconds>(now - ft->start_time).count() <= (kSLOUS - ewma_exe_time_ - kSLOSLACK)) {
         ret = ft;
         break;
       }
