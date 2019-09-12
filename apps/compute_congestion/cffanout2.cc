@@ -309,7 +309,7 @@ private:
   rt::CondVar cv_;
 };
 
-constexpr int kFanoutSize = 4;
+constexpr int kFanoutSize = 16;
 // Upstream Payload
 struct payload {
   uint64_t user_id;
@@ -764,7 +764,7 @@ void FanoutHandler(void *arg) {
   auto fm = std::make_shared<FanoutManager>();
 
   for (int i = 0; i < num_leafs; ++i) {
-    fm->AddFanoutNode(std::make_shared<ChildQueue>(), std::make_shared<StatMonitor>(20));
+    fm->AddFanoutNode(std::make_shared<ChildQueue>(), std::make_shared<StatMonitor>(1000));
   }
 
   std::vector<std::unique_ptr<rt::TcpConn>> child_conns;
