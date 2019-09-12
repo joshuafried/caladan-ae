@@ -685,7 +685,7 @@ public:
     s_.Unlock();
   }
 
-  void GarbageCollect() {
+  uint64_t GarbageCollect() {
     uint64_t time_to_sleep = 1000;
     time_point<steady_clock> now;
     while(ft_head_ != nullptr) {
@@ -701,7 +701,7 @@ public:
       ft->ForceSend();
       Remove(ft);
     }
-    rt::Sleep(time_to_sleep);
+    return time_to_sleep;
   }
 
 private:
@@ -883,7 +883,9 @@ void UpstreamHandler(std::shared_ptr<FanoutManager> fm) {
 }
 
 void GarbageCollector(std::shared_ptr<FanoutManager> fm) {
-  fm->GarbageCollect();
+  while(true) {
+    rt::Sleep(fm->GarbageCollect());
+  }
 }
 
 void FanoutHandler(void *arg) {
