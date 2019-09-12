@@ -385,8 +385,8 @@ public:
       if (ret != static_cast<ssize_t>(sizeof(p))) {
         if (ret != -EPIPE && ret != -ECONNRESET) log_err("upstream tcp_write failed");
       }
-      timed_out = true;
     }
+    timed_out = true;
   }
 
   bool MarkTimedOut() {
@@ -693,8 +693,9 @@ public:
       now = steady_clock::now();
       barrier();
       FanoutTracker* ft = ft_head_;
-      if (duration_cast<microseconds>(now - ft->start_time).count() < kSLOUS - kSLOSLACK) {
-        time_to_sleep = kSLOUS - kSLOSLACK - duration_cast<microseconds>(now - ft->start_time).count();
+      uint64_t elapsed_time = duration_cast<microseconds>(now - ft->start_time).count();
+      if (elapsed_time < kSLOUS - kSLOSLACK) {
+        time_to_sleep = kSLOUS - kSLOSLACK - elapsed_time;
         break;
       }
       // Let's drop this
