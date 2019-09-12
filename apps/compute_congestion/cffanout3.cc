@@ -11,6 +11,7 @@ extern "C" {
 #include "thread.h"
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -38,8 +39,8 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
-constexpr uint64_t kSLOUS = 40000; // 50 ms
-constexpr uint64_t kSLOSLACK = 2000; // 2.5 ms
+constexpr uint64_t kSLOUS = 1000; // 50 ms
+constexpr uint64_t kSLOSLACK = 50; // 2.5 ms
 
 // Port number of the Fanout node
 constexpr uint64_t kFanoutPort = 8001;
@@ -263,7 +264,7 @@ private:
   const size_t hashSize;
 };
 
-constexpr int kFanoutSize = 4;
+constexpr int kFanoutSize = 16;
 // Upstream Payload
 struct payload {
   uint64_t user_id;
@@ -290,8 +291,8 @@ private:
 class FanoutTracker {
 friend class FanoutManager;
 public:
-  FanoutTracker(std::shared_ptr<SharedTcpStream> c) : 
-    response_waiting_(kFanoutSize), max_delay_(0),
+  FanoutTracker(std::shared_ptr<SharedTcpStream> c, int fanout_size) : 
+    response_waiting_(fanout_size), fanout_size_(fanout_size), max_delay_(0),
     sum_processing_time_(0), sum_rating_(0), conn_(c) {}
 
   int ReceiveResponse(uint64_t queueing_delay, uint64_t processing_time, float rating) {
@@ -309,8 +310,8 @@ public:
     // send response back to the upstream
     if (rw == 0) {
       p.queueing_delay = hton64(rt::RuntimeQueueingDelayUS() + max_delay_);
-      p.processing_time = hton64(static_cast<uint64_t>(sum_processing_time_ / kFanoutSize));
-      p.rating = htonf(static_cast<float>(sum_rating_ / kFanoutSize));
+      p.processing_time = hton64(static_cast<uint64_t>(sum_processing_time_ / fanout_size_));
+      p.rating = htonf(static_cast<float>(sum_rating_ / fanout_size_));
 
       ssize_t ret = conn_->WriteFull(&p, sizeof(p));
       if (ret != static_cast<ssize_t>(sizeof(p))) {
@@ -331,6 +332,7 @@ private:
   rt::Spin s_;
   // The number of downstream responses waiting for
   int response_waiting_;
+  int fanout_size_;
   // Maximum queueing delay of the responses
   uint64_t max_delay_;
   // sum of processing time
@@ -505,8 +507,19 @@ public:
   }
 
   void FanoutAll(FanoutTracker* ft) {
+    std::bitset<16> bs;
+    int cardinality = 0;
+    while (cardinality < 4) {
+      int v = rand() % 16;
+      if (!bs[v]) {
+        bs[v] = 1;
+        cardinality++;
+      }
+    }
+
     for (int i = 0; i < kFanoutSize; ++i) {
-      child_qs_[i]->EnqueueRequest(ft);
+      if (bs[i])
+        child_qs_[i]->EnqueueRequest(ft);
     }
   }
 
@@ -584,7 +597,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
   auto uc = std::make_shared<SharedTcpStream>(c);
 
   // allocate fanout tracker
-  auto ft = new FanoutTracker(uc);
+  auto ft = new FanoutTracker(uc, 4);
 
   while (true) {
     payload *p = &ft->p;
@@ -601,7 +614,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
     fm->Enqueue(ft);
 //    fm->FanoutAll(ntoh64(p->user_id), ntoh64(p->movie_id), ft);
     
-    ft = new FanoutTracker(uc);
+    ft = new FanoutTracker(uc, 4);
   }
 }
 
