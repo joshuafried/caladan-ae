@@ -12,6 +12,7 @@ extern "C" {
 #include "timer.h"
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -412,11 +413,11 @@ private:
 
 class FanoutManager {
 public:
-  FanoutManager(): window_(100), ft_head_(nullptr), ft_tail_(nullptr),
+  FanoutManager(): window_(1000), ft_head_(nullptr), ft_tail_(nullptr),
                    ft_list_len_(0) {
     child_qs_.reserve(kFanoutSize);
     for(int i = 0; i < kFanoutSize; ++i)
-      child_window_[i] = 100;
+      child_window_[i] = 1000;
   }
 
   void AddFanoutNode(std::shared_ptr<ChildQueue> cq) {
@@ -428,9 +429,10 @@ public:
   }
 
   bool FanoutAll(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
+
     bool admission;
     s_.Lock();
-    admission = static_cast<double>(ft_list_len_ + 1.0) <= window_;
+    admission = static_cast<double>(ft_list_len_ + 1.0) <= 4.0*window_;
     s_.Unlock();
 
     if (!admission) {
@@ -438,9 +440,21 @@ public:
     }
 
     PushBack(ft);
+
+    std::bitset<16> bs;
+    int cardinality = 0;
+    while (cardinality < 4) {
+      int v = rand() % 16;
+      if (!bs[v]) {
+        bs[v] = 1;
+        cardinality++;
+      }
+    }
+
     
     for (int i = 0; i < kFanoutSize; ++i) {
-      child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
+      if (bs[i])
+        child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
     }
 
     return true;
@@ -618,7 +632,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
   auto uc = std::make_shared<SharedTcpStream>(c);
 
   // allocate fanout tracker
-  auto ft = new FanoutTracker(uc, kFanoutSize);
+  auto ft = new FanoutTracker(uc, 4);
 
   while (true) {
     payload *p = &ft->p;
@@ -637,7 +651,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
 
     ft->start_time = steady_clock::now();
     
-    ft = new FanoutTracker(uc, kFanoutSize);
+    ft = new FanoutTracker(uc, 4);
   }
 }
 
