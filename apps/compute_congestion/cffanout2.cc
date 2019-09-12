@@ -12,6 +12,7 @@ extern "C" {
 
 #include <atomic>
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -334,10 +335,10 @@ private:
 
 class FanoutTracker {
 public:
-  FanoutTracker(std::shared_ptr<SharedTcpStream> c) : 
+  FanoutTracker(std::shared_ptr<SharedTcpStream> c, int fanout_size) : 
     timed_out(false),
-    response_waiting_(kFanoutSize), max_delay_(0),
-    sum_processing_time_(0), sum_rating_(0), conn_(c) {
+    response_waiting_(fanout_size), max_delay_(0),
+    sum_processing_time_(0), sum_rating_(0), conn_(c), fanout_size_(fanout_size) {
       for (int i = 0; i < kFanoutSize; ++i) {
         outstanding[i] = false;
       }
@@ -361,8 +362,8 @@ public:
     // send response back to the upstream
     if (rw == 0 && !timed_out) {
       p.queueing_delay = hton64(rt::RuntimeQueueingDelayUS() + max_delay_);
-      p.processing_time = hton64(static_cast<uint64_t>(sum_processing_time_ / kFanoutSize));
-      p.rating = htonf(sum_rating_ / kFanoutSize);
+      p.processing_time = hton64(static_cast<uint64_t>(sum_processing_time_ / fanout_size_));
+      p.rating = htonf(sum_rating_ / fanout_size_);
 
       ssize_t ret = conn_->WriteFull(&p, sizeof(p));
       if (ret != static_cast<ssize_t>(sizeof(p))) {
@@ -420,6 +421,7 @@ private:
   // sum of processing time
   uint64_t sum_processing_time_;
   float sum_rating_;
+  int fanout_size_;
   // upstream connection
   std::shared_ptr<SharedTcpStream> conn_;
 };
@@ -534,9 +536,21 @@ public:
   }
 
   void FanoutAll(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
+    std::bitset<16> bs;
+    int cardinality = 0;
+    while (cardinality < 4) {
+      int v = rand() % 16;
+      if (!bs[v]) {
+        bs[v] = 1;
+        cardinality++;
+      }
+    }
+
     for (int i = 0; i < kFanoutSize; ++i) {
-      uint64_t child_idx = child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
-      ft->child_index[i] = child_idx;
+      if (bs[i])
+        ft->child_index[i] = child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
+      else
+        ft->child_index[i] = 0;
     }
   }
 
@@ -705,7 +719,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
   auto uc = std::make_shared<SharedTcpStream>(c);
 
   // allocate fanout tracker
-  auto ft = new FanoutTracker(uc);
+  auto ft = new FanoutTracker(uc, 4);
 
   while (true) {
     payload *p = &ft->p;
@@ -731,7 +745,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
     ft->start_time = steady_clock::now();
     fm->FanoutAll(user_id, movie_id, ft);
     
-    ft = new FanoutTracker(uc);
+    ft = new FanoutTracker(uc, 4);
   }
 }
 
