@@ -45,12 +45,26 @@ constexpr uint64_t kIterationsPerUS = 88;
 constexpr uint64_t kWarmupUpSeconds = 5;
 
 constexpr uint64_t kExperimentDuration = 5000000;
-constexpr uint64_t kSLOUS = 100000;
+constexpr uint64_t kSLOUS = 50000;
 
 constexpr uint64_t MAX_USERID = 610;
-static std::vector<uint64_t> movie_ids;
 
 static std::vector<std::pair<double, uint64_t>> rates;
+
+static float ntohf(float value) {
+  union v {
+    float f;
+    unsigned int i;
+  };
+
+  union v val;
+  unsigned int temp;
+
+  val.f = value;
+  temp = ntoh32(val.i);
+
+  return *(float*)&temp;
+}
 
 constexpr uint64_t kTBMaxToken = 32; // reqs
 constexpr uint64_t kTBMinTimeToSleep = 1; // us
@@ -146,6 +160,7 @@ struct work_unit {
   uint64_t user_id;
   uint64_t movie_id;
   uint64_t timing;
+  float rating;
 };
 
 template <class Arrival, class Service>
@@ -156,7 +171,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
   while (cur_us < last_us) {
     cur_us += a();
     w.emplace_back(work_unit{cur_us, 0, 0,
-        (rand() % MAX_USERID + 1), movie_ids[(rand() % movie_ids.size())], 0});
+        (rand() % 10 + 1), (rand() % 10 + 1), 0});
   }
   return w;
 }
@@ -196,6 +211,7 @@ std::vector<work_unit> ClientWorker(
       w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
       // execution time + client queueing delay
       w[idx].latency_us = duration_cast<sec>(ts - expstart).count() - w[idx].start_us;
+      w[idx].rating = ntohf(rp.rating);
     }
   });
 
@@ -480,11 +496,17 @@ void PrintStatResultsLatency(std::vector<work_unit> w, double offered_rps,
   double gps = slo_success / (double)kExperimentDuration * 1000000;
   double slo_rate = slo_success / total;
 
+  double sum_goodput = std::accumulate(
+      w.begin(), w.end(), 0.0,
+      [] (double s, const work_unit &c) { if (c.latency_us < kSLOUS) return s + c.rating; else return s; });
+
+  double pgps = sum_goodput / (kExperimentDuration / 1000000.0);
+
   std::cout  //<<
              //"#threads,offered_rps,rps,cpu_usage,samples,min,mean,p90,p99,p999,p9999,max"
              //<< std::endl
       << std::setprecision(4) << std::fixed << threads << "," << offered_rps
-      << "," << rps << "," << gps << "," << cpu_usage << "," << slo_rate
+      << "," << rps << "," << gps << "," << pgps << "," << cpu_usage << "," << slo_rate
       << "," << w.size() << "," << min << "," << mean << "," << p90
       << "," << p99 << "," << p999 << "," << p9999 << "," << max << std::endl;
 }
@@ -582,12 +604,6 @@ int main(int argc, char *argv[]) {
     rates.emplace_back(rate, duration);
   }
 */
-  
-  std::ifstream movie_file("movie.csv");
-  uint64_t movie_id;
-  while (movie_file >> movie_id) {
-    movie_ids.push_back(movie_id);
-  }
 
   ret = runtime_init(argv[1], ClientHandler, NULL);
   if (ret) {

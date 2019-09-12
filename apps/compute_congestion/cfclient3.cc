@@ -31,12 +31,14 @@ namespace {
 using namespace std::chrono;
 using sec = duration<double, std::micro>;
 
+constexpr int NUM_PROXY = 4;
+
 // <- ARGUMENTS FOR EXPERIMENT ->
 // the number of worker threads to spawn.
 int threads;
 double offered_load;
 // the remote UDP address of the server.
-netaddr raddr[4];
+netaddr raddr[NUM_PROXY];
 // the mean service time in us.
 double st;
 // number of iterations required for 1us on target server
@@ -45,7 +47,7 @@ constexpr uint64_t kIterationsPerUS = 88;
 constexpr uint64_t kWarmupUpSeconds = 5;
 
 constexpr uint64_t kExperimentDuration = 5000000;
-constexpr uint64_t kSLOUS = 100000;
+constexpr uint64_t kSLOUS = 1000;
 
 constexpr uint64_t MAX_USERID = 610;
 
@@ -265,7 +267,7 @@ std::vector<work_unit> RunExperiment(
   // Create one TCP connection per thread.
   std::vector<std::unique_ptr<rt::TcpConn>> conns;
   for (int i = 0; i < threads; ++i) {
-    std::unique_ptr<rt::TcpConn> outc(rt::TcpConn::Dial({0, 0}, raddr[i%4]));
+    std::unique_ptr<rt::TcpConn> outc(rt::TcpConn::Dial({0, 0}, raddr[i%NUM_PROXY]));
     if (unlikely(outc == nullptr)) panic("couldn't connect to raddr.");
     conns.emplace_back(std::move(outc));
   }
@@ -561,23 +563,13 @@ int main(int argc, char *argv[]) {
 
   threads = std::stoi(argv[3], nullptr, 0);
 
-  ret = StringToAddr(argv[4], &raddr[0].ip);
-  if (ret) return -EINVAL;
-  raddr[0].port = kNetbenchPort;
+  for(int i = 0; i < NUM_PROXY; ++i) {
+    ret = StringToAddr(argv[4+i], &raddr[i].ip);
+    if (ret) return -EINVAL;
+    raddr[i].port = kNetbenchPort;
+  }
 
-  ret = StringToAddr(argv[5], &raddr[1].ip);
-  if (ret) return -EINVAL;
-  raddr[1].port = kNetbenchPort;
-
-  ret = StringToAddr(argv[6], &raddr[2].ip);
-  if (ret) return -EINVAL;
-  raddr[2].port = kNetbenchPort;
-
-  ret = StringToAddr(argv[7], &raddr[3].ip);
-  if (ret) return -EINVAL;
-  raddr[3].port = kNetbenchPort;
-
-  offered_load = std::stod(argv[8], nullptr);
+  offered_load = std::stod(argv[4+NUM_PROXY], nullptr);
 /*
   for (i = 6; i < argc; i++) {
     std::vector<std::string> tokens = split(argv[i], ':');
