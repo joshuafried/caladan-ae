@@ -26,6 +26,9 @@ cfclient_obj = $(cfclient_src:.cc=.o)
 cfclient2_src = cfclient2.cc
 cfclient2_obj = $(cfclient2_src:.cc=.o)
 
+cfclient3_src = cfclient3.cc
+cfclient3_obj = $(cfclient3_src:.cc=.o)
+
 loadbalancer_src = loadbalancer.cc
 loadbalancer_obj = $(loadbalancer_src:.cc=.o)
 
@@ -65,7 +68,7 @@ INC += -I$(ROOT_PATH)/bindings/cc
 RUNTIME_LIBS := $(RUNTIME_LIBS) -lnuma
 
 # must be first
-all: netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 \
+all: netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 cfclient3 \
  	loadbalancer server sserver sserver2 fanout fanout2 fanout3 cffanout \
 	cffanout2 cffanout3 cffanout4
 
@@ -95,6 +98,10 @@ cfclient: $(lib_obj) $(cfclient_obj) $(librt_libs) $(RUNTIME_DEPS)
 
 cfclient2: $(lib_obj) $(cfclient2_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cfclient2_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
+cfclient3: $(lib_obj) $(cfclient3_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cfclient3_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
 
 loadbalancer: $(lib_obj) $(loadbalancer_obj) $(librt_libs) $(RUNTIME_DEPS)
@@ -143,7 +150,7 @@ cffanout4: $(lib_obj) $(cffanout4_obj) $(librt_libs) $(RUNTIME_DEPS)
 
 # general build rules for all targets
 src = $(lib_src) $(netbench_src) $(netbench2_src) $(netbench3_src) $(netbench4_src) \
-		  $(netbench5_src) $(cfclient_src) $(cfclient2_src) $(loadbalancer_src) $(server_src) \
+		  $(netbench5_src) $(cfclient_src) $(cfclient2_src) $(cfclient3_src) $(loadbalancer_src) $(server_src) \
 		 	$(sserver_src) $(sserver2_src)	$(fanout_src) $(fanout2_src) $(fanout3_src) \
 		 	$(cffanout_src) $(cffanout2_src) $(cffanout3_src) $(cffanout4_src)
 obj = $(src:.cc=.o)
@@ -162,6 +169,6 @@ endif
 
 .PHONY: clean
 clean:
-	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 \
+	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 cfclient3 \
 		loadbalancer server sserver sserver2 fanout fanout2 fanout3 cffanout cffanout2 cffanout3 \
 		cffanout4
