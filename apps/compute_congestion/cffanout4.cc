@@ -566,6 +566,7 @@ public:
   void GarbageCollect() {
     uint64_t time_to_sleep = 1000;
     time_point<steady_clock> now;
+
     while(ft_head_ != nullptr) {
       barrier();
       now = steady_clock::now();
