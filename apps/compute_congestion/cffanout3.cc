@@ -9,8 +9,10 @@ extern "C" {
 #include "runtime.h"
 #include "sync.h"
 #include "thread.h"
+#include "timer.h"
 
 #include <algorithm>
+#include <bitset>
 #include <chrono>
 #include <fstream>
 #include <functional>
@@ -38,8 +40,8 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
-constexpr uint64_t kSLOUS = 40000; // 50 ms
-constexpr uint64_t kSLOSLACK = 2000; // 2.5 ms
+constexpr uint64_t kSLOUS = 50000; // 50 ms
+constexpr uint64_t kSLOSLACK = 2500; // 2.5 ms
 
 // Port number of the Fanout node
 constexpr uint64_t kFanoutPort = 8001;
@@ -263,7 +265,7 @@ private:
   const size_t hashSize;
 };
 
-constexpr int kFanoutSize = 4;
+constexpr int kFanoutSize = 16;
 // Upstream Payload
 struct payload {
   uint64_t user_id;
@@ -290,8 +292,9 @@ private:
 class FanoutTracker {
 friend class FanoutManager;
 public:
-  FanoutTracker(std::shared_ptr<SharedTcpStream> c) : 
-    response_waiting_(kFanoutSize), max_delay_(0),
+  FanoutTracker(std::shared_ptr<SharedTcpStream> c, int fanout_size) : 
+    timed_out(false), prev(nullptr), next(nullptr),
+    response_waiting_(fanout_size), fanout_size_(fanout_size), max_delay_(0),
     sum_processing_time_(0), sum_rating_(0), conn_(c) {}
 
   int ReceiveResponse(uint64_t queueing_delay, uint64_t processing_time, float rating) {
@@ -307,10 +310,10 @@ public:
     s_.Unlock();
 
     // send response back to the upstream
-    if (rw == 0) {
+    if (rw == 0 && !timed_out) {
       p.queueing_delay = hton64(rt::RuntimeQueueingDelayUS() + max_delay_);
-      p.processing_time = hton64(static_cast<uint64_t>(sum_processing_time_ / kFanoutSize));
-      p.rating = htonf(static_cast<float>(sum_rating_ / kFanoutSize));
+      p.processing_time = hton64(static_cast<uint64_t>(sum_processing_time_ / fanout_size_));
+      p.rating = htonf(1.0);
 
       ssize_t ret = conn_->WriteFull(&p, sizeof(p));
       if (ret != static_cast<ssize_t>(sizeof(p))) {
@@ -321,16 +324,37 @@ public:
     return rw;
   }
 
+  void ForceSend() {
+    if (response_waiting_ < fanout_size_) {
+      p.queueing_delay = hton64(rt::RuntimeQueueingDelayUS() + max_delay_);
+      p.processing_time = hton64(static_cast<uint64_t>(sum_processing_time_ / (fanout_size_ - response_waiting_)));
+      p.rating = htonf(1.0 / (fanout_size_ - response_waiting_));
+
+      ssize_t ret = conn_->WriteFull(&p, sizeof(p));
+      if (ret != static_cast<ssize_t>(sizeof(p))) {
+        if (ret != -EPIPE && ret != -ECONNRESET) log_err("upstream tcp_write failed");
+      }
+      timed_out = true;
+    }
+  }
+
+
   // Upstream response payload
   payload p;
   time_point<steady_clock> start_time;
   time_point<steady_clock> sent_time;
+
+  bool timed_out;
+
+  FanoutTracker *prev;
+  FanoutTracker *next;
 
 private:
   // Spin lock for response_waiting_
   rt::Spin s_;
   // The number of downstream responses waiting for
   int response_waiting_;
+  int fanout_size_;
   // Maximum queueing delay of the responses
   uint64_t max_delay_;
   // sum of processing time
@@ -409,7 +433,8 @@ private:
 
 class FanoutManager {
 public:
-  FanoutManager() : cwnd_(40.0), num_outst_req_(0), target_us_(25), ewma_exe_time_(0) {
+  FanoutManager() : cwnd_(40.0), num_outst_req_(0), target_us_(25), ewma_exe_time_(0),
+                    ft_head_(nullptr), ft_tail_(nullptr), ft_list_len_(0) {
     child_qs_.reserve(kFanoutSize);
   }
 
@@ -505,9 +530,115 @@ public:
   }
 
   void FanoutAll(FanoutTracker* ft) {
-    for (int i = 0; i < kFanoutSize; ++i) {
-      child_qs_[i]->EnqueueRequest(ft);
+    /*
+    std::bitset<16> bs;
+    int cardinality = 0;
+    while (cardinality < 4) {
+      int v = rand() % 16;
+      if (!bs[v]) {
+        bs[v] = 1;
+        cardinality++;
+      }
     }
+*/
+    for (int i = 0; i < kFanoutSize; ++i) {
+//      if (bs[i])
+        child_qs_[i]->EnqueueRequest(ft);
+    }
+    PushBack(ft);
+  }
+
+  void PushBack(FanoutTracker* ft) {
+    s_.Lock();
+
+    if (ft_list_len_ == 0) {
+      assert(ft_head_ == nullptr);
+      assert(ft_tail_ == nullptr);
+
+      ft_head_ = ft;
+      ft_tail_ = ft;
+      ft->next = ft;
+      ft->prev = ft;
+    } else {
+      assert(ft_head_);
+      assert(ft_tail_);
+      ft_tail_->next = ft;
+      ft_head_->prev = ft;
+      ft->prev = ft_tail_;
+      ft->next = ft_head_;
+
+      ft_tail_ = ft;
+    }
+
+    ft_list_len_++;
+    s_.Unlock();
+  }
+
+  void Remove(FanoutTracker* ft) {
+    if (ft->prev == nullptr && ft->next == nullptr) 
+      return;
+
+    s_.Lock();
+    FanoutTracker* before = ft->prev;
+    FanoutTracker* after = ft->next;
+    ft->prev = nullptr;
+    ft->next = nullptr;
+
+    if (ft_list_len_ == 1) {
+      // I am the last one
+      assert(ft_head_ == ft);
+      assert(ft_tail_ == ft);
+      ft_head_ = nullptr;
+      ft_tail_ = nullptr;
+    } else {
+      before->next = after;
+      after->prev = before;
+      if (ft_head_ == ft) {
+        // I was the header.
+        ft_head_ = after;
+      }
+      if (ft_tail_ == ft) {
+        // I wast the tail.
+        ft_tail_ = before;
+      }
+    }
+
+    ft_list_len_--;
+    s_.Unlock();
+  }
+
+  FanoutTracker* Front() {
+    return ft_head_;
+  }
+
+  void PopFront() {
+    if (ft_head_ == nullptr)
+      return;
+    s_.Lock();
+    FanoutTracker* victim = ft_head_;
+    ft_head_ = victim->next;
+    victim->next = nullptr;
+    assert(victim->prev = nullptr);
+    s_.Unlock();
+  }
+
+  void GarbageCollect() {
+    uint64_t time_to_sleep = 1000;
+    time_point<steady_clock> now;
+    while(ft_head_ != nullptr) {
+      barrier();
+      now = steady_clock::now();
+      barrier();
+      FanoutTracker* ft = ft_head_;
+      if (duration_cast<microseconds>(now - ft->start_time).count() < kSLOUS - kSLOSLACK) {
+        time_to_sleep = kSLOUS - kSLOSLACK - duration_cast<microseconds>(now - ft->start_time).count();
+        break;
+      }
+      // Let's drop this
+      ft->ForceSend();
+      Remove(ft);
+    }
+    rt::Sleep(time_to_sleep);
   }
 
 private:
@@ -517,6 +648,11 @@ private:
   uint32_t num_outst_req_;
   unsigned int target_us_;
   uint64_t ewma_exe_time_;
+
+  FanoutTracker *ft_head_;
+  FanoutTracker *ft_tail_;
+  uint64_t ft_list_len_;
+  rt::Spin s_;
 
   rt::Mutex m_;
   rt::CondVar cv_;
@@ -551,6 +687,7 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
 
       // tracker->ReceiveResponse
       if (ft->ReceiveResponse(queueing_delay, processing_time, rating) == 0){
+        fm->Remove(ft);
         fm->Update(ft);
         delete ft;
       }
@@ -584,7 +721,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
   auto uc = std::make_shared<SharedTcpStream>(c);
 
   // allocate fanout tracker
-  auto ft = new FanoutTracker(uc);
+  auto ft = new FanoutTracker(uc, 16);
 
   while (true) {
     payload *p = &ft->p;
@@ -601,7 +738,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
     fm->Enqueue(ft);
 //    fm->FanoutAll(ntoh64(p->user_id), ntoh64(p->movie_id), ft);
     
-    ft = new FanoutTracker(uc);
+    ft = new FanoutTracker(uc, 16);
   }
 }
 
@@ -622,6 +759,10 @@ void FanoutWorker(std::shared_ptr<FanoutManager> fm) {
     if (ft)
       fm->FanoutAll(ft);
   }
+}
+
+void GarbageCollector(std::shared_ptr<FanoutManager> fm) {
+  fm->GarbageCollect();
 }
 
 void FanoutHandler(void *arg) {
@@ -648,6 +789,8 @@ void FanoutHandler(void *arg) {
       DownstreamWorker(child_conns[i].get(), &starter, fm, i);
     }));
   }
+
+  rt::Thread([&] { GarbageCollector(fm); }).Detach();
 
   auto fw = rt::Thread([&] {
     FanoutWorker(fm);
