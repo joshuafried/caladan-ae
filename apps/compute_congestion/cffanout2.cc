@@ -764,7 +764,7 @@ void FanoutHandler(void *arg) {
   auto fm = std::make_shared<FanoutManager>();
 
   for (int i = 0; i < num_leafs; ++i) {
-    fm->AddFanoutNode(std::make_shared<ChildQueue>(), std::make_shared<StatMonitor>(1000));
+    fm->AddFanoutNode(std::make_shared<ChildQueue>(), std::make_shared<StatMonitor>(100));
   }
 
   std::vector<std::unique_ptr<rt::TcpConn>> child_conns;
