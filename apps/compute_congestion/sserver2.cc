@@ -39,7 +39,7 @@ static uint64_t MAX_SERVICE_TIME_IDX;
 // A prime number as hash size gives a better distribution of values in buckets
 constexpr uint64_t HASH_SIZE_DEFAULT = 10009;
 constexpr uint64_t kIterationsPerUS = 88;
-constexpr uint64_t kAQMThresh = 20000; // 10ms: according to WeChat
+constexpr uint64_t kAQMThresh = 2500; // 10ms: according to WeChat
 
 // Class representing a templatized hash node
 template <typename K, typename V>
@@ -370,7 +370,7 @@ public:
     double new_window = window_;
 
     // If average queueing delay is more than 20ms
-    if (avg_qdel >= 20000.0) {
+    if (avg_qdel >= kAQMThresh) {
       // congested! decrease the window by 5%
       new_window = 0.95 * window_;
     } else {
@@ -381,7 +381,7 @@ public:
     if (new_window < 10.0)
       new_window = 10.0;
 
-    printf("new_cwnd = %lf\n", new_window);
+    //printf("new_cwnd = %lf\n", new_window);
     
     s_.Lock();
     sum_qdel_ = 0;
