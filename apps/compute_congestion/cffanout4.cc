@@ -44,8 +44,8 @@ constexpr uint64_t kLeafPort = 8001;
 // A prime number as hash size gives a better distribution of values in buckets
 constexpr uint64_t HASH_SIZE_DEFAULT = 10009;
 
-constexpr uint64_t kSLOUS = 50000;
-constexpr uint64_t kSLOSLACK = 2500;
+constexpr uint64_t kSLOUS = 1000;
+constexpr uint64_t kSLOSLACK = 500;
 
 static float htonf(float value) {
   union v {
@@ -330,8 +330,8 @@ public:
       if (ret != static_cast<ssize_t>(sizeof(p))) {
         if (ret != -EPIPE && ret != -ECONNRESET) log_err("upstream tcp_write failed");
       }
-      timed_out = true;
     }
+    timed_out = true;
   }
 
   bool IsAlive() {
@@ -451,7 +451,7 @@ public:
 
     bool admission;
     s_.Lock();
-    admission = static_cast<double>(ft_list_len_ + 1.0) <= window_;
+    admission = static_cast<double>(ft_list_len_ + 1.0) <= 4*window_;
     s_.Unlock();
 
     if (!admission) {
@@ -459,7 +459,7 @@ public:
     }
 
     PushBack(ft);
-/*
+
     std::bitset<16> bs;
     int cardinality = 0;
     while (cardinality < 4) {
@@ -469,10 +469,10 @@ public:
         cardinality++;
       }
     }
-*/
+
     
     for (int i = 0; i < kFanoutSize; ++i) {
-//      if (bs[i])
+      if (bs[i])
         child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
     }
 
@@ -563,7 +563,7 @@ public:
     s_.Unlock();
   }
 
-  void GarbageCollect() {
+  uint64_t GarbageCollect() {
     uint64_t time_to_sleep = 1000;
     time_point<steady_clock> now;
 
@@ -580,7 +580,8 @@ public:
       ft->ForceSend();
       Remove(ft);
     }
-    rt::Sleep(time_to_sleep);
+
+    return time_to_sleep;
   }
 
 private:
@@ -658,7 +659,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
   auto uc = std::make_shared<SharedTcpStream>(c);
 
   // allocate fanout tracker
-  auto ft = new FanoutTracker(uc, 16);
+  auto ft = new FanoutTracker(uc, 4);
 
   while (true) {
     payload *p = &ft->p;
@@ -677,7 +678,7 @@ void UpstreamWorker(std::shared_ptr<rt::TcpConn> c, std::shared_ptr<FanoutManage
 
     ft->start_time = steady_clock::now();
     
-    ft = new FanoutTracker(uc, 16);
+    ft = new FanoutTracker(uc, 4);
   }
 }
 
@@ -693,7 +694,8 @@ void UpstreamHandler(std::shared_ptr<FanoutManager> fm) {
 }
 
 void GarbageCollector(std::shared_ptr<FanoutManager> fm) {
-  fm->GarbageCollect();
+  while(true)
+    rt::Sleep(fm->GarbageCollect());
 }
 
 void FanoutHandler(void *arg) {
