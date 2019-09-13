@@ -53,6 +53,21 @@ constexpr uint64_t MAX_USERID = 610;
 
 static std::vector<std::pair<double, uint64_t>> rates;
 
+static float ntohf(float value) {
+  union v {
+    float f;
+    unsigned int i;
+  };
+
+  union v val;
+  unsigned int temp;
+
+  val.f = value;
+  temp = ntoh32(val.i);
+
+  return *(float*)&temp;
+}
+
 constexpr uint64_t kTBMaxToken = 32; // reqs
 constexpr uint64_t kTBMinTimeToSleep = 1; // us
 constexpr uint64_t kTBMaxTimeToSleep = 1000; // us
@@ -147,6 +162,7 @@ struct work_unit {
   uint64_t user_id;
   uint64_t movie_id;
   uint64_t timing;
+  float rating;
 };
 
 template <class Arrival, class Service>
@@ -197,6 +213,7 @@ std::vector<work_unit> ClientWorker(
       w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
       // execution time + client queueing delay
       w[idx].latency_us = duration_cast<sec>(ts - expstart).count() - w[idx].start_us;
+      w[idx].rating = ntohf(rp.rating);
     }
   });
 
@@ -481,11 +498,17 @@ void PrintStatResultsLatency(std::vector<work_unit> w, double offered_rps,
   double gps = slo_success / (double)kExperimentDuration * 1000000;
   double slo_rate = slo_success / total;
 
+  double sum_goodput = std::accumulate(
+      w.begin(), w.end(), 0.0,
+      [] (double s, const work_unit &c) { if (c.latency_us < kSLOUS) return s + c.rating; else return s; });
+
+  double pgps = sum_goodput / (kExperimentDuration / 1000000.0);
+
   std::cout  //<<
              //"#threads,offered_rps,rps,cpu_usage,samples,min,mean,p90,p99,p999,p9999,max"
              //<< std::endl
       << std::setprecision(4) << std::fixed << threads << "," << offered_rps
-      << "," << rps << "," << gps << "," << cpu_usage << "," << slo_rate
+      << "," << rps << "," << gps << "," << pgps << "," << cpu_usage << "," << slo_rate
       << "," << w.size() << "," << min << "," << mean << "," << p90
       << "," << p99 << "," << p999 << "," << p9999 << "," << max << std::endl;
 }
