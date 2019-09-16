@@ -15,6 +15,7 @@
 #include "ias.h"
 
 // #define IAS_DEBUG 1
+// #define ENABLE_HT 1
 
 /* a list of all processes */
 LIST_HEAD(all_procs);
@@ -186,8 +187,10 @@ int ias_idle_on_core(unsigned int core)
 static float ias_calculate_score(struct ias_data *sd, unsigned int core,
 				 uint64_t now_tsc)
 {
-	float score, ht_score;
-	unsigned int sib;	
+	float score;
+#ifdef ENABLE_HT
+	unsigned int sib;
+	float ht_score;
 
 	/* occasionally we choose a random pairing */
 	static int rr_cnt = 0;
@@ -198,24 +201,29 @@ static float ias_calculate_score(struct ias_data *sd, unsigned int core,
 
 	if (is_banned(sd, cores[sched_siblings[core]], now_tsc))
 		return -FLT_MAX;
+#endif
 
 	/* try to estimate how well the core and process pair together */
 	score = ias_has_priority(sd, core) ? IAS_PRIORITY_WEIGHT : 0.0;
 	score += ias_loc_score(sd, core, now_us);
-	
+
+#ifdef ENABLE_HT
 	sib = sched_siblings[core];
 	ht_score = ias_ht_pairing_score(sd, cores[sib]);
-	
 	/* encourage to use a full HT pair when the IPC degradation is acceptable */
 	ht_score += cores[sib] ? GET_MAX_IPC_DEGRADE_RATIO(sd) : 0;
-
+#endif
+#ifdef ENABLE_HT
 	return score + IAS_HT_WEIGHT * ht_score;
+#else
+	return score;
+#endif
 }
 
 static unsigned int ias_choose_core(struct ias_data *sd, bool lc)
 {
 	unsigned int core, best_core = NCPU, tmp;
-	float score, best_score = 0;
+	float score, best_score = -1;
 	uint64_t now_tsc = rdtsc();
 
 	sched_for_each_allowed_core(core, tmp) {
@@ -378,7 +386,10 @@ static void ias_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
 #ifdef IAS_DEBUG
 	static uint64_t debug_ts = 0;
 #endif
-	static uint64_t bw_ts = 0, ht_ts = 0;
+	static uint64_t bw_ts = 0;
+#ifdef ENABLE_HT
+	static uint64_t ht_ts = 0;
+#endif
 		
 	unsigned int core;
 
@@ -389,10 +400,12 @@ static void ias_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
 		bw_ts = now;
 		ias_bw_poll(now);
 	}
+#ifdef ENABLE_HT
 	if (now - ht_ts >= IAS_HT_POLL_US) {
 		ht_ts = now;
 		ias_ht_poll(now);
 	}
+#endif
 #ifdef IAS_DEBUG
 	if (now - debug_ts >= IAS_DEBUG_PRINT_US) {
 		debug_ts = now;
