@@ -245,12 +245,6 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 	struct simple_data *sd = (struct simple_data *)p->policy_data;
 	int ret;
 
-	/* do nothing if we woke up a core during the last interval */
-	if (sd->waking) {
-		sd->waking = false;
-		goto done;
-	}
-
 	/* check if congested */
 	if (bitmap_popcount(threads, NCPU) +
             bitmap_popcount(io, NCPU) == 0) {
