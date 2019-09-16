@@ -58,6 +58,7 @@ static struct kthread *allock(void)
 	mbufq_init(&k->txpktq_overflow);
 	mbufq_init(&k->txcmdq_overflow);
 	spin_lock_init(&k->timer_lock);
+	k->park_efd = eventfd(0, 0);
 	BUG_ON(k->park_efd < 0);
 	return k;
 }
@@ -90,23 +91,30 @@ int kthread_init_thread(void)
 static __always_inline void kthread_yield_to_iokernel(void)
 {
 	struct kthread *k = myk();
-	uint64_t last_core = k->curr_cpu;
+	uint64_t assigned_core, last_core = k->curr_cpu;
 	ssize_t s;
 
 	clear_preempt_needed();
 
-	/* yield to the iokernel */
-	s = ioctl(ksched_fd, KSCHED_IOC_PARK, 0);
-	while (unlikely(s < 0 || preempt_needed())) {
-		/* preempted while yielding, yield again */
+	s = read(k->park_efd, &assigned_core, sizeof(assigned_core));
+	while (unlikely(s != sizeof(uint64_t) && errno == EINTR)) {
 		clear_preempt_needed();
-		s = ioctl(ksched_fd, KSCHED_IOC_PARK, 0);
+		s = read(k->park_efd, &assigned_core, sizeof(assigned_core));
 	}
 
-	k->curr_cpu = s;
+
+	// /* yield to the iokernel */
+	// s = ioctl(ksched_fd, KSCHED_IOC_PARK, 0);
+	// while (unlikely(s < 0 || preempt_needed())) {
+	// 	/* preempted while yielding, yield again */
+	// 	clear_preempt_needed();
+	// 	s = ioctl(ksched_fd, KSCHED_IOC_PARK, 0);
+	// }
+
+	k->curr_cpu = assigned_core - 1;
 	if (k->curr_cpu != last_core)
 		STAT(CORE_MIGRATIONS)++;
-	store_release(&cpu_map[s].recent_kthread, k);
+	store_release(&cpu_map[assigned_core - 1].recent_kthread, k);
 }
 
 
@@ -208,6 +216,7 @@ static inline void flows_notify_parking(bool voluntary) {}
  */
 void kthread_park(bool voluntary)
 {
+	struct kthread *k = myk();
 	assert_preempt_disabled();
 
 	/* atomically verify we have at least @spinks kthreads running */
@@ -222,6 +231,10 @@ void kthread_park(bool voluntary)
 	flows_notify_parking(voluntary);
 
 	STAT(PARKS)++;
+
+	/* signal to iokernel that we're about to park */
+	while (!lrpc_send(&k->txcmdq, TXCMD_PARKED, 0))
+		cpu_relax();
 
 	/* perform the actual parking */
 	kthread_yield_to_iokernel();
@@ -242,11 +255,13 @@ void kthread_wait_to_attach(void)
 	struct kthread *k = myk();
 	int s;
 
-	s = ioctl(ksched_fd, KSCHED_IOC_START, 0);
-	BUG_ON(s < 0);
+	kthread_yield_to_iokernel();
 
-	k->curr_cpu = s;
-	store_release(&cpu_map[s].recent_kthread, k);
+	// s = ioctl(ksched_fd, KSCHED_IOC_START, 0);
+	// BUG_ON(s < 0);
+
+	// k->curr_cpu = s;
+	// store_release(&cpu_map[s].recent_kthread, k);
 
 	/* attach the kthread for the first time */
 	atomic_inc(&runningks);
@@ -261,6 +276,7 @@ void kthread_wait_to_attach(void)
  */
 int kthread_init(void)
 {
+	return 0;
 	ksched_fd = open("/dev/ksched", O_RDWR);
 	if (ksched_fd < 0)
 		return -errno;

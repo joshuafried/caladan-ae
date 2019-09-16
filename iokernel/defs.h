@@ -70,6 +70,7 @@ struct timer {
 
 struct thread {
 	bool			active;
+	bool			reaffinitize;
 	struct proc		*p;
 	struct lrpc_chan_out	rxq;
 	struct lrpc_chan_in	txpktq;

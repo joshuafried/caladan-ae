@@ -33,12 +33,12 @@ static const struct init_entry iok_init_handlers[] = {
 	IOK_INITIALIZER(base),
 
 	/* general iokernel */
-	IOK_INITIALIZER(ksched),
+//	IOK_INITIALIZER(ksched),
 	IOK_INITIALIZER(sched),
 	IOK_INITIALIZER(simple),
-	IOK_INITIALIZER(mis),
-	IOK_INITIALIZER(numa),
-	IOK_INITIALIZER(ias),
+//	IOK_INITIALIZER(mis),
+//	IOK_INITIALIZER(numa),
+//	IOK_INITIALIZER(ias),
 
 	/* control plane */
 	IOK_INITIALIZER(control),
@@ -156,6 +156,7 @@ int main(int argc, char *argv[])
 	if (argc >= 2) {
 		if (!strcmp(argv[1], "simple")) {
 			sched_ops = &simple_ops;
+#if 0
 		} else if (!strcmp(argv[1], "mis")) {
 			sched_ops = &mis_ops;
 		} else if (!strcmp(argv[1], "numa")) {
@@ -166,6 +167,7 @@ int main(int argc, char *argv[])
 				return -EINVAL;
 			}
 			sched_ops = &ias_ops;
+#endif
 		} else {
 			print_usage();
 			return -EINVAL;

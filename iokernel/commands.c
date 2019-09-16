@@ -9,7 +9,7 @@
 #include <iokernel/queue.h>
 
 #include "defs.h"
-
+extern void notify_parked(struct thread *th);
 static int commands_drain_queue(struct thread *t, struct rte_mbuf **bufs, int n)
 {
 	int i, n_bufs = 0;
@@ -25,6 +25,11 @@ static int commands_drain_queue(struct thread *t, struct rte_mbuf **bufs, int n)
 		case TXCMD_NET_COMPLETE:
 			bufs[n_bufs++] = (struct rte_mbuf *)payload;
 			/* TODO: validate pointer @buf */
+			break;
+
+		case TXCMD_PARKED:
+			
+			notify_parked(t);
 			break;
 
 		default:

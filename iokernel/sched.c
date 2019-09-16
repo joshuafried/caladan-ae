@@ -15,6 +15,12 @@
 #include "sched.h"
 #include "ksched.h"
 
+#include <unistd.h>
+#include <sys/syscall.h> 
+
+static int sched_try_fast_rewake(struct thread *th);
+extern int control_pin_thread(pid_t tid, int core);
+
 /* a bitmap of cores available to be allocated by the scheduler */
 DEFINE_BITMAP(sched_allowed_cores, NCPU);
 
@@ -36,7 +42,7 @@ struct core_state {
 	struct thread	*pending_th;  /* a thread waiting run */
 	struct thread	*cur_th;      /* the currently running thread */
 	unsigned int	idle:1;	      /* is the core idle? */
-	unsigned int	pending:1;    /* the next run is waiting */
+	// unsigned int	pending:1;    /* the next run is waiting */
 	unsigned int	wait:1;       /* waiting for run to finish */
 };
 
@@ -91,6 +97,8 @@ static void sched_enable_kthread(struct thread *th, unsigned int core)
 	struct proc *p = th->p;
 
 	th->active = true;
+	if (th->core != core)
+		th->reaffinitize = true;
 	th->core = core;
 	list_del_from(&p->idle_threads, &th->idle_link);
 	th->at_idx = p->active_thread_count;
@@ -135,34 +143,84 @@ static struct thread *sched_pick_kthread(struct proc *p, unsigned int core)
 	return list_tail(&p->idle_threads, struct thread, idle_link);
 }
 
+static DEFINE_BITMAP(idle, NCPU);
+static int idle_cnt;
+
+void __wake(struct thread *th)
+{
+	ssize_t s, val;
+
+	if (th->reaffinitize) {
+		WARN_ON(control_pin_thread(th->tid, th->core));
+		th->reaffinitize = false;
+	}
+
+	val = th->core + 1;
+	s = write(th->park_efd, &val, sizeof(val));
+	BUG_ON(s != sizeof(uint64_t));
+}
+
+void notify_parked(struct thread *th)
+{
+	int core = th->core;
+	struct core_state *s = &state[core];
+
+	if (!s->pending_th && sched_try_fast_rewake(th) == 0)
+		return;
+
+	sched_disable_kthread(th);
+	proc_put(th->p);
+	s->wait = false;
+
+	if (s->pending_th) {
+		s->cur_th = s->pending_th;
+		s->pending_th = NULL;
+		s->idle = false;
+		__wake(s->cur_th);
+
+	} else {
+		s->cur_th = NULL;
+		s->idle = true;
+		bitmap_set(idle, core);
+		idle_cnt++;
+	}
+}
+
 int __sched_run(struct core_state *s, struct thread *th, unsigned int core)
 {
+	assert(!s->wait && !s->pending_th);
+	assert(th);
+
 	/* if we're still busy with the last run request than stop here */
+#if 0
 	if (s->wait) {
 		if (s->pending_th) {
 			sched_disable_kthread(s->pending_th);
 			proc_put(s->pending_th->p);
 		}
 		s->pending_th = th;
-		s->pending = true;
+		return 0;
+	}
+#endif
+
+	/* check if we need to interrupt the current core */
+	if (!s->idle && s->cur_th != NULL) {
+		if (unlikely(syscall(SYS_tgkill, s->cur_th->p->pid,
+			s->cur_th->tid, SIGUSR1) < 0)) {
+			WARN();
+		}
+		s->pending_th = th;
+		s->wait = true;
 		return 0;
 	}
 
-	/* check if we need to interrupt the current core */
-	if (!s->idle && s->cur_th != NULL)
-		ksched_enqueue_intr(core, KSCHED_INTR_CEDE);
-
-	/* finally request that the new kthread run on this core */
-	ksched_run(core, th ? th->tid : 0);
-	if (s->cur_th) {
-		sched_disable_kthread(s->cur_th);
-		proc_put(s->cur_th->p);
-	}
-	s->cur_th = th;
-	s->wait = true;
 	s->idle = false;
+	s->cur_th = th;
+	__wake(th);
+
 	return 0;
 }
+
 
 /**
  * sched_run_on_core - allocates a core to a process
@@ -191,6 +249,7 @@ int sched_run_on_core(struct proc *p, unsigned int core)
 		return -ENOENT;
 	proc_get(th->p);
 	sched_enable_kthread(th, core);
+	bitmap_clear(idle, core);
 
 	/* issue the command to run the thread */
 	return __sched_run(s, th, core);
@@ -207,6 +266,9 @@ int sched_run_on_core(struct proc *p, unsigned int core)
  */
 int sched_idle_on_core(uint32_t mwait_hint, unsigned int core)
 {
+	BUG(); // untested
+	return -1;
+#if 0
 	struct core_state *s = &state[core];
 
 	/* validate inputs --- mostly to catch bugs */
@@ -216,10 +278,11 @@ int sched_idle_on_core(uint32_t mwait_hint, unsigned int core)
 	}
 
 	/* setup the requested idle state */
-	ksched_idle_hint(mwait_hint, core);
+	// ksched_idle_hint(mwait_hint, core);
 
 	/* issue the command to idle the core */
 	return __sched_run(s, NULL, core);
+#endif
 }
 
 static uint32_t hwq_find_head(struct hwq *h, uint32_t cur_tail, uint32_t last_head)
@@ -364,8 +427,7 @@ static int sched_try_fast_rewake(struct thread *th)
 	return -EINVAL;
 
 rewake:
-	ksched_run(th->core, th->tid);
-	state[th->core].wait = true;
+	__wake(th);
 	return 0;
 }
 
@@ -375,10 +437,10 @@ rewake:
 void sched_poll(void)
 {
 	static uint64_t last_time = 0;
-	DEFINE_BITMAP(idle, NCPU);
+	// DEFINE_BITMAP(idle, NCPU);
 	struct core_state *s;
 	uint64_t now;
-	int i, core, idle_cnt = 0;
+	int i, core; //, idle_cnt = 0;
 	struct proc *p;
 
 	/*
@@ -405,50 +467,52 @@ void sched_poll(void)
 	 * fast pass --- runs every poll loop
 	 */
 
-	bitmap_init(idle, NCPU, false);
-	sched_for_each_allowed_core(core, i) {
-		s = &state[core];
+	// sched_for_each_allowed_core(core, i) {
+	// 	s = &state[core];
 
-		/* check if a pending context switch finished */
-		if (s->wait && ksched_poll_run_done(core)) {
-			if (s->pending) {
-				struct thread *th = s->pending_th;
+	// 	/* check if a pending context switch finished */
+	// 	if (s->wait && ksched_poll_run_done(core)) {
+	// 		if (s->pending) {
+	// 			struct thread *th = s->pending_th;
 
-				s->pending_th = NULL;
-				s->pending = false;
-				ksched_enqueue_intr(core, KSCHED_INTR_CEDE);
-				ksched_run(core, th ? th->tid : 0);
-				if (s->cur_th) {
-					sched_disable_kthread(s->cur_th);
-					proc_put(s->cur_th->p);
-				}
-				s->cur_th = th;
-			} else {
-				s->wait = false;
-			}
-		}
+	// 			s->pending_th = NULL;
+	// 			s->pending = false;
+	// 			ksched_enqueue_intr(core, KSCHED_INTR_CEDE);
+	// 			ksched_run(core, th ? th->tid : 0);
+	// 			if (s->cur_th) {
+	// 				sched_disable_kthread(s->cur_th);
+	// 				proc_put(s->cur_th->p);
+	// 			}
+	// 			s->cur_th = th;
+	// 		} else {
+	// 			s->wait = false;
+	// 		}
+	// 	}
 
-		/* check if a core went idle */
-		if (!s->wait && !s->idle && ksched_poll_idle(core)) {
-			if (s->cur_th) {
-				if (sched_try_fast_rewake(s->cur_th) == 0)
-					continue;
-				sched_disable_kthread(s->cur_th);
-				proc_put(s->cur_th->p);
-				s->cur_th = NULL;
-			}
-			s->idle = true;
-			bitmap_set(idle, core);
-			idle_cnt++;
-		}
-	}
+	// 	/* check if a core went idle */
+	// 	if (!s->wait && !s->idle && ksched_poll_idle(core)) {
+	// 		if (s->cur_th) {
+	// 			if (sched_try_fast_rewake(s->cur_th) == 0)
+	// 				continue;
+	// 			sched_disable_kthread(s->cur_th);
+	// 			proc_put(s->cur_th->p);
+	// 			s->cur_th = NULL;
+	// 		}
+	// 		s->idle = true;
+	// 		bitmap_set(idle, core);
+	// 		idle_cnt++;
+	// 	}
+	// }
 
 	/*
 	 * final pass --- let the scheduler policy decide how to respond
 	 */
 
 	sched_ops->sched_poll(now, idle_cnt, idle);
-	ksched_send_intrs();
+	bitmap_init(idle, NCPU, false);
+	idle_cnt = 0;
+
+	// ksched_send_intrs();
 }
 
 /**
@@ -608,6 +672,7 @@ int sched_init(void)
 		if (!found)
 			sched_siblings_tbl[sched_siblings_nr++] = i;
 	}
-
+	bitmap_for_each_set(sched_allowed_cores, NCPU, i)
+		state[i].idle = true;
 	return 0;
 }

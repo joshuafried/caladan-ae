@@ -184,6 +184,7 @@ static struct proc *control_create_proc(mem_key_t key, size_t len, pid_t pid,
 		th->p = p;
 		th->at_idx = UINT_MAX;
 		th->ts_idx = UINT_MAX;
+		th->reaffinitize = true;
 
 		/* initialize pointer to queue pointers in shared memory */
 		th->q_ptrs = (struct q_ptrs *) shmptr_to_ptr(&reg, s->q_ptrs,
@@ -480,7 +481,7 @@ static void control_loop(void)
  * this function can always fail with error ESRCH, because threads can be
  * killed at any time.
  */
-static int control_pin_thread(pid_t tid, int core)
+int control_pin_thread(pid_t tid, int core)
 {
 	cpu_set_t cpuset;
 	int ret;
