@@ -11,7 +11,7 @@ sysctl -w net.core.somaxconn=3072
 # set up the ksched module
 rmmod ksched
 rm /dev/ksched
-insmod $(dirname $0)/../ksched/build/ksched.ko
+# insmod $(dirname $0)/../ksched/build/ksched.ko
 mknod /dev/ksched c 280 0
 chmod uga+rwx /dev/ksched
 rm /dev/pcicfg
@@ -26,7 +26,8 @@ for n in /sys/devices/system/node/node[2-9]; do
 done
 
 # reserve LLC to iokernel
-cat=`lscpu | grep cat`
+cat=
+#`lscpu | grep cat`
 if [[ ! -z "$cat" ]]; then
        modprobe msr
        pqos -R l3cdp-any
