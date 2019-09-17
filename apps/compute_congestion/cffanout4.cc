@@ -480,7 +480,7 @@ public:
   }
 
   void PushBack(FanoutTracker* ft) {
-    s_.Lock();
+    m_.Lock();
 
     if (ft_list_len_ == 0) {
       assert(ft_head_ == nullptr);
@@ -502,14 +502,14 @@ public:
     }
 
     ft_list_len_++;
-    s_.Unlock();
+    m_.Unlock();
   }
 
   void Remove(FanoutTracker* ft, bool lock = true) {
-    if (lock) s_.Lock();
+    if (lock) m_.Lock();
 
     if (ft->prev == nullptr && ft->next == nullptr) {
-      if (lock) s_.Unlock();
+      if (lock) m_.Unlock();
       return;
     }
 
@@ -539,7 +539,7 @@ public:
 
     ft_list_len_--;
 
-    if (lock) s_.Unlock();
+    if (lock) m_.Unlock();
   }
 
   FanoutTracker* Front() {
@@ -547,10 +547,10 @@ public:
   }
 
   void PopFront() {
-    s_.Lock();
+    m_.Lock();
 
     if (ft_head_ == nullptr) {
-      s_.Unlock();
+      m_.Unlock();
       return;
     }
 
@@ -558,7 +558,7 @@ public:
     ft_head_ = victim->next;
     victim->next = nullptr;
     assert(victim->prev = nullptr);
-    s_.Unlock();
+    m_.Unlock();
   }
 
   void UpdateWindow(uint64_t child_wnd, int worker_id) {
@@ -575,7 +575,7 @@ public:
     uint64_t time_to_sleep = 1000;
     time_point<steady_clock> now;
 
-    s_.Lock();
+    m_.Lock();
     while(ft_head_ != nullptr) {
       barrier();
       now = steady_clock::now();
@@ -587,9 +587,9 @@ public:
       }
       // Let's drop this
       ft->ForceSend();
-      Remove(ft, false);
+      Remove(ft);
     }
-    s_.Unlock();
+    m_.Unlock();
 
     return time_to_sleep;
   }
@@ -602,6 +602,7 @@ private:
   FanoutTracker *ft_tail_;
   uint64_t ft_list_len_;
   rt::Spin s_;
+  rt::Mutex m_;
 };
 
 void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<FanoutManager> fm, int worker_id) {
