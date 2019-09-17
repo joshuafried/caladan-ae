@@ -20,7 +20,6 @@ extern "C" {
 #include <memory>
 #include <queue>
 #include <string>
-#include <list>
 #include <utility>
 #include <vector>
 
@@ -290,7 +289,7 @@ private:
 class FanoutTracker {
 public:
   FanoutTracker(std::shared_ptr<SharedTcpStream> c, int fanout_size) : 
-    timed_out(false),
+    prev(nullptr), next(nullptr), timed_out(false),
     fanout_size_(fanout_size), response_waiting_(fanout_size), 
     max_delay_(0), sum_processing_time_(0), sum_rating_(0), conn_(c) {}
 
@@ -335,10 +334,15 @@ public:
     timed_out = true;
   }
 
+  bool IsAlive() {
+    return (prev || next);
+  }
+
   // Upstream response payload
   payload p;
 
-  std::list<FanoutTracker *>::iterator iter;
+  FanoutTracker *prev;
+  FanoutTracker *next;
 
   time_point<steady_clock> start_time;
 
@@ -428,7 +432,7 @@ private:
 
 class FanoutManager {
 public:
-  FanoutManager(): window_(100),
+  FanoutManager(): window_(100), ft_head_(nullptr), ft_tail_(nullptr),
                    ft_list_len_(0) {
     child_qs_.reserve(kFanoutSize);
     for(int i = 0; i < kFanoutSize; ++i)
@@ -476,26 +480,85 @@ public:
   }
 
   void PushBack(FanoutTracker* ft) {
-    m_.Lock();
-    pending_reqs_.push_back(ft);
-    auto it = pending_reqs_.begin();
-    std::advance(it, ft_list_len_);
-    ft->iter = it;
+    s_.Lock();
+
+    if (ft_list_len_ == 0) {
+      assert(ft_head_ == nullptr);
+      assert(ft_tail_ == nullptr);
+
+      ft_head_ = ft;
+      ft_tail_ = ft;
+      ft->next = ft;
+      ft->prev = ft;
+    } else {
+      assert(ft_head_);
+      assert(ft_tail_);
+      ft_tail_->next = ft;
+      ft_head_->prev = ft;
+      ft->prev = ft_tail_;
+      ft->next = ft_head_;
+
+      ft_tail_ = ft;
+    }
+
     ft_list_len_++;
-    m_.Unlock();
+    s_.Unlock();
   }
 
-  void Remove(FanoutTracker* ft) {
-    if (ft_list_len_ == 0)
+  void Remove(FanoutTracker* ft, bool lock = true) {
+    if (lock) s_.Lock();
+
+    if (ft->prev == nullptr && ft->next == nullptr) {
+      if (lock) s_.Unlock();
       return;
-    m_.Lock();
-    pending_reqs_.erase(ft->iter);
+    }
+
+    FanoutTracker* before = ft->prev;
+    FanoutTracker* after = ft->next;
+
+    if (ft_list_len_ == 1) {
+      // I am the last one
+      assert(ft_head_ == ft);
+      assert(ft_tail_ == ft);
+      ft_head_ = nullptr;
+      ft_tail_ = nullptr;
+    } else {
+      before->next = after;
+      after->prev = before;
+      if (ft_head_ == ft) {
+        // I was the header.
+        ft_head_ = after;
+      }
+      if (ft_tail_ == ft) {
+        // I wast the tail.
+        ft_tail_ = before;
+      }
+    }
+    ft->prev = nullptr;
+    ft->next = nullptr;
+
     ft_list_len_--;
-    m_.Unlock();
+
+    if (lock) s_.Unlock();
   }
 
   FanoutTracker* Front() {
-    return pending_reqs_.front();
+    return ft_head_;
+  }
+
+  void PopFront() {
+    s_.Lock();
+
+    if (ft_head_ == nullptr) {
+      s_.Unlock();
+      return;
+    }
+
+    FanoutTracker* victim = ft_head_;
+    ft_head_ = victim->next;
+    victim->next = nullptr;
+    assert(victim->prev = nullptr);
+    s_.Unlock();
   }
 
   void UpdateWindow(uint64_t child_wnd, int worker_id) {
@@ -512,19 +575,21 @@ public:
     uint64_t time_to_sleep = 1000;
     time_point<steady_clock> now;
 
-    while(ft_list_len_ > 0) {
+    s_.Lock();
+    while(ft_head_ != nullptr) {
       barrier();
       now = steady_clock::now();
       barrier();
-      FanoutTracker* ft = Front();
+      FanoutTracker* ft = ft_head_;
       if (duration_cast<microseconds>(now - ft->start_time).count() < kSLOUS - kSLOSLACK) {
         time_to_sleep = kSLOUS - kSLOSLACK - duration_cast<microseconds>(now - ft->start_time).count();
         break;
       }
       // Let's drop this
       ft->ForceSend();
-      Remove(ft);
+      Remove(ft, false);
     }
+    s_.Unlock();
 
     return time_to_sleep;
   }
@@ -533,9 +598,9 @@ private:
   std::vector<std::shared_ptr<ChildQueue>> child_qs_;
   uint64_t window_;
   uint64_t child_window_[kFanoutSize];
-  std::list<FanoutTracker *> pending_reqs_;
+  FanoutTracker *ft_head_;
+  FanoutTracker *ft_tail_;
   uint64_t ft_list_len_;
-  rt::Mutex m_;
   rt::Spin s_;
 };
 
