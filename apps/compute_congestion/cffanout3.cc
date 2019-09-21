@@ -40,8 +40,8 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
-constexpr uint64_t kSLOUS = 50000; // 50 ms
-constexpr uint64_t kSLOSLACK = 2500; // 2.5 ms
+constexpr uint64_t kSLOUS = 1000; // 50 ms
+constexpr uint64_t kSLOSLACK = 50; // 2.5 ms
 
 // Port number of the Fanout node
 constexpr uint64_t kFanoutPort = 8001;
@@ -494,7 +494,7 @@ public:
     uint64_t queueing_delay = ft->max_delay_;
     uint64_t processing_time = ntoh64(p.processing_time);
     uint64_t new_target_us = std::max<uint64_t>(
-                                 static_cast<uint64_t>(0.8*target_us_ + 0.6*processing_time),
+                                 static_cast<uint64_t>(0.8*target_us_ + 2.0*processing_time),
                                  25);
     uint64_t new_ewma_exe_time = static_cast<uint64_t>(0.8*ewma_exe_time_ + 0.2*latency_us);
 
@@ -549,7 +549,7 @@ public:
   }
 
   void PushBack(FanoutTracker* ft) {
-    s_.Lock();
+    ft_m_.Lock();
 
     if (ft_list_len_ == 0) {
       assert(ft_head_ == nullptr);
@@ -571,14 +571,17 @@ public:
     }
 
     ft_list_len_++;
-    s_.Unlock();
+    ft_m_.Unlock();
   }
 
-  void Remove(FanoutTracker* ft) {
-    if (ft->prev == nullptr && ft->next == nullptr) 
-      return;
+  void Remove(FanoutTracker* ft, bool lock = true) {
+    if (lock) ft_m_.Lock();
 
-    s_.Lock();
+    if (ft->prev == nullptr && ft->next == nullptr) {
+      if (lock) ft_m_.Unlock();
+      return;
+    }
+
     FanoutTracker* before = ft->prev;
     FanoutTracker* after = ft->next;
     ft->prev = nullptr;
@@ -604,7 +607,7 @@ public:
     }
 
     ft_list_len_--;
-    s_.Unlock();
+    if (lock) ft_m_.Unlock();
   }
 
   FanoutTracker* Front() {
@@ -612,14 +615,18 @@ public:
   }
 
   void PopFront() {
-    if (ft_head_ == nullptr)
+    ft_m_.Lock();
+
+    if (ft_head_ == nullptr) {
+      ft_m_.Unlock();
       return;
-    s_.Lock();
+    }
+
     FanoutTracker* victim = ft_head_;
     ft_head_ = victim->next;
     victim->next = nullptr;
     assert(victim->prev = nullptr);
-    s_.Unlock();
+    ft_m_.Unlock();
   }
 
   void GarbageCollect() {
@@ -629,14 +636,17 @@ public:
       barrier();
       now = steady_clock::now();
       barrier();
+      ft_m_.Lock();
       FanoutTracker* ft = ft_head_;
       if (duration_cast<microseconds>(now - ft->start_time).count() < kSLOUS - kSLOSLACK) {
         time_to_sleep = kSLOUS - kSLOSLACK - duration_cast<microseconds>(now - ft->start_time).count();
+        ft_m_.Unlock();
         break;
       }
+      Remove(ft, false);
+      ft_m_.Unlock();
       // Let's drop this
       ft->ForceSend();
-      Remove(ft);
     }
     rt::Sleep(time_to_sleep);
   }
@@ -652,8 +662,8 @@ private:
   FanoutTracker *ft_head_;
   FanoutTracker *ft_tail_;
   uint64_t ft_list_len_;
-  rt::Spin s_;
 
+  rt::Mutex ft_m_;
   rt::Mutex m_;
   rt::CondVar cv_;
 };
