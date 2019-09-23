@@ -575,12 +575,16 @@ public:
     uint64_t time_to_sleep = 1000;
     time_point<steady_clock> now;
 
-    while(ft_head_ != nullptr) {
+    while(true) {
       barrier();
       now = steady_clock::now();
       barrier();
       m_.Lock();
       FanoutTracker* ft = ft_head_;
+      if (ft == nullptr) {
+        m_.Unlock();
+        break;
+      }
       if (duration_cast<microseconds>(now - ft->start_time).count() < kSLOUS - kSLOSLACK) {
         time_to_sleep = kSLOUS - kSLOSLACK - duration_cast<microseconds>(now - ft->start_time).count();
         m_.Unlock();
