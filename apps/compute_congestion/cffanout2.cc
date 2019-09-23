@@ -40,8 +40,8 @@ int num_leafs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
-constexpr uint64_t kSLOUS = 50000; // 100ms
-constexpr uint64_t kSLOSLACK = 2500;
+constexpr uint64_t kSLOUS = 1000; // 100ms
+constexpr uint64_t kSLOSLACK = 50;
 
 // Port number of the Fanout node
 constexpr uint64_t kFanoutPort = 8001;
@@ -612,7 +612,7 @@ public:
   }
 
   void PushBack(FanoutTracker* ft) {
-    s_.Lock();
+    m_.Lock();
 
     if (ft_list_len_ == 0) {
       assert(ft_head_ == nullptr);
@@ -634,14 +634,17 @@ public:
     }
 
     ft_list_len_++;
-    s_.Unlock();
+    m_.Unlock();
   }
 
-  void Remove(FanoutTracker* ft) {
-    if (ft->prev == nullptr && ft->next == nullptr) 
-      return;
+  void Remove(FanoutTracker* ft, bool lock = true) {
+    if (lock) m_.Lock();
 
-    s_.Lock();
+    if (ft->prev == nullptr && ft->next == nullptr) {
+      if (lock) m_.Unlock();
+      return;
+    }
+
     FanoutTracker* before = ft->prev;
     FanoutTracker* after = ft->next;
     ft->prev = nullptr;
@@ -667,7 +670,8 @@ public:
     }
 
     ft_list_len_--;
-    s_.Unlock();
+
+    if (lock) m_.Unlock();
   }
 
   FanoutTracker* Front() {
@@ -675,32 +679,43 @@ public:
   }
 
   void PopFront() {
-    if (ft_head_ == nullptr)
+    m_.Lock();
+
+    if (ft_head_ == nullptr) {
+      m_.Unlock();
       return;
+    }
     s_.Lock();
     FanoutTracker* victim = ft_head_;
     ft_head_ = victim->next;
     victim->next = nullptr;
     assert(victim->prev = nullptr);
-    s_.Unlock();
+    m_.Unlock();
   }
 
   uint64_t GarbageCollect() {
     uint64_t time_to_sleep = 1000;
     time_point<steady_clock> now;
-    while(ft_head_ != nullptr) {
+    while(true) {
       barrier();
       now = steady_clock::now();
       barrier();
+      m_.Lock();
       FanoutTracker* ft = ft_head_;
+      if (ft == nullptr) {
+        m_.Unlock();
+        break;
+      }
       uint64_t elapsed_time = duration_cast<microseconds>(now - ft->start_time).count();
       if (elapsed_time < kSLOUS - kSLOSLACK) {
         time_to_sleep = kSLOUS - kSLOSLACK - elapsed_time;
+        m_.Unlock();
         break;
       }
+      Remove(ft, false);
+      m_.Unlock();
       // Let's drop this
       ft->ForceSend();
-      Remove(ft);
     }
     return time_to_sleep;
   }
@@ -712,6 +727,7 @@ private:
   FanoutTracker *ft_tail_;
   uint64_t ft_list_len_;
   rt::Spin s_;
+  rt::Mutex m_;
 };
 
 void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<FanoutManager> fm, int worker_id) {
@@ -893,7 +909,7 @@ void FanoutHandler(void *arg) {
   auto fm = std::make_shared<FanoutManager>();
 
   for (int i = 0; i < num_leafs; ++i) {
-    fm->AddFanoutNode(std::make_shared<ChildQueue>(), std::make_shared<StatMonitor>(40));
+    fm->AddFanoutNode(std::make_shared<ChildQueue>(), std::make_shared<StatMonitor>(100));
   }
 
   std::vector<std::unique_ptr<rt::TcpConn>> child_conns;
