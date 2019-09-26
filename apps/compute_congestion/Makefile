@@ -62,6 +62,9 @@ cffanout3_obj = $(cffanout3_src:.cc=.o)
 cffanout4_src = cffanout4.cc
 cffanout4_obj = $(cffanout4_src:.cc=.o)
 
+cffanoutlb4_src = cffanoutlb4.cc
+cffanoutlb4_obj = $(cffanoutlb4_src:.cc=.o)
+
 librt_libs = $(ROOT_PATH)/bindings/cc/librt++.a
 INC += -I$(ROOT_PATH)/bindings/cc
 
@@ -70,7 +73,7 @@ RUNTIME_LIBS := $(RUNTIME_LIBS) -lnuma
 # must be first
 all: netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 cfclient3 \
  	loadbalancer server sserver sserver2 fanout fanout2 fanout3 cffanout \
-	cffanout2 cffanout3 cffanout4
+	cffanout2 cffanout3 cffanout4 cffanoutlb4
 
 netbench: $(lib_obj) $(netbench_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(netbench_obj) \
@@ -148,11 +151,15 @@ cffanout4: $(lib_obj) $(cffanout4_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cffanout4_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
 
+cffanoutlb4: $(lib_obj) $(cffanoutlb4_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cffanoutlb4_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
 # general build rules for all targets
 src = $(lib_src) $(netbench_src) $(netbench2_src) $(netbench3_src) $(netbench4_src) \
 		  $(netbench5_src) $(cfclient_src) $(cfclient2_src) $(cfclient3_src) $(loadbalancer_src) $(server_src) \
 		 	$(sserver_src) $(sserver2_src)	$(fanout_src) $(fanout2_src) $(fanout3_src) \
-		 	$(cffanout_src) $(cffanout2_src) $(cffanout3_src) $(cffanout4_src)
+		 	$(cffanout_src) $(cffanout2_src) $(cffanout3_src) $(cffanout4_src) $(cffanoutlb4_src)
 obj = $(src:.cc=.o)
 dep = $(obj:.o=.d)
 
@@ -171,4 +178,4 @@ endif
 clean:
 	rm -f $(obj) $(dep) netbench netbench2 netbench3 netbench4 netbench5 cfclient cfclient2 cfclient3 \
 		loadbalancer server sserver sserver2 fanout fanout2 fanout3 cffanout cffanout2 cffanout3 \
-		cffanout4
+		cffanout4 cffanoutlb4
