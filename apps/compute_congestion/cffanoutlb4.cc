@@ -32,8 +32,6 @@ extern "C" {
 
 namespace {
 using namespace std::chrono;
-// The number of leaf servers
-int num_lbs;
 // Addresses to the leaf servers
 std::vector<netaddr> laddrs;
 
@@ -439,6 +437,8 @@ public:
     child_qs_.reserve(kNumLeafs);
     for(int i = 0; i < kNumLeafs; ++i)
       child_window_[i] = 100;
+    for(int i = 0; i < kFanoutSize; ++i)
+      start_idx_[i] = 0;
   }
 
   void AddFanoutNode(std::shared_ptr<ChildQueue> cq) {
@@ -450,14 +450,16 @@ public:
   }
 
   int SelectConnection(int idx) {
-    int max_idx = 4*idx;
+    int max_idx = 4*idx + start_idx_[idx];
     int max_window = child_window_[max_idx];
     for (int i = 1; i < kLBPerFanout; i++) {
-      if (max_window > child_window_[4*idx + i]) {
-        max_idx = 4*idx + i;
+      int offset = (start_idx_[idx] + i) % kLBPerFanout;
+      if (max_window > child_window_[4*idx + offset]) {
+        max_idx = 4*idx + offset;
         max_window = child_window_[max_idx];
       }
     }
+    start_idx_[idx] = (start_idx_[idx] + 1) % kLBPerFanout;
 
     return max_idx;
   }
@@ -620,6 +622,7 @@ private:
   std::vector<std::shared_ptr<ChildQueue>> child_qs_;
   uint64_t window_;
   uint64_t child_window_[kNumLeafs];
+  int start_idx_[kFanoutSize];
   FanoutTracker *ft_head_;
   FanoutTracker *ft_tail_;
   uint64_t ft_list_len_;
