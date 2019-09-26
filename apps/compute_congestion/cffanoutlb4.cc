@@ -465,7 +465,7 @@ public:
   }
 
   bool FanoutAll(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
-
+/*
     bool admission;
     s_.Lock();
     admission = static_cast<double>(ft_list_len_ + 1.0) <= 4*window_;
@@ -474,8 +474,8 @@ public:
     if (!admission) {
       return false;
     }
-
-    PushBack(ft);
+*/
+    //PushBack(ft);
 
     // Select which nodes to fanout
     std::bitset<kFanoutSize> bs;
@@ -487,12 +487,25 @@ public:
         cardinality++;
       }
     }
-    
+
+    int flen;
+    std::vector<int> idx_list;
+
+    s_.Lock();
+    flen = ft_list_len_;
+    s_.Unlock();
+
     for (int i = 0; i < kFanoutSize; ++i) {
-      if (bs[i]){
+      if (bs[i]) {
         int idx = SelectConnection(i);
-        child_qs_[idx]->EnqueueRequest(user_id, movie_id, ft);
+        if (static_cast<double>(flen + 1.0) < child_window_[idx])
+          return false;
+        idx_list.push_back(idx);
       }
+    }
+
+    for (int i : idx_list) {
+      child_qs_[i]->EnqueueRequest(user_id, movie_id, ft);
     }
 
     return true;
@@ -662,7 +675,7 @@ void DownstreamWorker(rt::TcpConn *c, rt::WaitGroup *starter, std::shared_ptr<Fa
 
       // tracker->ReceiveResponse
       if (ft->ReceiveResponse(queueing_delay, processing_time, rating) == 0) {
-        fm->Remove(ft);
+        //fm->Remove(ft);
         delete ft;
       }
     }
@@ -759,7 +772,7 @@ void FanoutHandler(void *arg) {
     }));
   }
 
-  rt::Thread([&] { GarbageCollector(fm); }).Detach();
+//  rt::Thread([&] { GarbageCollector(fm); }).Detach();
 
   starter.Done();
   starter.Wait();
