@@ -489,7 +489,6 @@ public:
     for (int i = 0; i < kFanoutSize; ++i) {
       if (bs[i]){
         int idx = SelectConnection(i);
-        printf("sending to %d\n", idx);
         child_qs_[idx]->EnqueueRequest(user_id, movie_id, ft);
       }
     }
