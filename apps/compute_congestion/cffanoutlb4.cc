@@ -44,8 +44,8 @@ constexpr uint64_t kLeafPort = 8001;
 // A prime number as hash size gives a better distribution of values in buckets
 constexpr uint64_t HASH_SIZE_DEFAULT = 10009;
 
-constexpr uint64_t kSLOUS = 1000;
-constexpr uint64_t kSLOSLACK = 500;
+constexpr uint64_t kSLOUS = 50000;
+constexpr uint64_t kSLOSLACK = 2500;
 
 static float htonf(float value) {
   union v {
@@ -450,16 +450,16 @@ public:
   }
 
   int SelectConnection(int idx) {
-    int min_idx = 4*idx;
-    int min_window = child_window_[min_idx];
+    int max_idx = 4*idx;
+    int max_window = child_window_[max_idx];
     for (int i = 1; i < kLBPerFanout; i++) {
-      if (min_window < child_window_[4*idx + i]) {
-        min_idx = 4*idx + i;
-        min_window = child_window_[min_idx];
+      if (max_window > child_window_[4*idx + i]) {
+        max_idx = 4*idx + i;
+        max_window = child_window_[max_idx];
       }
     }
 
-    return min_idx;
+    return max_idx;
   }
 
   bool FanoutAll(uint64_t user_id, uint64_t movie_id, FanoutTracker* ft) {
@@ -489,7 +489,7 @@ public:
     for (int i = 0; i < kFanoutSize; ++i) {
       if (bs[i]){
         int idx = SelectConnection(i);
-
+        printf("sending to %d\n", idx);
         child_qs_[idx]->EnqueueRequest(user_id, movie_id, ft);
       }
     }
