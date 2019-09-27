@@ -45,14 +45,28 @@
 #endif
 #endif
 
+#define MSR_APIC_BASE (0x1B)
 #define MSR_X2APIC_ICR (0x830)
+#define X2APIC_ENABLED(apic_status) (apic_status >> 10)
 #define ICR_LOGICAL_MODE (1 << 11)
 #define ICR_DEST_FIELD(x) (((unsigned long long)x) << 32)
 #define MSR_X2APIC_LDR (0x80D)
 #define X2APIC_LDR_MAX_LOGICAL_IDS (16)
 
 #ifdef OS_SUPPORT_CUSTOMIZED_IPI_HANDER
+
+/* so far only use the cores from socket 0 */
+#define FOR_ALL_CORES(i) for (i = 0; i < 48; i += 2)
+
+struct ldr_info {
+	unsigned int ldr;
+	unsigned short id;
+};
+
 static unsigned int ldrs[NR_CPUS];
+static struct ldr_info ipi_ldrs[NR_CPUS];
+int ipi_ldrs_num = 0;
+
 #endif
 
 /* the character device that provides the ksched IOCTL interface */
@@ -66,8 +80,8 @@ static __read_mostly struct ksched_shm_cpu *shm;
 
 struct ksched_percpu {
 	unsigned int	last_gen;
-	pid_t		tid;
 	local_t		busy;
+	struct task_struct		*running_task;
 };
 
 /* per-cpu data to coordinate context switching and signal delivery */
@@ -89,34 +103,46 @@ static struct task_struct *ksched_lookup_task(pid_t nr)
 	return pid_task(pid, PIDTYPE_PID);
 }
 
-static int ksched_wakeup_pid(int cpu, pid_t pid)
+static void ksched_next_tid(struct ksched_percpu *kp, int cpu, pid_t tid)
 {
 	struct task_struct *p;
 	int ret;
 
+	/* release previous task */
+	if (kp->running_task) {
+		put_task_struct(kp->running_task);
+		kp->running_task = NULL;
+	}
+
+	if (unlikely(tid == 0))
+		return;
+
 	rcu_read_lock();
-	p = ksched_lookup_task(pid);
+	p = ksched_lookup_task(tid);
 	if (unlikely(!p)) {
 		rcu_read_unlock();
-		return -EINVAL;
+		return;
 	}
 
 	if (WARN_ON_ONCE(p->on_cpu || p->state == TASK_WAKING ||
 			 p->state == TASK_RUNNING)) {
 		rcu_read_unlock();
-		return -EINVAL;
+		return;
 	}
 
 	ret = set_cpus_allowed_ptr(p, cpumask_of(cpu));
 	if (unlikely(ret)) {
 		rcu_read_unlock();
-		return ret;
+		return;
 	}
+
+	get_task_struct(p);
+	kp->running_task = p;
 
 	wake_up_process(p);
 	rcu_read_unlock();
 
-	return 0;
+	return;
 }
 
 static int ksched_mwait_on_addr(const unsigned int *addr, unsigned int hint,
@@ -159,11 +185,15 @@ static int __cpuidle ksched_idle(struct cpuidle_device *dev,
 	s = &shm[cpu];
 
 	/* check if we entered the idle loop with a process still active */
-	if (p->tid != 0 && ksched_lookup_task(p->tid) != NULL) {
-		ksched_mwait_on_addr(&s->gen, 0, s->gen);
-		put_cpu();
-
-		return index;
+	if (p->running_task) {
+			if (unlikely(p->running_task->flags & PF_EXITING)) {
+				put_task_struct(p->running_task);
+				p->running_task = NULL;
+			} else {
+				ksched_mwait_on_addr(&s->gen, 0, s->gen);
+				put_cpu();
+				return index;
+			}
 	}
 
 	/* mark the core as idle if a new request isn't waiting */
@@ -177,13 +207,8 @@ static int __cpuidle ksched_idle(struct cpuidle_device *dev,
 	if (gen != p->last_gen) {
 		tid = READ_ONCE(s->tid);
 		p->last_gen = gen;
-		/* if the TID is 0, then leave the core idle */
-		if (tid != 0) {
-			if (unlikely(ksched_wakeup_pid(cpu, tid)))
-				tid = 0;
-		}
-		p->tid = tid;
-		WRITE_ONCE(s->busy, tid != 0);
+		ksched_next_tid(p, cpu, tid);
+		WRITE_ONCE(s->busy, p->running_task != NULL);
 		local_set(&p->busy, true);
 		smp_store_release(&s->last_gen, gen);
 	}
@@ -211,7 +236,7 @@ static long ksched_park(void)
 	gen = smp_load_acquire(&s->gen);
 	if (gen == p->last_gen) {
 		WRITE_ONCE(s->busy, false);
-		p->tid = 0;
+		ksched_next_tid(p, cpu, 0);
 		put_cpu();
 		goto park;
 	}
@@ -229,13 +254,8 @@ static long ksched_park(void)
 		return smp_processor_id();
 	}
 
-	/* if the tid is zero, then simply idle this core */
-	if (tid != 0) {
-		if (unlikely(ksched_wakeup_pid(cpu, tid)))
-			tid = 0;
-	}
-	p->tid = tid;
-	WRITE_ONCE(s->busy, tid != 0);
+	ksched_next_tid(p, cpu, tid);
+	WRITE_ONCE(s->busy, p->running_task != NULL);
 	local_set(&p->busy, true);
 	smp_store_release(&s->last_gen, gen);
 	put_cpu();
@@ -259,25 +279,12 @@ static long ksched_start(void)
 
 static void ksched_deliver_signal(struct ksched_percpu *p, unsigned int signum)
 {
-	struct task_struct *t;
-
 	/* if core is already idle, don't bother delivering signals */
-	if (!local_read(&p->busy)) {
-		put_cpu();
+	if (!local_read(&p->busy))
 		return;
-	}
 
-	/* lookup the current task assigned to this core */
-	rcu_read_lock();
-	t = ksched_lookup_task(p->tid);
-	if (!t) {
-		rcu_read_unlock();
-		return;
-	}
-
-	/* send the signal */
-	send_sig(signum, t, 0);
-	rcu_read_unlock();
+	if (p->running_task)
+		send_sig(signum, p->running_task, 0);
 }
 
 static u64 ksched_measure_pmc(u64 sel)
@@ -314,7 +321,7 @@ static void ipi_handler(void)
 		smp_store_release(&s->pmc, 0);
 	}
 
-	put_cpu();	
+	put_cpu();
 }
 
 #ifndef OS_SUPPORT_CUSTOMIZED_IPI_HANDER
@@ -329,50 +336,49 @@ static inline int get_cluster_id(unsigned int ldr)
 
 }
 
-static int compare(const void *lhs, const void *rhs)
-{
-	unsigned int lhs_integer = *(const int *)(lhs);
-	unsigned int rhs_integer = *(const int *)(rhs);
+static int compare(const void *lhs, const void *rhs) {
+        const struct ldr_info lhs_info = *(const struct ldr_info *)(lhs);
+        const struct ldr_info rhs_info = *(const struct ldr_info *)(rhs);
 
-	if (lhs_integer < rhs_integer) return -1;
-	if (lhs_integer > rhs_integer) return 1;
+	if (lhs_info.ldr < rhs_info.ldr) return -1;
+	if (lhs_info.ldr > rhs_info.ldr) return 1;
 	return 0;
 }
 
-static void send_ipi(cpumask_var_t mask)
+static inline void write_icr_reg(unsigned int clustered_ldr)
 {
-	static unsigned int ipi_ldrs[NR_CPUS];
-		
-	unsigned int clustered_ldr = 0;
-	unsigned int cur_ldr;
-	int cpu;
 	unsigned long long icr;
-	int ipi_ldrs_num = 0;
-	int i;
-
-	for_each_cpu(cpu, mask) {
-	        ipi_ldrs[ipi_ldrs_num++] = ldrs[cpu];
-	}
-	if (!ipi_ldrs_num)
+	if (!clustered_ldr)
 		return;
-	
-	sort(ipi_ldrs, ipi_ldrs_num, sizeof(unsigned int), &compare, NULL);
-	clustered_ldr = ipi_ldrs[0];
-	for (i = 1; i < ipi_ldrs_num; i++) {
-		cur_ldr = ipi_ldrs[i];
-		if (get_cluster_id(cur_ldr) ==
-		    get_cluster_id(clustered_ldr)) {
-			clustered_ldr |= cur_ldr;
-		} else {
-			icr = ZAIN_VECTOR | ICR_LOGICAL_MODE |
-				ICR_DEST_FIELD(clustered_ldr);
-			wrmsrl(MSR_X2APIC_ICR, icr);
-			clustered_ldr = cur_ldr;
-		}
-	}
 	icr = ZAIN_VECTOR | ICR_LOGICAL_MODE |
 		ICR_DEST_FIELD(clustered_ldr);
 	wrmsrl(MSR_X2APIC_ICR, icr);
+}
+
+static void send_ipi(cpumask_var_t mask)
+{		
+	unsigned int clustered_ldr = 0;
+	unsigned int cur_ldr;
+	int i;
+
+	if (cpumask_empty(mask))
+		return;
+
+	clustered_ldr = 0;
+	for (i = 0; i < ipi_ldrs_num; i++) {
+		if (!cpumask_test_cpu(ipi_ldrs[i].id, mask))
+			continue;
+		cur_ldr = ipi_ldrs[i].ldr;
+		if (!clustered_ldr ||
+		    get_cluster_id(cur_ldr) ==
+		    get_cluster_id(clustered_ldr)) {
+			clustered_ldr |= cur_ldr;
+		} else {
+			write_icr_reg(clustered_ldr);
+			clustered_ldr = cur_ldr;
+		}
+	}
+	write_icr_reg(clustered_ldr);
 }
 
 static void local_read_ldr(void *unused)
@@ -383,9 +389,16 @@ static void local_read_ldr(void *unused)
 	put_cpu();
 }
 
-static void read_ldrs(void)
+static void prepare_ldrs(void)
 {
+	int i;
 	on_each_cpu(local_read_ldr, NULL, true);
+	FOR_ALL_CORES(i) {
+		ipi_ldrs[ipi_ldrs_num].id = i;
+		ipi_ldrs[ipi_ldrs_num].ldr = ldrs[i];
+		ipi_ldrs_num++;
+	}
+	sort(ipi_ldrs, ipi_ldrs_num, sizeof(struct ldr_info), &compare, NULL);
 }
 #endif
 
@@ -546,8 +559,17 @@ static void __init ksched_init_pmc(void *arg)
 static int __init ksched_init(void)
 {
 	dev_t devno_ksched = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
-        dev_t devno_pci_cfg;
-        int ret;
+	dev_t devno_pci_cfg;
+	int ret;
+
+#ifdef OS_SUPPORT_CUSTOMIZED_IPI_HANDER
+	int apic_status;
+	rdmsrl(MSR_APIC_BASE, apic_status);
+	if (!X2APIC_ENABLED(apic_status)) {
+		printk(KERN_ERR "ksched: X2APIC is not enabled!");
+		return -ENOTSUPP;
+	}
+#endif
 
 	if (!cpu_has(&boot_cpu_data, X86_FEATURE_MWAIT)) {
 		printk(KERN_ERR "ksched: mwait support is required");
@@ -590,7 +612,7 @@ static int __init ksched_init(void)
 
 #ifdef OS_SUPPORT_CUSTOMIZED_IPI_HANDER
 	set_customized_ipi_handler(ipi_handler);
-	read_ldrs();
+	prepare_ldrs();	
 #endif
 	
 	return 0;
@@ -609,15 +631,24 @@ fail_ksched_cdev_add:
 
 static void __exit ksched_exit(void)
 {
-	dev_t devno_ksched = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
-        dev_t devno_pci_cfg = MKDEV(PCI_CFG_MAJOR, PCI_CFG_MINOR);
+	int cpu;
+	struct ksched_percpu *p;
 
-        ksched_cpuidle_unhijack();
+	dev_t devno_ksched = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
+	dev_t devno_pci_cfg = MKDEV(PCI_CFG_MAJOR, PCI_CFG_MINOR);
+
+	ksched_cpuidle_unhijack();
 	vfree(shm);
 	cdev_del(&ksched_cdev);
 	unregister_chrdev_region(devno_ksched, 1);
 	cdev_del(&pci_cfg_cdev);
 	unregister_chrdev_region(devno_pci_cfg, 1);
+
+	for_each_online_cpu(cpu) {
+		p = per_cpu_ptr(&kp, cpu);
+		if (p->running_task)
+			put_task_struct(p->running_task);
+	}
 }
 
 module_init(ksched_init);

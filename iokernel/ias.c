@@ -4,6 +4,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <float.h>
 
 #include <base/stddef.h>
 #include <base/log.h>
@@ -13,7 +14,7 @@
 #include "ksched.h"
 #include "ias.h"
 
-#define IAS_DEBUG 1
+// #define IAS_DEBUG 1
 
 /* a list of all processes */
 LIST_HEAD(all_procs);
@@ -27,8 +28,16 @@ static struct ias_data *ias_procs[IAS_NPROC];
 static unsigned int ias_procs_nr;
 /* the current process running on each core */
 struct ias_data *cores[NCPU];
+/* when does the core gets idled */
+uint64_t cores_idle_tsc[NCPU];
+/* the generation number for reschedules on each core */
+uint64_t ias_gen[NCPU];
 /* the current time in microseconds */
 static uint64_t now_us;
+
+#ifdef IAS_DEBUG
+int owners[NCPU];
+#endif
 
 static void ias_cleanup_core(unsigned int core)
 {
@@ -73,6 +82,9 @@ static int ias_attach(struct proc *p, struct sched_spec *cfg)
 			goto fail_reserve;
 
 		sib = sched_siblings[core];
+#ifdef IAS_DEBUG
+		owners[core] = owners[sib] = p->pid;
+#endif
 		bitmap_set(sd->claimed_cores, core);
 		bitmap_set(ias_claimed_cores, core);
 		bitmap_set(sd->claimed_cores, sib);
@@ -115,6 +127,8 @@ static void ias_detach(struct proc *p)
 		if (cores[i] == sd)
 			cores[i] = NULL;
 	}
+	bitmap_xor(ias_claimed_cores, ias_claimed_cores,
+		   sd->claimed_cores, NCPU);
 
 	free(sd);
 }
@@ -139,7 +153,9 @@ static int ias_run_kthread_on_core(struct proc *p, unsigned int core)
 		return ret;
 
 	ias_cleanup_core(core);
+	sd->ht_start_running_tsc[core] = rdtsc();
 	cores[core] = sd;
+	ias_gen[core]++;
 	bitmap_clear(ias_idle_cores, core);
 	sd->threads_active++;
 	return 0;
@@ -161,29 +177,37 @@ int ias_idle_on_core(unsigned int core)
 
 	ias_cleanup_core(core);
 	cores[core] = NULL;
+	cores_idle_tsc[core] = rdtsc();
+	ias_gen[core]++;
 	bitmap_set(ias_idle_cores, core);
 	return 0;
 }
 
-static float ias_calculate_score(struct ias_data *sd, unsigned int core)
+static float ias_calculate_score(struct ias_data *sd, unsigned int core,
+				 uint64_t now_tsc)
 {
 	float score, ht_score;
-	unsigned int sib;
-	bool sib_has_prio;
+	unsigned int sib;	
 
-	/* determine if the sibling has priority over this core */
-	sib = sched_siblings[core];
-	sib_has_prio = cores[sib] && sd != cores[sib] &&
-		       ias_has_priority(cores[sib], core);
+	/* occasionally we choose a random pairing */
+	static int rr_cnt = 0;
+	if (rr_cnt++ == IAS_HT_RANDOM_PAIRING_CNT) {
+		rr_cnt = 0;
+		return FLT_MAX;
+	}
+
+	if (is_banned(sd, cores[sched_siblings[core]], now_tsc))
+		return -FLT_MAX;
 
 	/* try to estimate how well the core and process pair together */
-	score = ias_has_priority(sd, core) ? 100.0 : 0.0;
+	score = ias_has_priority(sd, core) ? IAS_PRIORITY_WEIGHT : 0.0;
 	score += ias_loc_score(sd, core, now_us);
-
-	if (sib_has_prio)
-		ht_score = ias_ht_pairing_score(cores[sib], sd);
-	else
-		ht_score = ias_ht_pairing_score(sd, cores[sib]);
+	
+	sib = sched_siblings[core];
+	ht_score = ias_ht_pairing_score(sd, cores[sib]);
+	
+	/* encourage to use a full HT pair when the IPC degradation is acceptable */
+	ht_score += cores[sib] ? GET_MAX_IPC_DEGRADE_RATIO(sd) : 0;
 
 	return score + IAS_HT_WEIGHT * ht_score;
 }
@@ -192,6 +216,7 @@ static unsigned int ias_choose_core(struct ias_data *sd, bool lc)
 {
 	unsigned int core, best_core = NCPU, tmp;
 	float score, best_score = 0;
+	uint64_t now_tsc = rdtsc();
 
 	sched_for_each_allowed_core(core, tmp) {
 		if (lc) {
@@ -209,7 +234,7 @@ static unsigned int ias_choose_core(struct ias_data *sd, bool lc)
 		}
 
 		/* try to estimate how good this core is for the process */
-		score = ias_calculate_score(sd, core);
+		score = ias_calculate_score(sd, core, now_tsc);
 		if (score > best_score) {
 			best_score = score;
 			best_core = core;
@@ -222,7 +247,6 @@ static unsigned int ias_choose_core(struct ias_data *sd, bool lc)
 static int ias_add_kthread(struct proc *p)
 {
 	struct ias_data *sd = (struct ias_data *)p->policy_data;
-	bool is_lc = sd->threads_active < sd->threads_guaranteed;
 	unsigned int core;
 
 	/* check if we're constrained by the thread limit */
@@ -230,7 +254,7 @@ static int ias_add_kthread(struct proc *p)
 		return -ENOENT;
 
 	/* choose the best core to run the process on */
-	core = ias_choose_core(sd, is_lc);
+	core = ias_choose_core(sd, is_lc(sd));
 	if (core == NCPU)
 		return -ENOENT;
 
@@ -256,10 +280,6 @@ static void ias_notify_congested(struct proc *p, bitmap_ptr_t threads,
 		return;
 	}
 
-	/* do nothing if already marked as congested or can't be congested */
-	if (sd->is_congested)
-		return;
-
 	/* try to add an additional core right away */
 	ret = ias_add_kthread(p);
 	if (!ret)
@@ -269,7 +289,7 @@ static void ias_notify_congested(struct proc *p, bitmap_ptr_t threads,
 	sd->is_congested = true;
 }
 
-static struct ias_data *ias_choose_kthread(unsigned int core)
+static struct ias_data *ias_choose_kthread(unsigned int core, uint64_t now_tsc)
 {
 	struct ias_data *sd, *best_sd = NULL;
 	float score, best_score = 0;
@@ -283,7 +303,7 @@ static struct ias_data *ias_choose_kthread(unsigned int core)
 			continue;
 
 		/* try to estimate how good this core is for the process */
-		score = ias_calculate_score(sd, core);
+		score = ias_calculate_score(sd, core, now_tsc);
 		if (score > best_score) {
 			best_score = score;
 			best_sd = sd;
@@ -296,15 +316,16 @@ static struct ias_data *ias_choose_kthread(unsigned int core)
 /**
  * ias_add_kthread_on_core - pick a process and wake it on a core
  * @core: the core to schedule on
+ * @now_tsc: the current tsc
  *
  * Returns 0 if successful.
  */
-int ias_add_kthread_on_core(unsigned int core)
+int ias_add_kthread_on_core(unsigned int core, uint64_t now_tsc)
 {
 	struct ias_data *sd;
 	int ret;
 
-	sd = ias_choose_kthread(core);
+	sd = ias_choose_kthread(core, now_tsc);
 	if (unlikely(!sd))
 		return -ENOENT;
 
@@ -315,40 +336,55 @@ int ias_add_kthread_on_core(unsigned int core)
 	return 0;
 }
 
+#ifdef IAS_DEBUG
 static void ias_print_debug_info(void)
 {
 	struct ias_data *sd, *sd2;
+	int core, sib;
+	static bool printed[NCPU];
 
 	ias_for_each_proc(sd) {
-		log_info("PID %d: %s%s ACTIVE %d, LIMIT %d, MAX %d, IPC %f",
+		log_info("PID %d: %s%s ACTIVE %d, LIMIT %d, MAX %d, MAX IPC %f, UP IPC %f",
 			 sd->p->pid,
 			 sd->is_congested ? "C" : "_",
 			 sd->is_bwlimited ? "B" : "_",
 			 sd->threads_active, sd->threads_limit, sd->threads_max,
-			 sd->ht_max_ipc);
+			 sd->ht_max_ipc, sd->ht_unpaired_ipc);
 		ias_for_each_proc(sd2) {
 			log_info("\tPID %dx%d: IPC %f", sd->p->pid,
 				 sd2->p->pid, sd->ht_pairing_ipc[sd2->idx]);
 		}
 	}
-	log_info("bw_cur %f bw_punish %ld bw_relax %ld",
-		 ias_count_bw_cur, ias_count_bw_punish, ias_count_bw_relax);
+	log_info("bw_cur %f bw_punish %ld bw_relax %ld bw_punish_triggered %d",
+		 ias_bw_estimate, ias_count_bw_punish, ias_count_bw_relax,
+		 ias_bw_punish_triggered);
+	memset(printed, 0, sizeof(printed));
+	bitmap_for_each_set(sched_allowed_cores, NCPU, core) {
+		if (printed[core]) {
+			continue;
+		}
+		sib = sched_siblings[core];
+		printed[core] = printed[sib] = true;
+		int pid0 = cores[core] ? cores[core]->p->pid : -1;
+		int pid1 = cores[sib] ? cores[sib]->p->pid : -1;
+		log_info("core %d, %d (owner: %d): pid %d, %d", core, sib,
+			 owners[core], pid0, pid1);
+	}
 }
+#endif
 
 static void ias_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
 {
-	static uint64_t debug_ts = 0, bw_ts = 0, ht_ts = 0;
+#ifdef IAS_DEBUG
+	static uint64_t debug_ts = 0;
+#endif
+	static uint64_t bw_ts = 0, ht_ts = 0;
+		
 	unsigned int core;
 
 	now_us = now;
 
 	/* handle timeouts for various subcontrollers */
-#ifdef IAS_DEBUG
-	if (now - debug_ts >= IAS_DEBUG_PRINT_US) {
-		debug_ts = now;
-		ias_print_debug_info();
-	}
-#endif
 	if (now - bw_ts >= IAS_BW_POLL_US) {
 		bw_ts = now;
 		ias_bw_poll(now);
@@ -357,18 +393,31 @@ static void ias_sched_poll(uint64_t now, int idle_cnt, bitmap_ptr_t idle)
 		ht_ts = now;
 		ias_ht_poll(now);
 	}
-
+#ifdef IAS_DEBUG
+	if (now - debug_ts >= IAS_DEBUG_PRINT_US) {
+		debug_ts = now;
+		ias_print_debug_info();
+	}
+#endif
+	
 	/* mark cores idle */
 	if (idle_cnt != 0)
 		bitmap_or(ias_idle_cores, ias_idle_cores, idle, NCPU);
 
 	/* try to allocate any idle cores */
+	uint64_t now_tsc = rdtsc();
 	bitmap_for_each_set(ias_idle_cores, NCPU, core) {
 		if (cores[core] != NULL)
 			cores[core]->is_congested = false;
 		ias_cleanup_core(core);
-		ias_add_kthread_on_core(core);
+		ias_add_kthread_on_core(core, now_tsc);
 	}
+}
+
+void ias_migrate_kthread_on_core(int core) {
+	struct proc *p = cores[core]->p;
+	ias_idle_on_core(core);
+	ias_notify_core_needed(p);
 }
 
 struct sched_ops ias_ops = {

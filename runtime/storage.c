@@ -4,6 +4,10 @@
 
 #include <runtime/storage.h>
 
+
+uint32_t block_size;
+uint64_t num_blocks;
+
 #ifdef DIRECT_STORAGE
 #include <stdio.h>
 #include <base/hash.h>
@@ -19,11 +23,10 @@
 #include "defs.h"
 
 bool cfg_storage_enabled;
+unsigned long device_latency_us = 10;
 
 static struct spdk_nvme_ctrlr *controller;
 static struct spdk_nvme_ns *spdk_namespace;
-static uint32_t block_size;
-static uint64_t num_blocks;
 
 static __thread struct thread **cb_ths;
 static __thread unsigned int nrcb_ths;
@@ -34,6 +37,16 @@ static __thread unsigned int nrcb_ths;
 struct mempool storage_buf_mp;
 static struct tcache *storage_buf_tcache;
 static DEFINE_PERTHREAD(struct tcache_perthread, storage_buf_pt);
+
+struct nvme_device {
+	const char *name;
+	unsigned long latency_us;
+} known_devices[1] = {
+	{
+		.name = "INTEL SSDPED1D280GA",
+		.latency_us = 10,
+	}
+};
 
 /**
  * seq_complete - callback run after spdk nvme operation is complete
@@ -64,7 +77,8 @@ static void attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		      struct spdk_nvme_ctrlr *ctrlr,
 		      const struct spdk_nvme_ctrlr_opts *opts)
 {
-	int num_ns;
+	int i, num_ns;
+	const struct spdk_nvme_ctrlr_data *ctrlr_data;
 
 	num_ns = spdk_nvme_ctrlr_get_num_ns(ctrlr);
 	if (num_ns > 1) {
@@ -76,9 +90,23 @@ static void attach_cb(void *cb_ctx, const struct spdk_nvme_transport_id *trid,
 		exit(1);
 	}
 	controller = ctrlr;
+	ctrlr_data = spdk_nvme_ctrlr_get_data(ctrlr);
 	spdk_namespace = spdk_nvme_ctrlr_get_ns(ctrlr, 1);
 	block_size = spdk_nvme_ns_get_sector_size(spdk_namespace);
 	num_blocks = spdk_nvme_ns_get_num_sectors(spdk_namespace);
+
+	for (i = 0; i < ARRAY_SIZE(known_devices); i++) {
+		if (!strncmp((char *)ctrlr_data->mn, known_devices[i].name,
+			           strlen(known_devices[i].name))) {
+			device_latency_us = known_devices[i].latency_us;
+			break;
+		}
+	}
+
+	if (i == ARRAY_SIZE(known_devices))
+		log_err("Warning: could not find latency profile for device %s,"
+			      "using default latency of %lu us",
+			      ctrlr_data->mn, device_latency_us);
 }
 
 static void *spdk_custom_allocator(size_t size, size_t align,
@@ -377,28 +405,6 @@ done_np:
 	return rc;
 }
 
-/*
- * storage_block_size - get the size of a block from the nvme device
- */
-uint32_t storage_block_size(void)
-{
-	if (!cfg_storage_enabled)
-		return 0;
-
-	return block_size;
-}
-
-/*
- * storage_num_blocks - gets the number of blocks from the nvme device
- */
-uint64_t storage_num_blocks(void)
-{
-	if (!cfg_storage_enabled)
-		return 0;
-
-	return num_blocks;
-}
-
 #else
 int storage_write(const void *payload, uint64_t lba, uint32_t lba_count)
 {
@@ -408,16 +414,6 @@ int storage_write(const void *payload, uint64_t lba, uint32_t lba_count)
 int storage_read(void *dest, uint64_t lba, uint32_t lba_count)
 {
 	return -ENODEV;
-}
-
-uint32_t storage_block_size(void)
-{
-	return 0;
-}
-
-uint64_t storage_num_blocks(void)
-{
-	return 0;
 }
 
 int storage_init(void)
