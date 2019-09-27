@@ -158,6 +158,10 @@ cffanoutlb3: $(lib_obj) $(cffanoutlb3_obj) $(librt_libs) $(RUNTIME_DEPS)
 	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cffanoutlb3_obj) \
 	$(librt_libs) $(RUNTIME_LIBS)
 
+cffanoutlb4: $(lib_obj) $(cffanoutlb4_obj) $(librt_libs) $(RUNTIME_DEPS)
+	$(LDXX) -o $@ $(LDFLAGS) $(lib_obj) $(cffanoutlb4_obj) \
+	$(librt_libs) $(RUNTIME_LIBS)
+
 # general build rules for all targets
 src = $(lib_src) $(netbench_src) $(netbench2_src) $(netbench3_src) $(netbench4_src) \
 		  $(netbench5_src) $(cfclient_src) $(cfclient2_src) $(cfclient3_src) $(loadbalancer_src) $(server_src) \
