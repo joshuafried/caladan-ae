@@ -38,7 +38,6 @@ static inline float runtime_load(void)
 extern unsigned int maxks;
 extern unsigned int guaranteedks;
 extern atomic_t runningks;
-extern __thread unsigned int kthread_idx;
 
 /**
  * runtime_active_cores - returns the number of currently active cores
@@ -68,13 +67,4 @@ static inline int runtime_max_cores(void)
 static inline int runtime_guaranteed_cores(void)
 {
 	return guaranteedks;
-}
-
-/**
- * runtime_kthread_idx - returns the index of the kthread
- *
- */
-static inline int runtime_kthread_idx(void)
-{
-  return kthread_idx;
 }
