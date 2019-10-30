@@ -500,7 +500,7 @@ public:
 void HandleRequest(RequestContext *ctx,
                    std::shared_ptr<SharedWorkerPool> wpool,
                    std::shared_ptr<AdmissionController> monitor) {
-  auto w = wpool->GetWorker(rt::RuntimeKthreadIdx());
+  auto w = wpool->GetWorker(get_current_affinity());
   payload *p = &ctx->p;
 
   // If the request is canceled, just ignore the request

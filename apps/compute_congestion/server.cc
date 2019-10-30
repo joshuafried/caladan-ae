@@ -239,7 +239,7 @@ public:
 
 void HandleRequest(RequestContext *ctx,
                    std::shared_ptr<SharedWorkerPool> wpool) {
-  auto w = wpool->GetWorker(rt::RuntimeKthreadIdx());
+  auto w = wpool->GetWorker(get_current_affinity());
   payload *p = &ctx->p;
 
   // perform fake work
