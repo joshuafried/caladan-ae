@@ -12,3 +12,5 @@ struct netaddr {
 };
 
 extern int str_to_netaddr(const char *str, struct netaddr *addr);
+extern uint32_t net_get_ip();
+extern struct eth_addr net_get_mac();

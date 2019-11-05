@@ -4,11 +4,20 @@
 
 extern "C" {
 #include <base/stddef.h>
+#include <net/ethernet.h>
 #include <runtime/udp.h>
 #include <runtime/tcp.h>
 }
 
 namespace rt {
+
+inline uint32_t RuntimeGetIP() {
+  return net_get_ip();
+}
+
+inline struct eth_addr RuntimeGetMAC() {
+  return net_get_mac();
+}
 
 class NetConn {
  public:

@@ -432,6 +432,16 @@ static uint32_t net_get_ip_route(uint32_t daddr)
 	return daddr;
 }
 
+uint32_t net_get_ip()
+{
+  return netcfg.addr;
+}
+
+struct eth_addr net_get_mac()
+{
+  return netcfg.mac;
+}
+
 /**
  * net_tx_ip - transmits an IP packet
  * @m: the mbuf to transmit
