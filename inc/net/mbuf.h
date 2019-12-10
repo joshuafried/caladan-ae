@@ -45,6 +45,9 @@ struct mbuf {
 	uint32_t	seg_end;    /* the last seg number (noninclusive) */
 	uint8_t		flags;	    /* which flags were set? */
 	atomic_t	ref;	    /* a reference count for the mbuf */
+
+  /* Custom field */
+  uint64_t received;   /* the time the packet is received */
 };
 
 static inline unsigned char *__mbuf_pull(struct mbuf *m, unsigned int len)

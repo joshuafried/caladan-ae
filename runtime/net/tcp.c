@@ -223,6 +223,7 @@ tcpconn_t *tcp_conn_alloc(void)
 	c->rxq_ooo_len = 0;
 	list_head_init(&c->rxq_ooo);
 	list_head_init(&c->rxq);
+  c->rxq_delay = 0;
 
 	/* egress fields */
 	c->tx_closed = false;
@@ -708,6 +709,7 @@ static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 		list_del_from(&c->rxq, &m->link);
 		list_add_tail(q, &m->link);
 		readlen += mbuf_length(m);
+    c->rxq_delay = microtime() - m->received;
 	}
 
 	c->pcb.rcv_wnd += readlen;
@@ -1211,6 +1213,10 @@ void tcp_close(tcpconn_t *c)
 	spin_unlock_np(&c->lock);
 
 	tcp_conn_put(c);
+}
+
+uint64_t tcp_rxq_delay_us(tcpconn_t *c) {
+  return c->rxq_delay;
 }
 
 /**
