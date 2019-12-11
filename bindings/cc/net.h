@@ -176,6 +176,10 @@ class TcpConn : public NetConn {
     return n;
   }
 
+  uint64_t RxqDelayUS() {
+    return tcp_rxq_delay_us(c_);
+  }
+
   // Gracefully shutdown the TCP connection.
   int Shutdown(int how) { return tcp_shutdown(c_, how); }
   // Ungracefully force the TCP connection to shutdown.
