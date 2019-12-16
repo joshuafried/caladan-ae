@@ -710,6 +710,9 @@ static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 		list_add_tail(q, &m->link);
 		readlen += mbuf_length(m);
     c->rxq_delay = microtime() - m->received;
+    if (list_empty(&c->rxq)) {
+      c->rxq_delay = 0;
+    }
 	}
 
 	c->pcb.rcv_wnd += readlen;
