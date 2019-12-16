@@ -230,7 +230,7 @@ static void simple_update_congestion_info(struct simple_data *sd)
 	struct congestion_info *info = sd->p->congestion_info;
 	float instant_load;
 
-  ACCESS_ONCE(info->queueing_delay) = sd->rxq_delay;
+  ACCESS_ONCE(info->queueing_delay) = sd->rxq_delay + sd->rq_delay;
 	/* update the CPU load */
 	/* TODO: handle using more than guaranteed cores */
         instant_load = (float)sd->threads_active / (float)sd->threads_max;
