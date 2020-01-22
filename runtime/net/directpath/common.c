@@ -2,7 +2,7 @@
 #include <base/kref.h>
 #include <base/mempool.h>
 #include <runtime/sync.h>
-
+#include <base/log.h>
 #include "defs.h"
 
 #ifdef DIRECTPATH
@@ -15,6 +15,7 @@ struct tcache *directpath_buf_tcache;
 DEFINE_PERTHREAD(struct tcache_perthread, directpath_buf_pt);
 
 bool cfg_directpath_enabled;
+char directpath_arg[128];
 
 enum {
 	RX_MODE_FLOW_STEERING = 0,
@@ -72,17 +73,27 @@ int directpath_init(void)
 	if (ret)
 		return ret;
 
-	directpath_mode = RX_MODE_FLOW_STEERING;
-	ret = mlx5_init_flow_steering(rxq_out, txq_out, maxks, maxks);
-	if (ret) {
-		directpath_mode = RX_MODE_QUEUE_STEERING;
-		ret = mlx5_init_queue_steering(rxq_out, txq_out, maxks, maxks);
+	if (strncmp("qs", directpath_arg, 2) != 0) {
+		directpath_mode = RX_MODE_FLOW_STEERING;
+		ret = mlx5_init_flow_steering(rxq_out, txq_out, maxks, maxks);
+		if (ret == 0) {
+			log_err("directpath_init: selected flow steering mode");
+			return 0;
+		}
 	}
 
-	if (ret)
-		return ret;
+	if (strncmp("fs", directpath_arg, 2) != 0) {
+		directpath_mode = RX_MODE_QUEUE_STEERING;
+		ret = mlx5_init_queue_steering(rxq_out, txq_out, maxks, maxks);
+		if (ret == 0) {
+			log_err("directpath_init: selected queue steering mode");
+			return 0;
+		}
+	}
 
-	return 0;
+	log_err("Could not intialize directpath, ret = %d", ret);
+
+	return ret ? ret : -EINVAL;
 
 }
 
