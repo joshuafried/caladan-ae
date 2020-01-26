@@ -22,11 +22,17 @@ enum {
 	RX_MODE_QUEUE_STEERING,
 };
 
+enum {
+	DRIVER_MLX5 = 0,
+	DRIVER_MLX4,
+};
+
 int directpath_mode;
+int directpath_driver;
 
 size_t directpath_rx_buf_pool_sz(unsigned int nrqs)
 {
-	return align_up(nrqs * (32 * RQ_NUM_DESC) * 16UL * MBUF_DEFAULT_LEN,
+	return align_up(MAX(12,nrqs) * (32 * RQ_NUM_DESC) * 16UL * MBUF_DEFAULT_LEN,
 			PGSIZE_2MB);
 }
 
@@ -73,6 +79,7 @@ int directpath_init(void)
 	if (ret)
 		return ret;
 
+	directpath_driver = DRIVER_MLX5;
 	if (strncmp("qs", directpath_arg, 2) != 0) {
 		directpath_mode = RX_MODE_FLOW_STEERING;
 		ret = mlx5_init_flow_steering(rxq_out, txq_out, maxks, maxks);
@@ -89,6 +96,14 @@ int directpath_init(void)
 			log_err("directpath_init: selected queue steering mode");
 			return 0;
 		}
+	}
+
+	directpath_driver = DRIVER_MLX4;
+	directpath_mode = RX_MODE_QUEUE_STEERING;
+	ret = mlx4_init(rxq_out, txq_out, maxks, maxks);
+	if (ret == 0) {
+		log_err("directpath_init: selected mlx4");
+		return 0;
 	}
 
 	log_err("Could not intialize directpath, ret = %d", ret);

@@ -57,7 +57,7 @@ INC += -I$(ROOT_PATH)/spdk/include
 endif
 ifeq ($(CONFIG_DIRECTPATH),y)
 RUNTIME_LIBS += -L$(ROOT_PATH)/rdma-core/build/lib/statics/
-RUNTIME_LIBS += -lmlx5 -libverbs -lnl-3 -lnl-route-3
+RUNTIME_LIBS += -lmlx4 -lmlx5 -libverbs -lnl-3 -lnl-route-3
 INC += -I$(ROOT_PATH)/rdma-core/build/include
 FLAGS += -DDIRECTPATH
 endif
