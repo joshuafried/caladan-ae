@@ -230,7 +230,7 @@ static void simple_update_congestion_info(struct simple_data *sd)
 	struct congestion_info *info = sd->p->congestion_info;
 	float instant_load;
 
-  ACCESS_ONCE(info->queueing_delay) = sd->rxq_delay + sd->rq_delay;
+  ACCESS_ONCE(info->queueing_delay) = sd->rxq_delay;
 	/* update the CPU load */
 	/* TODO: handle using more than guaranteed cores */
         instant_load = (float)sd->threads_active / (float)sd->threads_max;
@@ -250,7 +250,7 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 		sd->waking = false;
 		goto done;
 	}
-
+/*
   sd->rq_elapsed += IOKERNEL_POLL_INTERVAL;
   if (sd->rq_waiting <= rq_dequeued) {
     // wait finish!
@@ -271,6 +271,13 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
   } else {
     // still waiting
     sd->rxq_waiting -= rxq_dequeued;
+  }
+*/
+
+  sd->rxq_elapsed += IOKERNEL_POLL_INTERVAL;
+  if (rxq_dequeued > 0) {
+    sd->rxq_delay = (rxq_stqlen * sd->rxq_elapsed) / rxq_dequeued;
+    sd->rxq_elapsed = 0;
   }
 
 	/* check if congested */
