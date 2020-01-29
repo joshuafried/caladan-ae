@@ -16,7 +16,11 @@
 #include "proto.h"
 
 /* the maximum supported window size */
-#define SRPC_MAX_WINDOW	16
+#define SRPC_MAX_WINDOW		128
+/* the minimum runtime queuing delay */
+#define SRPC_MIN_DELAY_US	20
+/* the maximum runtime queuing delay */
+#define SRPC_MAX_DELAY_US	60
 
 /* the handler function for each RPC */
 static srpc_fn_t srpc_handler;
@@ -39,32 +43,39 @@ struct srpc_session {
 	DEFINE_BITMAP(completed_slots, SRPC_MAX_WINDOW);
 
 	/* worker slots (one for each credit issued) */
-	struct srpc_ctx		slots[SRPC_MAX_WINDOW];
+	struct srpc_ctx		*slots[SRPC_MAX_WINDOW];
 };
 
 static int srpc_get_slot(struct srpc_session *s)
 {
 	int slot = __builtin_ffsl(s->avail_slots[0]) - 1;
-	if (slot >= 0)
+	if (slot >= 0) {
 		bitmap_atomic_clear(s->avail_slots, slot);
+		s->slots[slot] = smalloc(sizeof(struct srpc_ctx));
+		s->slots[slot]->s = s;
+		s->slots[slot]->idx = slot;
+	}
 	return slot;
 }
 
 static void srpc_put_slot(struct srpc_session *s, int slot)
 {
+	sfree(s->slots[slot]);
+	s->slots[slot] = NULL;
 	bitmap_atomic_set(s->avail_slots, slot);
 }
 
 static void srpc_update_window(struct srpc_session *s)
 {
 	uint64_t us = runtime_standing_queue_us();
+	float alpha;
 
 	/* update window (currently AIMD) */
-	if (us >= 20) {
-		if (us > 60)
-			us = 60;
-		float scale = 1.0 + (us - 20) / 40.0;
-		s->win = (float)s->win / scale;
+	if (us >= SRPC_MIN_DELAY_US) {
+		us = MIN(SRPC_MAX_DELAY_US, us);
+		alpha = (float)(us - SRPC_MIN_DELAY_US) /
+			(float)(SRPC_MAX_DELAY_US - SRPC_MIN_DELAY_US);
+		s->win = (float)s->win * (1.0 - alpha / 2.0);
 	} else {
 		s->win++;
 	}
@@ -83,7 +94,7 @@ static void srpc_worker(void *arg)
 	srpc_handler(c);
 
 	spin_lock_np(&s->lock);
-	bitmap_set(s->completed_slots, c - s->slots);
+	bitmap_set(s->completed_slots, c->idx);
 	th = s->sender_th;
 	s->sender_th = NULL;
 	spin_unlock_np(&s->lock);
@@ -128,15 +139,15 @@ static int srpc_recv_one(struct srpc_session *s)
 	}
 
 	/* retrieve the payload */
-	ret = tcp_read_full(s->c, s->slots[idx].req_buf, chdr.len);
+	ret = tcp_read_full(s->c, s->slots[idx]->req_buf, chdr.len);
 	if (unlikely(ret <= 0)) {
 		if (ret == 0)
 			return -EIO;
 		return ret;
 	}
-	s->slots[idx].req_len = chdr.len;
-	s->slots[idx].resp_len = 0;
-	ret = thread_spawn(srpc_worker, &s->slots[idx]);
+	s->slots[idx]->req_len = chdr.len;
+	s->slots[idx]->resp_len = 0;
+	ret = thread_spawn(srpc_worker, s->slots[idx]);
 	BUG_ON(ret);
 	return ret;
 }
@@ -202,13 +213,13 @@ static void srpc_sender(void *arg)
 
 		/* send a response for each completed slot */
 		bitmap_for_each_set(tmp, SRPC_MAX_WINDOW, i) {
-			ret = srpc_send_one(s, &s->slots[i]);
+			ret = srpc_send_one(s, s->slots[i]);
+			srpc_put_slot(s, i);
 			if (unlikely(ret)) {
 				bitmap_atomic_or(s->avail_slots, tmp,
 						 SRPC_MAX_WINDOW);
 				goto close;
 			}
-			srpc_put_slot(s, i);
 		}
 	}
 
@@ -225,6 +236,10 @@ close:
 	}
 	spin_unlock_np(&s->lock);
 
+	/* free any remaining slots */
+	bitmap_for_each_set(s->completed_slots, SRPC_MAX_WINDOW, i)
+		srpc_put_slot(s, i);
+
 	/* notify server thread that the sender is done */
 	waitgroup_done(&s->send_waiter);
 }
@@ -234,15 +249,13 @@ static void srpc_server(void *arg)
 	tcpconn_t *c = (tcpconn_t *)arg;
 	struct srpc_session *s;
 	thread_t *th;
-	int i, ret;
+	int ret;
 
 	s = smalloc(sizeof(*s));
 	BUG_ON(!s);
 	memset(s, 0, sizeof(*s));
 	s->c = c;
 	bitmap_init(s->avail_slots, SRPC_MAX_WINDOW, true);
-	for (i = 0; i < SRPC_MAX_WINDOW; i++)
-		s->slots[i].s = s;
 	waitgroup_init(&s->send_waiter);
 	waitgroup_add(&s->send_waiter, 1);
 
