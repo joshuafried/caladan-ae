@@ -67,7 +67,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
  *
  * On success, returns the length received in bytes. On failure returns standard
  * socket errors (<= 0).
- */ 
+ */
 ssize_t crpc_recv_one(struct crpc_session *s, void *buf, size_t len)
 {
 	struct srpc_hdr shdr;
@@ -89,14 +89,14 @@ ssize_t crpc_recv_one(struct crpc_session *s, void *buf, size_t len)
 			 shdr.len, MIN(SRPC_BUF_SIZE, len));
 		return -EINVAL;
 	}
-	if (unlikely(shdr.op != RPC_OP_CALL)) {
+	if (unlikely(shdr.op >= RPC_OP_MAX)) {
 		log_warn("srpc: got invalid op %d", shdr.op);
 		return -EINVAL;
 	}
 
 	/* receive the payload */
 	ret = tcp_read_full(s->c, buf, shdr.len);
- 	if (unlikely(ret <= 0))
+	if (unlikely(ret <= 0))
 		return ret;
 	assert(ret == shdr.len);
 
@@ -104,6 +104,11 @@ ssize_t crpc_recv_one(struct crpc_session *s, void *buf, size_t len)
 	assert(atomic_read(&s->win_used) > 0);
 	atomic_dec(&s->win_used);
 	ACCESS_ONCE(s->win_avail) = shdr.win;
+
+	if (shdr.op == RPC_OP_WINUPDATE) {
+		assert(shdr.len == 0);
+		return crpc_recv_one(s, buf, len);
+	}
 
 	return shdr.len;
 }
