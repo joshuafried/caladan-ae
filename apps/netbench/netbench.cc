@@ -252,6 +252,8 @@ std::vector<work_unit> ClientWorker(
     p.work_iterations = hton64(w[i].work_us * kIterationsPerUS);
     p.index = hton64(i);
     ssize_t ret = c->Send(&p, sizeof(p));
+    if (ret == -ENOBUFS)
+      continue;
     if (ret != static_cast<ssize_t>(sizeof(p)))
       panic("write failed, ret = %ld", ret);
   }
