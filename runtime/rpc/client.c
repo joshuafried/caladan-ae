@@ -148,6 +148,11 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout)
 	return 0;
 }
 
+uint32_t crpc_win_avail(struct crpc_session *s)
+{
+	return s->win_avail;
+}
+
 /**
  * crpc_close - closes an RPC session
  * @s: the session to close

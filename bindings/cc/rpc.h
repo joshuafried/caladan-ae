@@ -44,6 +44,10 @@ class RpcClient {
     return crpc_recv_one(s_, buf, len);
   }
 
+  uint32_t WinAvail() {
+    return crpc_win_avail(s_);
+  }
+
   // Shuts down the RPC connection.
   int Shutdown(int how) { return tcp_shutdown(s_->c, how); }
   // Aborts the RPC connection.

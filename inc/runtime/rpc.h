@@ -19,7 +19,7 @@ struct srpc_session;
 
 #define SRPC_PORT	8123
 #define SRPC_BUF_SIZE	4096
-#define CRPC_BUF_SIZE 4096
+#define CRPC_BUF_SIZE	4096
 
 struct srpc_ctx {
 	struct srpc_session	*s;
@@ -43,7 +43,7 @@ extern int srpc_enable(srpc_fn_t handler);
 
 struct crpc_session {
 	tcpconn_t		*c;
-	uint32_t 		win_avail;
+	uint32_t		win_avail;
 	atomic_t		win_used;
   char        buf[CRPC_BUF_SIZE];
 };
@@ -54,6 +54,7 @@ extern ssize_t crpc_recv_one(struct crpc_session *s,
 			     void *buf, size_t len);
 extern int crpc_open(struct netaddr raddr, struct crpc_session **sout);
 extern void crpc_close(struct crpc_session *s);
+extern uint32_t crpc_win_avail(struct crpc_session *s);
 
 /**
  * crpc_is_busy - is the session busy (unable to accept requests right now)
