@@ -285,9 +285,7 @@ static void srpc_sender(void *arg)
 
 		/* Send WINUPDATE message */
 		if (need_winupdate) {
-			spin_lock_np(&drained_lock);
 			s->is_drained = false;
-			spin_unlock_np(&drained_lock);
 			ret = srpc_wakeup(s);
 			if (unlikely(ret))
 				goto close;
