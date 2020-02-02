@@ -23,12 +23,16 @@
 
 /* the handler function for each RPC */
 static srpc_fn_t srpc_handler;
+/* spin lock for srpc_drained list */
+static DEFINE_SPINLOCK(drained_lock);
 /* a list of zero window sessions */
 static LIST_HEAD(srpc_drained);
 
 struct srpc_session {
 	tcpconn_t		*c;
 	struct list_node	drained_link;
+	bool			is_drained;
+	bool			need_winupdate;
 	waitgroup_t		send_waiter;
 	uint32_t		win;
 
@@ -64,12 +68,45 @@ static void srpc_put_slot(struct srpc_session *s, int slot)
 	bitmap_atomic_set(s->avail_slots, slot);
 }
 
+static int srpc_wakeup(struct srpc_session *s)
+{
+	struct srpc_hdr shdr;
+	int ret;
+	ssize_t pkt_len = sizeof(struct srpc_hdr);
+
+	assert(s->win == 1);
+
+	/* craft the response header */
+	shdr.magic = RPC_RESP_MAGIC;
+	shdr.op = RPC_OP_WINUPDATE;
+	shdr.len = 0;
+	shdr.win = s->win;
+
+	/* send the packet */
+	ret = tcp_write_full(s->c, &shdr, pkt_len);
+	if (unlikely(ret < 0))
+		return ret;
+
+	return 0;
+}
+
 static void srpc_update_window(struct srpc_session *s)
 {
 	uint64_t us = runtime_standing_queue_us();
 	float alpha;
 
-	/* update window (currently AIMD) */
+	if (s->need_winupdate) {
+		s->win = 1;
+		return;
+	}
+
+	/* Don't update the window if session is on the
+	 * drained list */
+	if (s->win == 0) {
+		return;
+	}
+
+	/* update window (currently DCTCP-like) */
 	if (us >= SRPC_MIN_DELAY_US) {
 		us = MIN(SRPC_MAX_DELAY_US, us);
 		alpha = (float)(us - SRPC_MIN_DELAY_US) /
@@ -80,7 +117,8 @@ static void srpc_update_window(struct srpc_session *s)
 	}
 
 	/* clamp to supported values */
-	s->win = MAX(s->win, 1);
+	/* now we allow zero window */
+	s->win = MAX(s->win, 0);
 	s->win = MIN(s->win, SRPC_MAX_WINDOW - 1);
 }
 
@@ -155,7 +193,7 @@ static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 {
 	struct srpc_hdr *shdr = &c->resp_hdr;
 	int ret;
-  ssize_t pkt_len = sizeof(struct srpc_hdr) + c->resp_len;
+	ssize_t pkt_len = sizeof(struct srpc_hdr) + c->resp_len;
 
 	/* must have a response payload */
 	if (unlikely(c->resp_len == 0))
@@ -179,14 +217,18 @@ static void srpc_sender(void *arg)
 {
 	DEFINE_BITMAP(tmp, SRPC_MAX_WINDOW);
 	struct srpc_session *s = (struct srpc_session *)arg;
+	struct srpc_session *wakes;
 	int ret, i;
 	bool sleep;
+	bool need_winupdate;
+	thread_t *th;
 
 	while (true) {
 		/* find slots that have completed */
 		spin_lock_np(&s->lock);
 		while (true) {
-			sleep = !s->closed &&
+			need_winupdate = s->need_winupdate;
+			sleep = !s->closed && !need_winupdate &&
 				bitmap_popcount(s->completed_slots,
 						SRPC_MAX_WINDOW) == 0;
 			if (!sleep) {
@@ -204,7 +246,31 @@ static void srpc_sender(void *arg)
 		memcpy(tmp, s->completed_slots, sizeof(tmp));
 		bitmap_init(s->completed_slots, SRPC_MAX_WINDOW, false);
 		srpc_update_window(s);
+		s->need_winupdate = false;
 		spin_unlock_np(&s->lock);
+
+		/* yield a window to another session if
+		 * (1) it has window more than 1,
+		 * (2) drained list is not empty */
+		wakes = NULL;
+		spin_lock_np(&drained_lock);
+		if (s->win > 1 && !list_empty(&srpc_drained)) {
+			s->win--;
+			assert(s->win >= 1);
+			wakes = list_pop(&srpc_drained, struct srpc_session,
+					 drained_link);
+			assert(wakes->is_drained == true);
+			assert(wakes->drained_link.prev != NULL);
+			assert(wakes->drained_link.next != NULL);
+			wakes->drained_link.prev = NULL;
+			wakes->drained_link.next = NULL;
+		}
+		spin_unlock_np(&drained_lock);
+
+		if (s == wakes) {
+			s->win++;
+			wakes = NULL;
+		}
 
 		/* send a response for each completed slot */
 		bitmap_for_each_set(tmp, SRPC_MAX_WINDOW, i) {
@@ -215,6 +281,43 @@ static void srpc_sender(void *arg)
 						 SRPC_MAX_WINDOW);
 				goto close;
 			}
+		}
+
+		/* Send WINUPDATE message */
+		if (need_winupdate) {
+			spin_lock_np(&drained_lock);
+			s->is_drained = false;
+			spin_unlock_np(&drained_lock);
+			ret = srpc_wakeup(s);
+			if (unlikely(ret))
+				goto close;
+		}
+
+		/* add to the drained list if (1) window becomes zero,
+		 * (2) s is not in the list already,
+		 * (3) this is the last iteration */
+		spin_lock_np(&drained_lock);
+		if (s->win == 0 && !s->is_drained &&
+		    bitmap_popcount(s->avail_slots, SRPC_MAX_WINDOW) ==
+		    SRPC_MAX_WINDOW) {
+			assert(s->drained_link.prev == NULL &&
+			       s->drained_link.next == NULL);
+			s->is_drained = true;
+			list_add_tail(&srpc_drained, &s->drained_link);
+		}
+		spin_unlock_np(&drained_lock);
+
+		/* wake up the session */
+		if (wakes) {
+			spin_lock_np(&wakes->lock);
+			assert(wakes->win == 0);
+			th = wakes->sender_th;
+			wakes->sender_th = NULL;
+			wakes->need_winupdate = true;
+			spin_unlock_np(&wakes->lock);
+
+			if (th)
+				thread_ready(th);
 		}
 	}
 
@@ -250,6 +353,7 @@ static void srpc_server(void *arg)
 	BUG_ON(!s);
 	memset(s, 0, sizeof(*s));
 	s->c = c;
+	s->win = 1;
 	bitmap_init(s->avail_slots, SRPC_MAX_WINDOW, true);
 	waitgroup_init(&s->send_waiter);
 	waitgroup_add(&s->send_waiter, 1);
@@ -268,11 +372,24 @@ static void srpc_server(void *arg)
 	s->sender_th = NULL;
 	s->closed = true;
 	spin_unlock_np(&s->lock);
+
 	if (th)
 		thread_ready(th);
 
 	waitgroup_wait(&s->send_waiter);
 	tcp_close(c);
+
+	/* remove the session from the drained list */
+	spin_lock_np(&drained_lock);
+	if (s->drained_link.prev != NULL ||
+	    s->drained_link.next != NULL) {
+		list_del_from(&srpc_drained, &s->drained_link);
+		s->is_drained = false;
+		s->drained_link.prev = NULL;
+		s->drained_link.next = NULL;
+	}
+	spin_unlock_np(&drained_lock);
+
 	sfree(s);
 }
 
