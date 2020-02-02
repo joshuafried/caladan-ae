@@ -94,19 +94,20 @@ ssize_t crpc_recv_one(struct crpc_session *s, void *buf, size_t len)
 		return -EINVAL;
 	}
 
-	/* receive the payload */
-	ret = tcp_read_full(s->c, buf, shdr.len);
-	if (unlikely(ret <= 0))
-		return ret;
-	assert(ret == shdr.len);
+	if (shdr.op == RPC_OP_CALL) {
+		/* receive the payload */
+		ret = tcp_read_full(s->c, buf, shdr.len);
+		if (unlikely(ret <= 0))
+			return ret;
+		assert(ret == shdr.len);
 
-	/* adjust the window */
-	assert(atomic_read(&s->win_used) > 0);
-	atomic_dec(&s->win_used);
-	ACCESS_ONCE(s->win_avail) = shdr.win;
-
-	if (shdr.op == RPC_OP_WINUPDATE) {
+		/* adjust the window */
+		assert(atomic_read(&s->win_used) > 0);
+		atomic_dec(&s->win_used);
+		ACCESS_ONCE(s->win_avail) = shdr.win;
+	} else if (shdr.op == RPC_OP_WINUPDATE) {
 		assert(shdr.len == 0);
+		ACCESS_ONCE(s->win_avail) = shdr.win;
 		return crpc_recv_one(s, buf, len);
 	}
 
