@@ -24,14 +24,16 @@
 /* the handler function for each RPC */
 static srpc_fn_t srpc_handler;
 /* spin lock for srpc_drained list */
-static DEFINE_SPINLOCK(drained_lock);
+static spinlock_t *drained_lock;
 /* a list of zero window sessions */
-static LIST_HEAD(srpc_drained);
+struct list_head *srpc_drained;
 
 struct srpc_session {
 	tcpconn_t		*c;
 	struct list_node	drained_link;
 	bool			is_drained;
+	/* drained_list's core number. -1 if not in the drained list */
+	int			drained_core;
 	bool			need_winupdate;
 	waitgroup_t		send_waiter;
 	uint32_t		win;
@@ -213,6 +215,35 @@ static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 	return 0;
 }
 
+static struct srpc_session *srpc_choose_drained_session(int core_id)
+{
+	struct srpc_session *ret = NULL;
+
+	assert(core_id >= 0);
+	assert(core_id < runtime_max_cores());
+
+	if (list_empty(&srpc_drained[core_id]))
+		return NULL;
+
+	spin_lock_np(&drained_lock[core_id]);
+	if (list_empty(&srpc_drained[core_id])) {
+		spin_unlock_np(&drained_lock[core_id]);
+		return NULL;
+	}
+
+	ret = list_pop(&srpc_drained[core_id],
+		       struct srpc_session,
+		       drained_link);
+	assert(ret->drained_core == core_id);
+	assert(ret->drained_link.prev);
+	assert(ret->drained_link.next);
+	ret->drained_link.prev = NULL;
+	ret->drained_link.next = NULL;
+	spin_unlock_np(&drained_lock[core_id]);
+
+	return ret;
+}
+
 static void srpc_sender(void *arg)
 {
 	DEFINE_BITMAP(tmp, SRPC_MAX_WINDOW);
@@ -222,6 +253,8 @@ static void srpc_sender(void *arg)
 	bool sleep;
 	bool need_winupdate;
 	thread_t *th;
+	int max_cores = runtime_max_cores();
+	unsigned int core_id;
 
 	while (true) {
 		/* find slots that have completed */
@@ -249,23 +282,26 @@ static void srpc_sender(void *arg)
 		s->need_winupdate = false;
 		spin_unlock_np(&s->lock);
 
-		/* yield a window to another session if
-		 * (1) it has window more than 1,
-		 * (2) drained list is not empty */
+		/* decide whether and which session to wake up */
+		core_id = get_current_affinity();
 		wakes = NULL;
-		spin_lock_np(&drained_lock);
-		if (s->win > 1 && !list_empty(&srpc_drained)) {
+		if (s->win > 1) {
+			/* try local list */
+			wakes = srpc_choose_drained_session(core_id);
+
+			/* try to steal from other core */
+			i = 0;
+			while (!wakes && i <= max_cores) {
+				if (i != core_id)
+					wakes = srpc_choose_drained_session(i);
+				i++;
+			}
+		}
+
+		if (wakes) {
 			s->win--;
 			assert(s->win >= 1);
-			wakes = list_pop(&srpc_drained, struct srpc_session,
-					 drained_link);
-			assert(wakes->is_drained == true);
-			assert(wakes->drained_link.prev != NULL);
-			assert(wakes->drained_link.next != NULL);
-			wakes->drained_link.prev = NULL;
-			wakes->drained_link.next = NULL;
 		}
-		spin_unlock_np(&drained_lock);
 
 		if (s == wakes) {
 			s->win++;
@@ -285,7 +321,7 @@ static void srpc_sender(void *arg)
 
 		/* Send WINUPDATE message */
 		if (need_winupdate) {
-			s->is_drained = false;
+			s->drained_core = -1;
 			ret = srpc_wakeup(s);
 			if (unlikely(ret))
 				goto close;
@@ -294,16 +330,16 @@ static void srpc_sender(void *arg)
 		/* add to the drained list if (1) window becomes zero,
 		 * (2) s is not in the list already,
 		 * (3) this is the last iteration */
-		spin_lock_np(&drained_lock);
-		if (s->win == 0 && !s->is_drained &&
+		if (s->win == 0 && s->drained_core == -1 &&
 		    bitmap_popcount(s->avail_slots, SRPC_MAX_WINDOW) ==
 		    SRPC_MAX_WINDOW) {
 			assert(s->drained_link.prev == NULL &&
 			       s->drained_link.next == NULL);
-			s->is_drained = true;
-			list_add_tail(&srpc_drained, &s->drained_link);
+			spin_lock_np(&drained_lock[core_id]);
+			list_add_tail(&srpc_drained[core_id], &s->drained_link);
+			spin_unlock_np(&drained_lock[core_id]);
+			s->drained_core = core_id;
 		}
-		spin_unlock_np(&drained_lock);
 
 		/* wake up the session */
 		if (wakes) {
@@ -352,6 +388,7 @@ static void srpc_server(void *arg)
 	memset(s, 0, sizeof(*s));
 	s->c = c;
 	s->win = 1;
+	s->drained_core = -1;
 	bitmap_init(s->avail_slots, SRPC_MAX_WINDOW, true);
 	waitgroup_init(&s->send_waiter);
 	waitgroup_add(&s->send_waiter, 1);
@@ -378,15 +415,18 @@ static void srpc_server(void *arg)
 	tcp_close(c);
 
 	/* remove the session from the drained list */
-	spin_lock_np(&drained_lock);
-	if (s->drained_link.prev != NULL ||
-	    s->drained_link.next != NULL) {
-		list_del_from(&srpc_drained, &s->drained_link);
-		s->is_drained = false;
-		s->drained_link.prev = NULL;
-		s->drained_link.next = NULL;
+	if (s->drained_core >= 0) {
+		spin_lock_np(&drained_lock[s->drained_core]);
+		if (s->drained_link.prev != NULL ||
+		    s->drained_link.next != NULL) {
+			list_del_from(&srpc_drained[s->drained_core],
+				      &s->drained_link);
+			s->drained_link.prev = NULL;
+			s->drained_link.next = NULL;
+		}
+		spin_unlock_np(&drained_lock[s->drained_core]);
+		s->drained_core = -1;
 	}
-	spin_unlock_np(&drained_lock);
 
 	sfree(s);
 }
@@ -397,6 +437,19 @@ static void srpc_listener(void *arg)
 	tcpconn_t *c;
 	tcpqueue_t *q;
 	int ret;
+	int num_cores = runtime_max_cores();
+	int i;
+
+	/* initialize per-core drained list & locks */
+	drained_lock = (spinlock_t *)smalloc(sizeof(spinlock_t) * num_cores);
+	srpc_drained = (struct list_head *)smalloc(sizeof(struct list_head) *
+						   num_cores);
+
+	for (i = 0 ; i <= num_cores ; ++i) {
+		drained_lock[i] = (spinlock_t)SPINLOCK_INITIALIZER;
+		srpc_drained[i] =
+			(struct list_head)LIST_HEAD_INIT(srpc_drained[i]);
+	}
 
 	laddr.ip = 0;
 	laddr.port = SRPC_PORT;
@@ -411,6 +464,10 @@ static void srpc_listener(void *arg)
 		ret = thread_spawn(srpc_server, c);
 		WARN_ON(ret);
 	}
+
+	/* free per-core drained list & locks */
+	sfree(drained_lock);
+	sfree(srpc_drained);
 }
 
 /**
