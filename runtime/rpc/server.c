@@ -23,10 +23,18 @@
 
 /* the handler function for each RPC */
 static srpc_fn_t srpc_handler;
-/* spin lock for srpc_drained list */
-static spinlock_t *drained_lock;
-/* a list of zero window sessions */
-struct list_head *srpc_drained;
+
+/* drained session list */
+struct srpc_drained_ {
+	spinlock_t lock;
+	struct list_head list;
+	void *pad[5];
+};
+
+BUILD_ASSERT(sizeof(struct srpc_drained_) == CACHE_LINE_SIZE);
+
+static struct srpc_drained_ srpc_drained[NCPU]
+		__attribute__((aligned(CACHE_LINE_SIZE)));
 
 struct srpc_session {
 	tcpconn_t		*c;
@@ -34,6 +42,7 @@ struct srpc_session {
 	bool			is_drained;
 	/* drained_list's core number. -1 if not in the drained list */
 	int			drained_core;
+	bool			is_active;
 	bool			need_winupdate;
 	waitgroup_t		send_waiter;
 	uint32_t		win;
@@ -222,24 +231,22 @@ static struct srpc_session *srpc_choose_drained_session(int core_id)
 	assert(core_id >= 0);
 	assert(core_id < runtime_max_cores());
 
-	if (list_empty(&srpc_drained[core_id]))
+	if (list_empty(&srpc_drained[core_id].list))
 		return NULL;
 
-	spin_lock_np(&drained_lock[core_id]);
-	if (list_empty(&srpc_drained[core_id])) {
-		spin_unlock_np(&drained_lock[core_id]);
+	spin_lock_np(&srpc_drained[core_id].lock);
+	if (list_empty(&srpc_drained[core_id].list)) {
+		spin_unlock_np(&srpc_drained[core_id].lock);
 		return NULL;
 	}
 
-	ret = list_pop(&srpc_drained[core_id],
+	ret = list_pop(&srpc_drained[core_id].list,
 		       struct srpc_session,
 		       drained_link);
 	assert(ret->drained_core == core_id);
-	assert(ret->drained_link.prev);
-	assert(ret->drained_link.next);
-	ret->drained_link.prev = NULL;
-	ret->drained_link.next = NULL;
-	spin_unlock_np(&drained_lock[core_id]);
+	assert(!ret->is_active);
+	ret->is_active = true;
+	spin_unlock_np(&srpc_drained[core_id].lock);
 
 	return ret;
 }
@@ -333,11 +340,12 @@ static void srpc_sender(void *arg)
 		if (s->win == 0 && s->drained_core == -1 &&
 		    bitmap_popcount(s->avail_slots, SRPC_MAX_WINDOW) ==
 		    SRPC_MAX_WINDOW) {
-			assert(s->drained_link.prev == NULL &&
-			       s->drained_link.next == NULL);
-			spin_lock_np(&drained_lock[core_id]);
-			list_add_tail(&srpc_drained[core_id], &s->drained_link);
-			spin_unlock_np(&drained_lock[core_id]);
+			spin_lock_np(&srpc_drained[core_id].lock);
+			assert(s->is_active);
+			list_add_tail(&srpc_drained[core_id].list,
+				      &s->drained_link);
+			s->is_active = false;
+			spin_unlock_np(&srpc_drained[core_id].lock);
 			s->drained_core = core_id;
 		}
 
@@ -389,6 +397,7 @@ static void srpc_server(void *arg)
 	s->c = c;
 	s->win = 1;
 	s->drained_core = -1;
+	s->is_active = true;
 	bitmap_init(s->avail_slots, SRPC_MAX_WINDOW, true);
 	waitgroup_init(&s->send_waiter);
 	waitgroup_add(&s->send_waiter, 1);
@@ -416,15 +425,12 @@ static void srpc_server(void *arg)
 
 	/* remove the session from the drained list */
 	if (s->drained_core >= 0) {
-		spin_lock_np(&drained_lock[s->drained_core]);
-		if (s->drained_link.prev != NULL ||
-		    s->drained_link.next != NULL) {
-			list_del_from(&srpc_drained[s->drained_core],
+		spin_lock_np(&srpc_drained[s->drained_core].lock);
+		if (!s->is_active) {
+			list_del_from(&srpc_drained[s->drained_core].list,
 				      &s->drained_link);
-			s->drained_link.prev = NULL;
-			s->drained_link.next = NULL;
 		}
-		spin_unlock_np(&drained_lock[s->drained_core]);
+		spin_unlock_np(&srpc_drained[s->drained_core].lock);
 		s->drained_core = -1;
 	}
 
@@ -437,18 +443,11 @@ static void srpc_listener(void *arg)
 	tcpconn_t *c;
 	tcpqueue_t *q;
 	int ret;
-	int num_cores = runtime_max_cores();
 	int i;
 
-	/* initialize per-core drained list & locks */
-	drained_lock = (spinlock_t *)smalloc(sizeof(spinlock_t) * num_cores);
-	srpc_drained = (struct list_head *)smalloc(sizeof(struct list_head) *
-						   num_cores);
-
-	for (i = 0 ; i <= num_cores ; ++i) {
-		drained_lock[i] = (spinlock_t)SPINLOCK_INITIALIZER;
-		srpc_drained[i] =
-			(struct list_head)LIST_HEAD_INIT(srpc_drained[i]);
+	for (i = 0 ; i < NCPU ; ++i) {
+		spin_lock_init(&srpc_drained[i].lock);
+		list_head_init(&srpc_drained[i].list);
 	}
 
 	laddr.ip = 0;
@@ -464,10 +463,6 @@ static void srpc_listener(void *arg)
 		ret = thread_spawn(srpc_server, c);
 		WARN_ON(ret);
 	}
-
-	/* free per-core drained list & locks */
-	sfree(drained_lock);
-	sfree(srpc_drained);
 }
 
 /**
