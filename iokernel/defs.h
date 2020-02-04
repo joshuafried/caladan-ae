@@ -79,7 +79,9 @@ struct thread {
 	int32_t			park_efd;
 	struct q_ptrs		*q_ptrs;
 	uint32_t		last_rq_head;
+	uint32_t		last_rq_tail;
 	uint32_t		last_rxq_head;
+	uint32_t		last_rxq_tail;
 	unsigned int		core;
 	unsigned int		at_idx;
 	unsigned int		ts_idx;

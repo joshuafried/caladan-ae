@@ -264,9 +264,13 @@ static void sched_detect_congestion(struct proc *p)
 	DEFINE_BITMAP(threads, NCPU);
 	DEFINE_BITMAP(ios, NCPU);
 	struct thread *th;
-	uint32_t cur_tail, cur_head, last_head;
+	uint32_t cur_tail, cur_head, last_head, last_tail;
 	uint64_t now, timer_tsc;
 	int i;
+	uint64_t rxq_len = 0;
+	uint64_t rxq_dequeued = 0;
+	uint64_t rq_len = 0;
+	uint64_t rq_dequeued = 0;
 
 	bitmap_init(threads, NCPU, false);
 	bitmap_init(ios, NCPU, false);
@@ -274,23 +278,29 @@ static void sched_detect_congestion(struct proc *p)
 	/* detect uthread runqueue congestion */
 	for (i = 0; i < p->thread_count; i++) {
 		th = &p->threads[i];
+		last_tail = th->last_rq_tail;
 		cur_tail = load_acquire(&th->q_ptrs->rq_tail);
 		last_head = th->last_rq_head;
 		cur_head = ACCESS_ONCE(th->q_ptrs->rq_head);
 		th->last_rq_head = cur_head;
+		th->last_rq_tail = cur_tail;
 		if (th->active ? wraps_lt(cur_tail, last_head) :
 				 cur_head != cur_tail) {
 			bitmap_set(threads, i);
 		}
+		rq_len += (int32_t)(cur_head - cur_tail);
+		rq_dequeued += (int32_t)(cur_tail - last_tail);
 	}
 
 	/* detect RX queue congestion */
 	for (i = 0; i < p->thread_count; i++) {
 		th = &p->threads[i];
+		last_tail = th->last_rxq_tail;
 		cur_tail = lrpc_poll_send_tail(&th->rxq);
 		last_head = th->last_rxq_head;
 		cur_head = ACCESS_ONCE(th->rxq.send_head);
 		th->last_rxq_head = cur_head;
+		th->last_rxq_tail = cur_tail;
 		if (th->active ? wraps_lt(cur_tail, last_head) :
 				 cur_head != cur_tail) {
 			bitmap_set(ios, i);
@@ -301,6 +311,8 @@ static void sched_detect_congestion(struct proc *p)
 
 		if (hardware_queue_congested(p, th, &th->storage_hwq, true))
 			bitmap_set(ios, i);
+		rxq_len += (int32_t)(cur_head - cur_tail);
+		rxq_dequeued += (int32_t)(cur_tail - last_tail);
 	}
 
 	/* detect expired timers */
@@ -317,7 +329,7 @@ static void sched_detect_congestion(struct proc *p)
 	}
 
 	/* notify the scheduler policy of the current congestion */
-	sched_ops->notify_congested(p, threads, ios);
+	sched_ops->notify_congested(p, threads, ios, rxq_len, rxq_dequeued, rq_len, rq_dequeued);
 }
 
 /*

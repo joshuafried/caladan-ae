@@ -29,6 +29,7 @@ extern ssize_t tcp_read(tcpconn_t *c, void *buf, size_t len);
 extern ssize_t tcp_write(tcpconn_t *c, const void *buf, size_t len);
 extern ssize_t tcp_readv(tcpconn_t *c, const struct iovec *iov, int iovcnt);
 extern ssize_t tcp_writev(tcpconn_t *c, const struct iovec *iov, int iovcnt);
+extern uint64_t tcp_rxq_delay_us(tcpconn_t *c);
 extern int tcp_shutdown(tcpconn_t *c, int how);
 extern void tcp_abort(tcpconn_t *c);
 extern void tcp_close(tcpconn_t *c);
