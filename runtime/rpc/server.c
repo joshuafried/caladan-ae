@@ -116,8 +116,6 @@ static void srpc_update_window(struct srpc_session *s, bool need_winupdate)
 	 * drained list */
 	if (s->is_linked) {
 		assert(s->win == 0);
-		if (s->win > 0)
-			panic("s->win > 0\n");
 		return;
 	}
 
