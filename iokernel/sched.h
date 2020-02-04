@@ -43,7 +43,8 @@ struct sched_ops {
 	void (*notify_congested)(struct proc *p, bitmap_ptr_t threads,
 			         bitmap_ptr_t io, uint64_t rxq_len,
 				 uint64_t rxq_dequeued, uint64_t rq_len,
-				 uint64_t rq_dequeued);
+				 uint64_t rq_dequeued, uint64_t hwq_len,
+				 uint64_t hwq_dequeued);
 
 	/**
 	 * notify_core_needed - notifies the scheduler that a core is needed

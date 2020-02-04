@@ -44,6 +44,14 @@ static inline uint64_t runtime_rq_delay_us(void)
 }
 
 /**
+ * runtime_hwq_delay_us = returns the (estimated) hwq delay in us
+ */
+static inline uint64_t runtime_hwq_delay_us(void)
+{
+	return ACCESS_ONCE(runtime_congestion->hwq_delay_us);
+}
+
+/**
  * runtime_load - returns the current CPU usage load
  */
 static inline float runtime_load(void)

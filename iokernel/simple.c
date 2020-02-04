@@ -28,10 +28,12 @@ struct simple_data {
 	/* congestion info */
 	float			load;
 	uint64_t		standing_queue_us;
-	uint64_t		rxq_delay;
-	uint64_t		rxq_elapsed;
-	uint64_t		rq_delay;
-	uint64_t		rq_elapsed;
+	float			rxq_delay;
+	uint32_t		rxq_elapsed;
+	float			rq_delay;
+	uint32_t		rq_elapsed;
+	float			hwq_delay;
+	uint32_t		hwq_elapsed;
 	bool			waking;
 };
 
@@ -237,10 +239,13 @@ static void simple_update_congestion_info(struct simple_data *sd)
 	ACCESS_ONCE(info->standing_queue_us) = sd->standing_queue_us;
 
 	/* update the rxq delay in microseconds */
-	ACCESS_ONCE(info->rxq_delay_us) = sd->rxq_delay;
+	ACCESS_ONCE(info->rxq_delay_us) = (uint64_t)sd->rxq_delay;
 
 	/* update the rq delay in microseconds */
-	ACCESS_ONCE(info->rq_delay_us) = sd->rq_delay;
+	ACCESS_ONCE(info->rq_delay_us) = (uint64_t)sd->rq_delay;
+
+	/* update the hwq delay in microseconds */
+	ACCESS_ONCE(info->hwq_delay_us) = (uint64_t)sd->hwq_delay;
 
 	/* update the CPU load */
 	/* TODO: handle using more than guaranteed cores */
@@ -252,10 +257,12 @@ static void simple_update_congestion_info(struct simple_data *sd)
 static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 				    bitmap_ptr_t io, uint64_t rxq_len,
 				    uint64_t rxq_dequeued, uint64_t rq_len,
-				    uint64_t rq_dequeued)
+				    uint64_t rq_dequeued, uint64_t hwq_len,
+				    uint64_t hwq_dequeued)
 {
 	struct simple_data *sd = (struct simple_data *)p->policy_data;
 	int ret;
+	float c;
 
 	/* do nothing if we woke up a core during the last interval */
 	if (sd->waking) {
@@ -266,15 +273,34 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 	/* compute (estimated) rq delay */
 	sd->rq_elapsed += IOKERNEL_POLL_INTERVAL;
 	if (rq_dequeued > 0) {
-		sd->rq_delay = (rq_len * sd->rq_elapsed) / rq_dequeued;
+		c = rq_len * sd->rq_elapsed / (float)rq_dequeued;
+		sd->rq_delay = 0.9*sd->rq_delay + 0.1*c;
+		sd->rq_elapsed = 0;
+	} else if (rq_len == 0) {
+		sd->rq_delay = 0.9*sd->rq_delay;
 		sd->rq_elapsed = 0;
 	}
 
 	/* compute (estimated) rxq delay */
 	sd->rxq_elapsed += IOKERNEL_POLL_INTERVAL;
 	if (rxq_dequeued > 0) {
-		sd->rxq_delay = (rxq_len * sd->rxq_elapsed) / rxq_dequeued;
+		c = rxq_len * sd->rxq_elapsed / (float)rxq_dequeued;
+		sd->rxq_delay = 0.9*sd->rxq_delay + 0.1*c;
 		sd->rxq_elapsed = 0;
+	} else if (rxq_len == 0) {
+		sd->rxq_delay = 0.9*sd->rxq_delay;
+		sd->rxq_elapsed = 0;
+	}
+
+	/* compute (estimated) hwq delay */
+	sd->hwq_elapsed += IOKERNEL_POLL_INTERVAL;
+	if (hwq_dequeued > 0) {
+		c = hwq_len * sd->hwq_elapsed / (float)hwq_dequeued;
+		sd->hwq_delay = 0.9*sd->hwq_delay + 0.1*c;
+		sd->hwq_elapsed = 0;
+	} else if (hwq_len == 0) {
+		sd->hwq_delay = 0.9*sd->hwq_delay;
+		sd->hwq_elapsed = 0;
 	}
 
 	/* check if congested */

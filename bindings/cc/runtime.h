@@ -19,6 +19,18 @@ inline uint64_t RuntimeStandingQueueUS() {
   return runtime_standing_queue_us();
 }
 
+inline uint64_t RuntimeRxqDelayUS() {
+  return runtime_rxq_delay_us();
+}
+
+inline uint64_t RuntimeRqDelayUS() {
+  return runtime_rq_delay_us();
+}
+
+inline uint64_t RuntimeHwqDelayUS() {
+  return runtime_hwq_delay_us();
+}
+
 // Gets an estimate of the instantanious load as measured by the IOKernel.
 inline float RuntimeLoad() {
   return runtime_load();

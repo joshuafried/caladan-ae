@@ -38,6 +38,7 @@ struct congestion_info {
 	uint64_t		standing_queue_us;
 	uint64_t		rxq_delay_us;
 	uint64_t		rq_delay_us;
+	uint64_t		hwq_delay_us;
 };
 
 enum {
