@@ -19,15 +19,15 @@ inline uint64_t RuntimeStandingQueueUS() {
   return runtime_standing_queue_us();
 }
 
-inline uint64_t RuntimeRxqDelayUS() {
+inline uint32_t RuntimeRxqDelayUS() {
   return runtime_rxq_delay_us();
 }
 
-inline uint64_t RuntimeRqDelayUS() {
+inline uint32_t RuntimeRqDelayUS() {
   return runtime_rq_delay_us();
 }
 
-inline uint64_t RuntimeHwqDelayUS() {
+inline uint32_t RuntimeHwqDelayUS() {
   return runtime_hwq_delay_us();
 }
 
