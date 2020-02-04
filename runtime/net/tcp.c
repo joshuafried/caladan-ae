@@ -718,7 +718,10 @@ static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 	}
 
 	if (dequeued > 0) {
-		c->rxq_delay = c->rxq_len * dequeued * dequeued / sum_delay;
+		if (sum_delay == 0)
+			c->rxq_delay = 0;
+		else
+			c->rxq_delay = c->rxq_len * dequeued * dequeued / sum_delay;
 	}
 
 	c->pcb.rcv_wnd += readlen;
