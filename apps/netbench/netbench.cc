@@ -5,12 +5,12 @@ extern "C" {
 }
 
 #include "net.h"
+#include "rpc.h"
 #include "runtime.h"
 #include "sync.h"
 #include "synthetic_worker.h"
 #include "thread.h"
 #include "timer.h"
-#include "rpc.h"
 
 #include <algorithm>
 #include <chrono>
@@ -25,7 +25,12 @@ extern "C" {
 #include <utility>
 #include <vector>
 
+#include <ctime>
+std::time_t timex;
+
 barrier_t barrier;
+
+constexpr uint16_t kBarrierPort = 41;
 
 namespace {
 
@@ -36,19 +41,19 @@ using sec = duration<double, std::micro>;
 // the number of worker threads to spawn.
 int threads;
 // the remote UDP address of the server.
-netaddr raddr;
+netaddr raddr, master;
 // the mean service time in us.
 double st;
+
+int total_agents = 1;
 // number of iterations required for 1us on target server
 constexpr uint64_t kIterationsPerUS = 69;  // 83
 // Number of seconds to warmup at rate 0
 constexpr uint64_t kWarmupUpSeconds = 5;
 
-static std::vector<std::pair<double, uint64_t>> rates;
-
 std::vector<double> offered_loads;
 
-SyntheticWorker **workers;
+static SyntheticWorker *workers[NCPU];
 
 constexpr uint64_t kUptimePort = 8002;
 constexpr uint64_t kUptimeMagic = 0xDEADBEEF;
@@ -56,6 +61,142 @@ struct uptime {
   uint64_t idle;
   uint64_t busy;
 };
+
+struct work_unit {
+  double start_us, work_us, duration_us;
+  uint64_t window;
+  uint64_t tsc;
+  uint32_t cpu;
+  uint64_t queueing;
+};
+
+class NetBarrier {
+ public:
+  static constexpr uint64_t npara = 100;
+  NetBarrier(int npeers) {
+    threads /= total_agents;
+
+    is_leader_ = true;
+    std::unique_ptr<rt::TcpQueue> q(
+        rt::TcpQueue::Listen({0, kBarrierPort}, 4096));
+    aggregator_ = std::move(std::unique_ptr<rt::TcpQueue>(
+        rt::TcpQueue::Listen({0, kBarrierPort + 1}, 4096)));
+    for (int i = 0; i < npeers; i++) {
+      rt::TcpConn *c = q->Accept();
+      if (c == nullptr) panic("couldn't accept a connection");
+      conns.emplace_back(c);
+      BUG_ON(c->WriteFull(&threads, sizeof(threads)) <= 0);
+      BUG_ON(c->WriteFull(&st, sizeof(st)) <= 0);
+      BUG_ON(c->WriteFull(&raddr, sizeof(raddr)) <= 0);
+      BUG_ON(c->WriteFull(&total_agents, sizeof(total_agents)) <= 0);
+      for (size_t j = 0; j < npara; j++) {
+        rt::TcpConn *c = aggregator_->Accept();
+        if (c == nullptr) panic("couldn't accept a connection");
+        agg_conns_.emplace_back(c);
+      }
+    }
+  }
+
+  NetBarrier(netaddr leader) {
+    auto c = rt::TcpConn::Dial({0, 0}, {leader.ip, kBarrierPort});
+    if (c == nullptr) panic("barrier");
+    conns.emplace_back(c);
+    is_leader_ = false;
+    BUG_ON(c->ReadFull(&threads, sizeof(threads)) <= 0);
+    BUG_ON(c->ReadFull(&st, sizeof(st)) <= 0);
+    BUG_ON(c->ReadFull(&raddr, sizeof(raddr)) <= 0);
+    BUG_ON(c->ReadFull(&total_agents, sizeof(total_agents)) <= 0);
+    for (size_t i = 0; i < npara; i++) {
+      auto c = rt::TcpConn::Dial({0, 0}, {master.ip, kBarrierPort + 1});
+      BUG_ON(c == nullptr);
+      agg_conns_.emplace_back(c);
+    }
+  }
+
+  bool Barrier() {
+    char buf[1];
+    if (is_leader_) {
+      for (auto &c : conns) {
+        if (c->ReadFull(buf, 1) != 1) return false;
+      }
+      for (auto &c : conns) {
+        if (c->WriteFull(buf, 1) != 1) return false;
+      }
+    } else {
+      if (conns[0]->WriteFull(buf, 1) != 1) return false;
+      if (conns[0]->ReadFull(buf, 1) != 1) return false;
+    }
+    return true;
+  }
+
+  bool StartExperiment() { return Barrier(); }
+
+  bool EndExperiment(std::vector<work_unit> &w, double *offered_rps,
+                     double *rps) {
+    if (is_leader_) {
+      for (auto &c : conns) {
+        double rem_offered_rps, rem_rps;
+        BUG_ON(c->ReadFull(&rem_offered_rps, sizeof(rem_offered_rps)) <= 0);
+        BUG_ON(c->ReadFull(&rem_rps, sizeof(rem_rps)) <= 0);
+        *offered_rps += rem_offered_rps;
+        *rps += rem_rps;
+      }
+    } else {
+      BUG_ON(conns[0]->WriteFull(offered_rps, sizeof(*offered_rps)) <= 0);
+      BUG_ON(conns[0]->WriteFull(rps, sizeof(*rps)) <= 0);
+    }
+    GatherSamples(w);
+    BUG_ON(!Barrier());
+    return is_leader_;
+  }
+
+ private:
+  std::vector<std::unique_ptr<rt::TcpConn>> conns;
+  std::unique_ptr<rt::TcpQueue> aggregator_;
+  std::vector<std::unique_ptr<rt::TcpConn>> agg_conns_;
+  bool is_leader_;
+
+  void GatherSamples(std::vector<work_unit> &w) {
+    std::vector<rt::Thread> th;
+    if (is_leader_) {
+      std::unique_ptr<std::vector<work_unit>> samples[agg_conns_.size()];
+      for (size_t i = 0; i < agg_conns_.size(); ++i) {
+        th.emplace_back(rt::Thread([&, i] {
+          size_t nelem;
+          BUG_ON(agg_conns_[i]->ReadFull(&nelem, sizeof(nelem)) <= 0);
+
+          work_unit *wunits = new work_unit[nelem];
+          BUG_ON(agg_conns_[i]->ReadFull(wunits, sizeof(work_unit) * nelem) <=
+                 0);
+          std::vector<work_unit> v(wunits, wunits + nelem);
+          delete[] wunits;
+
+          samples[i].reset(new std::vector<work_unit>(std::move(v)));
+        }));
+      }
+
+      for (auto &t : th) t.Join();
+      for (size_t i = 0; i < agg_conns_.size(); ++i) {
+        auto &v = *samples[i];
+        w.insert(w.end(), v.begin(), v.end());
+      }
+    } else {
+      for (size_t i = 0; i < agg_conns_.size(); ++i) {
+        th.emplace_back(rt::Thread([&, i] {
+          size_t elems = w.size() / npara;
+          work_unit *start = w.data() + elems * i;
+          if (i == npara - 1) elems += w.size() % npara;
+          BUG_ON(agg_conns_[i]->WriteFull(&elems, sizeof(elems)) <= 0);
+          BUG_ON(agg_conns_[i]->WriteFull(start, sizeof(work_unit) * elems) <=
+                 0);
+        }));
+      }
+      for (auto &t : th) t.Join();
+    }
+  }
+};
+
+static NetBarrier *b;
 
 void UptimeWorker(std::unique_ptr<rt::TcpConn> c) {
   while (true) {
@@ -142,7 +283,7 @@ void RpcServer(struct srpc_ctx *ctx) {
   // Perform the synthetic work.
   uint64_t workn = ntoh64(in->work_iterations);
   int core_id = get_current_affinity();
-  SyntheticWorker* w = workers[core_id];
+  SyntheticWorker *w = workers[core_id];
 
   if (workn != 0) w->Work(workn);
 
@@ -159,27 +300,16 @@ void ServerHandler(void *arg) {
   rt::Thread([] { UptimeServer(); }).Detach();
   int num_cores = rt::RuntimeMaxCores();
 
-  workers = (SyntheticWorker **)malloc(sizeof(SyntheticWorker*) * num_cores);
   for (int i = 0; i < num_cores; ++i) {
-    SyntheticWorker* w = SyntheticWorkerFactory("stridedmem:3200:64");
-    if (w == nullptr) printf("cannot create worker\n");
-    workers[i] = w;
+    workers[i] = SyntheticWorkerFactory("stridedmem:3200:64");
+    if (workers[i] == nullptr) panic("cannot create worker");
   }
 
   int ret = rt::RpcServerEnable(RpcServer);
   if (ret) panic("couldn't enable RPC server");
-
   // waits forever.
   rt::WaitGroup(1).Wait();
 }
-
-struct work_unit {
-  double start_us, work_us, duration_us;
-  uint64_t window;
-  uint64_t tsc;
-  uint32_t cpu;
-  uint64_t queueing;
-};
 
 template <class Arrival, class Service>
 std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
@@ -193,7 +323,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
 }
 
 std::vector<work_unit> ClientWorker(
-    rt::RpcClient *c, rt::WaitGroup *starter,
+    rt::RpcClient *c, rt::WaitGroup *starter, rt::WaitGroup *starter2,
     std::function<std::vector<work_unit>()> wf) {
   std::vector<work_unit> w(wf());
   std::vector<time_point<steady_clock>> timings;
@@ -224,7 +354,7 @@ std::vector<work_unit> ClientWorker(
 
   // Synchronized start of load generation.
   starter->Done();
-  starter->Wait();
+  starter2->Wait();
 
   barrier();
   auto expstart = steady_clock::now();
@@ -252,14 +382,13 @@ std::vector<work_unit> ClientWorker(
     p.work_iterations = hton64(w[i].work_us * kIterationsPerUS);
     p.index = hton64(i);
     ssize_t ret = c->Send(&p, sizeof(p));
-    if (ret == -ENOBUFS)
-      continue;
+    if (ret == -ENOBUFS) continue;
     if (ret != static_cast<ssize_t>(sizeof(p)))
       panic("write failed, ret = %ld", ret);
   }
 
   // rt::Sleep(1 * rt::kSeconds);
-  c->Shutdown(SHUT_RDWR);
+  BUG_ON(c->Shutdown(SHUT_RDWR));
   th.Join();
 
   return w;
@@ -277,22 +406,28 @@ std::vector<work_unit> RunExperiment(
   }
 
   // Launch a worker thread for each connection.
-  rt::WaitGroup starter(threads + 1);
+  rt::WaitGroup starter(threads);
+  rt::WaitGroup starter2(1);
+
   std::vector<rt::Thread> th;
   std::unique_ptr<std::vector<work_unit>> samples[threads];
   for (int i = 0; i < threads; ++i) {
     th.emplace_back(rt::Thread([&, i] {
-      auto v = ClientWorker(conns[i].get(), &starter, wf);
+      auto v = ClientWorker(conns[i].get(), &starter, &starter2, wf);
       samples[i].reset(new std::vector<work_unit>(std::move(v)));
     }));
   }
 
   // Give the workers time to initialize, then start recording.
-  starter.Done();
   starter.Wait();
+  if (b && !b->StartExperiment()) {
+    exit(0);
+  }
+  starter2.Done();
 
   // |--- start experiment duration timing ---|
   barrier();
+  timex = std::time(nullptr);
   auto start = steady_clock::now();
   barrier();
   uptime u1 = ReadUptime();
@@ -329,17 +464,8 @@ std::vector<work_unit> RunExperiment(
   uint64_t busy = u2.busy - u1.busy;
   if (cpu_usage != nullptr)
     *cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
-  return w;
-}
 
-void PrintRawResults(std::vector<work_unit> w) {
-  std::sort(w.begin(), w.end(),
-            [](const work_unit &s1, work_unit &s2) { return s1.tsc < s2.tsc; });
-  for (const work_unit &u : w) {
-    std::cout << std::setprecision(2) << std::fixed << u.start_us << ","
-              << u.duration_us << "," << u.work_us << "," << u.tsc << ","
-              << u.cpu << std::endl;
-  }
+  return w;
 }
 
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
@@ -361,22 +487,23 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
   double max = w[w.size() - 1].duration_us;
 
   double sum_win = std::accumulate(
-	w.begin(), w.end(), 0.0,
-	[](double s, const work_unit &c) {return s + c.window; });
+      w.begin(), w.end(), 0.0,
+      [](double s, const work_unit &c) { return s + c.window; });
   double mean_win = sum_win / w.size();
 
   double sum_que = std::accumulate(
-	w.begin(), w.end(), 0.0,
-	[](double s, const work_unit &c) {return s + c.queueing; });
+      w.begin(), w.end(), 0.0,
+      [](double s, const work_unit &c) { return s + c.queueing; });
   double mean_que = sum_que / w.size();
 
   std::cout  //<<
              //"#threads,offered_rps,rps,cpu_usage,samples,min,mean,p90,p99,p999,p9999,max"
              //<< std::endl
-      << std::setprecision(4) << std::fixed << threads << "," << offered_rps
-      << "," << rps << "," << cpu_usage << "," << w.size() << "," << min << ","
-      << mean << "," << p50 << "," <<  p90 << "," << p99 << "," << p999 << ","
-      << p9999 << "," << max << "," << mean_win << "," << mean_que << std::endl;
+      << std::setprecision(4) << std::fixed << threads * total_agents << ","
+      << offered_rps << "," << rps << "," << cpu_usage << "," << w.size() << ","
+      << min << "," << mean << "," << p50 << "," << p90 << "," << p99 << ","
+      << p999 << "," << p9999 << "," << max << "," << timex << "," << mean_win
+      << "," << mean_que << std::endl;
 }
 
 void SteadyStateExperiment(int threads, double offered_rps,
@@ -391,39 +518,11 @@ void SteadyStateExperiment(int threads, double offered_rps,
     return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, 2000000);
   });
 
+  if (b) {
+    if (!b->EndExperiment(w, &offered_rps, &rps)) return;
+  }
   // Print the results.
   PrintStatResults(w, offered_rps, rps, cpu_usage);
-}
-
-void LoadShiftExperiment(int threads,
-                         const std::vector<std::pair<double, uint64_t>> &rates,
-                         double service_time) {
-  auto w = RunExperiment(threads, nullptr, nullptr, [=] {
-    std::mt19937 rg(rand());
-    std::mt19937 wg(rand());
-    std::exponential_distribution<double> wd(1.0 / service_time);
-    std::vector<work_unit> w1;
-    uint64_t last_us = 0;
-    for (auto &r : rates) {
-      std::exponential_distribution<double> rd(
-          1.0 / (1000000.0 / (r.first / static_cast<double>(threads))));
-      auto work = GenerateWork(std::bind(rd, rg), std::bind(wd, wg), last_us,
-                               last_us + r.second);
-      last_us = work.back().start_us;
-      w1.insert(w1.end(), work.begin(), work.end());
-    }
-    return w1;
-  });
-  PrintRawResults(w);
-}
-
-void ClientHandler(void *arg) {
-  // LoadShiftExperiment(threads, rates, st);
-#if 1
-  for (double i : offered_loads) {
-    SteadyStateExperiment(threads, i, st);
-  }
-#endif
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {
@@ -435,22 +534,48 @@ int StringToAddr(const char *str, uint32_t *addr) {
   return 0;
 }
 
-std::vector<std::string> split(const std::string &text, char sep) {
-  std::vector<std::string> tokens;
-  std::string::size_type start = 0, end = 0;
-  while ((end = text.find(sep, start)) != std::string::npos) {
-    tokens.push_back(text.substr(start, end - start));
-    start = end + 1;
+void calculate_rates() {
+  double start, max, incr;
+  max = 10.0 * 1000000.0 / (st + 0.5);
+  incr = max / 40.0;
+  start = incr;
+
+  for (double l = start; l <= max; l += incr)
+    offered_loads.push_back(l / (double)total_agents);
+
+  for (double l = max + incr; l <= 10 * max; l += max)
+    offered_loads.push_back(l / (double)total_agents);
+}
+
+void AgentHandler(void *arg) {
+  master.port = kBarrierPort;
+  b = new NetBarrier(master);
+  BUG_ON(!b);
+
+  calculate_rates();
+
+  for (double i : offered_loads) {
+    SteadyStateExperiment(threads, i, st);
   }
-  tokens.push_back(text.substr(start));
-  return tokens;
+}
+
+void ClientHandler(void *arg) {
+  if (total_agents > 1) {
+    b = new NetBarrier(total_agents - 1);
+    BUG_ON(!b);
+  }
+
+  calculate_rates();
+
+  for (double i : offered_loads) {
+    SteadyStateExperiment(threads, i, st);
+  }
 }
 
 }  // anonymous namespace
 
 int main(int argc, char *argv[]) {
-  int i, ret;
-  double offered_load;
+  int ret;
 
   if (argc < 3) {
     std::cerr << "usage: [cfg_file] [cmd] ..." << std::endl;
@@ -464,14 +589,24 @@ int main(int argc, char *argv[]) {
       printf("failed to start runtime\n");
       return ret;
     }
+  } else if (cmd.compare("agent") == 0) {
+    if (argc < 4 || StringToAddr(argv[3], &master.ip)) {
+      std::cerr << "usage: [cfg_file] agent [ip_address] ..." << std::endl;
+      return -EINVAL;
+    }
+    ret = runtime_init(argv[1], AgentHandler, NULL);
+    if (ret) {
+      printf("failed to start runtime\n");
+      return ret;
+    }
   } else if (cmd.compare("client") != 0) {
     std::cerr << "invalid command: " << cmd << std::endl;
     return -EINVAL;
   }
 
-  if (argc < 7) {
+  if (argc < 6) {
     std::cerr << "usage: [cfg_file] client [#threads] [remote_ip] [service_us] "
-                 "[<request_rate>:<us_duration>]..."
+                 "[npeers]"
               << std::endl;
     return -EINVAL;
   }
@@ -484,16 +619,7 @@ int main(int argc, char *argv[]) {
 
   st = std::stod(argv[5], nullptr);
 
-  offered_load = std::stod(argv[6], nullptr);
-
-  if (offered_load > 0.0) {
-	  offered_loads.push_back(offered_load);
-  } else {
-	  for(double l = 50000; l <= 2000000; l += 50000)
-	    offered_loads.push_back(l);
-	  for(double l = 2500000; l <= 8000000; l += 500000)
-	    offered_loads.push_back(l);
-  }
+  if (argc > 6) total_agents += std::stoi(argv[6], nullptr, 0);
 
   ret = runtime_init(argv[1], ClientHandler, NULL);
   if (ret) {
