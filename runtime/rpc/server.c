@@ -191,6 +191,7 @@ static int srpc_recv_one(struct srpc_session *s)
 	/* retrieve the payload */
 	ret = tcp_read_full(s->c, s->slots[idx]->req_buf, chdr.len);
 	if (unlikely(ret <= 0)) {
+		srpc_put_slot(s, idx);
 		if (ret == 0)
 			return -EIO;
 		return ret;
@@ -204,7 +205,8 @@ static int srpc_recv_one(struct srpc_session *s)
 
 static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 {
-	struct srpc_hdr *shdr = &c->resp_hdr;
+	struct iovec vec[2];
+	struct srpc_hdr shdr;
 	int ret;
 	ssize_t pkt_len = sizeof(struct srpc_hdr) + c->resp_len;
 
@@ -213,16 +215,23 @@ static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 		return -EINVAL;
 
 	/* craft the response header */
-	shdr->magic = RPC_RESP_MAGIC;
-	shdr->op = RPC_OP_CALL;
-	shdr->len = c->resp_len;
-	shdr->win = s->win;
+	shdr.magic = RPC_RESP_MAGIC;
+	shdr.op = RPC_OP_CALL;
+	shdr.len = c->resp_len;
+	shdr.win = s->win;
+
+	/* initialize the SG vector */
+	vec[0].iov_base = &shdr;
+	vec[0].iov_len = sizeof(shdr);
+	vec[1].iov_base = c->resp_buf;
+	vec[1].iov_len = c->resp_len;
 
 	/* send the packet */
-	ret = tcp_write_full(s->c, shdr, pkt_len);
+	ret = tcp_writev_full(s->c, vec, 2);
 	if (unlikely(ret < 0))
 		return ret;
 
+	assert(ret == sizeof(shdr) + c->resp_len);
 	return 0;
 }
 
@@ -320,12 +329,12 @@ static void srpc_sender(void *arg)
 		/* send a response for each completed slot */
 		bitmap_for_each_set(tmp, SRPC_MAX_WINDOW, i) {
 			ret = srpc_send_one(s, s->slots[i]);
-			srpc_put_slot(s, i);
 			if (unlikely(ret)) {
 				bitmap_atomic_or(s->avail_slots, tmp,
 						 SRPC_MAX_WINDOW);
 				goto close;
 			}
+			srpc_put_slot(s, i);
 		}
 
 		/* Send WINUPDATE message */
@@ -378,9 +387,11 @@ close:
 	}
 	spin_unlock_np(&s->lock);
 
-	/* free any remaining slots */
-	bitmap_for_each_set(s->completed_slots, SRPC_MAX_WINDOW, i)
-		srpc_put_slot(s, i);
+	/* free any left over slots */
+	for (i = 0; i < SRPC_MAX_WINDOW; i++) {
+		if (s->slots[i])
+			srpc_put_slot(s, i);
+	}
 
 	/* notify server thread that the sender is done */
 	waitgroup_done(&s->send_waiter);

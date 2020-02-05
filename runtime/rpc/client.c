@@ -27,12 +27,17 @@
 ssize_t crpc_send_one(struct crpc_session *s,
 		      const void *buf, size_t len)
 {
-	struct crpc_hdr *chdr;
+	struct iovec vec[2];
+	struct crpc_hdr chdr;
 	ssize_t ret;
-  ssize_t pkt_len = sizeof(struct crpc_hdr) + len;
+	ssize_t pkt_len = sizeof(struct crpc_hdr) + len;
 
-  if (pkt_len > SRPC_BUF_SIZE)
-    return -ENOBUFS;
+	if (pkt_len > SRPC_BUF_SIZE)
+		return -ENOBUFS;
+
+	/* implementation is currently limited to a maximum payload size */
+	if (unlikely(len > SRPC_BUF_SIZE))
+		return -E2BIG;
 
 	/* adjust the window */
 	if (atomic_read(&s->win_used) >= s->win_avail)
@@ -40,19 +45,21 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	atomic_inc(&s->win_used);
 
 	/* send the client header */
-  chdr = (struct crpc_hdr *)(s->buf);
-	chdr->magic = RPC_REQ_MAGIC;
-	chdr->op = RPC_OP_CALL;
-	chdr->len = len;
+	chdr.magic = RPC_REQ_MAGIC;
+	chdr.op = RPC_OP_CALL;
+	chdr.len = len;
 
-  /* copy the payload */
-  memcpy(s->buf + sizeof(struct crpc_hdr), buf, len);
+	/* initialize the SG vector */
+	vec[0].iov_base = &chdr;
+	vec[0].iov_len = sizeof(chdr);
+	vec[1].iov_base = (void *)buf;
+	vec[1].iov_len = len;
 
 	/* send the request */
-	ret = tcp_write_full(s->c, s->buf, pkt_len);
+	ret = tcp_writev_full(s->c, vec, 2);
 	if (unlikely(ret < 0))
 		return ret;
-	assert(ret == pkt_len);
+	assert(ret == sizeof(chdr) + len);
 
 	return len;
 }
@@ -73,6 +80,7 @@ ssize_t crpc_recv_one(struct crpc_session *s, void *buf, size_t len)
 	struct srpc_hdr shdr;
 	ssize_t ret;
 
+again:
 	/* read the server header */
 	ret = tcp_read_full(s->c, &shdr, sizeof(shdr));
 	if (unlikely(ret <= 0))
@@ -85,16 +93,13 @@ ssize_t crpc_recv_one(struct crpc_session *s, void *buf, size_t len)
 		return -EINVAL;
 	}
 	if (unlikely(shdr.len > MIN(SRPC_BUF_SIZE, len))) {
-		log_warn("srpc: request len %ld too large (limit %ld)",
+		log_warn("crpc: request len %ld too large (limit %ld)",
 			 shdr.len, MIN(SRPC_BUF_SIZE, len));
 		return -EINVAL;
 	}
-	if (unlikely(shdr.op >= RPC_OP_MAX)) {
-		log_warn("srpc: got invalid op %d", shdr.op);
-		return -EINVAL;
-	}
 
-	if (shdr.op == RPC_OP_CALL) {
+	switch (shdr.op) {
+	case RPC_OP_CALL:
 		/* receive the payload */
 		ret = tcp_read_full(s->c, buf, shdr.len);
 		if (unlikely(ret <= 0))
@@ -105,10 +110,21 @@ ssize_t crpc_recv_one(struct crpc_session *s, void *buf, size_t len)
 		assert(atomic_read(&s->win_used) > 0);
 		atomic_dec(&s->win_used);
 		ACCESS_ONCE(s->win_avail) = shdr.win;
-	} else if (shdr.op == RPC_OP_WINUPDATE) {
+		break;
+
+	case RPC_OP_WINUPDATE:
+		/* update the window */
+		if (unlikely(shdr.len != 0)) {
+			log_warn("crpc: winupdate has nonzero len");
+			return -EINVAL;
+		}
 		assert(shdr.len == 0);
 		ACCESS_ONCE(s->win_avail) = shdr.win;
-		return crpc_recv_one(s, buf, len);
+		goto again;
+
+	default:
+		log_warn("crpc: got invalid op %d", shdr.op);
+		return -EINVAL;
 	}
 
 	return shdr.len;
