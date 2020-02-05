@@ -10,6 +10,7 @@
 #include <runtime/smalloc.h>
 
 #include "util.h"
+#include "proto.h"
 
 /**
  * crpc_send_one - sends one RPC request
@@ -30,10 +31,6 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	struct iovec vec[2];
 	struct crpc_hdr chdr;
 	ssize_t ret;
-	ssize_t pkt_len = sizeof(struct crpc_hdr) + len;
-
-	if (pkt_len > SRPC_BUF_SIZE)
-		return -ENOBUFS;
 
 	/* implementation is currently limited to a maximum payload size */
 	if (unlikely(len > SRPC_BUF_SIZE))

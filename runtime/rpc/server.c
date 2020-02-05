@@ -13,6 +13,7 @@
 #include <runtime/runtime.h>
 
 #include "util.h"
+#include "proto.h"
 
 /* the maximum supported window size */
 #define SRPC_MAX_WINDOW		64
@@ -208,7 +209,6 @@ static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 	struct iovec vec[2];
 	struct srpc_hdr shdr;
 	int ret;
-	ssize_t pkt_len = sizeof(struct srpc_hdr) + c->resp_len;
 
 	/* must have a response payload */
 	if (unlikely(c->resp_len == 0))
