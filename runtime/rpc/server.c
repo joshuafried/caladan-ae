@@ -80,13 +80,10 @@ static void srpc_put_slot(struct srpc_session *s, int slot)
 	bitmap_atomic_set(s->avail_slots, slot);
 }
 
-static int srpc_wakeup(struct srpc_session *s)
+static int srpc_winupdate(struct srpc_session *s)
 {
 	struct srpc_hdr shdr;
 	int ret;
-	ssize_t pkt_len = sizeof(struct srpc_hdr);
-
-	assert(s->win == 1);
 
 	/* craft the response header */
 	shdr.magic = RPC_RESP_MAGIC;
@@ -95,23 +92,17 @@ static int srpc_wakeup(struct srpc_session *s)
 	shdr.win = s->win;
 
 	/* send the packet */
-	ret = tcp_write_full(s->c, &shdr, pkt_len);
+	ret = tcp_write_full(s->c, &shdr, sizeof(shdr));
 	if (unlikely(ret < 0))
 		return ret;
 
 	return 0;
 }
 
-static void srpc_update_window(struct srpc_session *s, bool need_winupdate)
+static void srpc_update_window(struct srpc_session *s)
 {
 	uint64_t us = runtime_standing_queue_us();
 	float alpha;
-
-	/* This session is just waken up. */
-	if (need_winupdate) {
-		s->win = 1;
-		return;
-	}
 
 	/* Don't update the window if session is on the
 	 * drained list */
@@ -157,7 +148,9 @@ static int srpc_recv_one(struct srpc_session *s)
 {
 	struct crpc_hdr chdr;
 	int idx, ret;
+	thread_t *th;
 
+again:
 	/* read the client header */
 	ret = tcp_read_full(s->c, &chdr, sizeof(chdr));
 	if (unlikely(ret <= 0)) {
@@ -176,31 +169,53 @@ static int srpc_recv_one(struct srpc_session *s)
 			 chdr.len, SRPC_BUF_SIZE);
 		return -EINVAL;
 	}
-	if (unlikely(chdr.op != RPC_OP_CALL)) {
+
+	switch (chdr.op) {
+	case RPC_OP_CALL:
+		/* reserve a slot */
+		idx = srpc_get_slot(s);
+		if (unlikely(idx < 0)) {
+			log_warn("srpc: client tried to use more than %d slots",
+				 SRPC_MAX_WINDOW);
+			return -ENOENT;
+		}
+
+		/* retrieve the payload */
+		ret = tcp_read_full(s->c, s->slots[idx]->req_buf, chdr.len);
+		if (unlikely(ret <= 0)) {
+			srpc_put_slot(s, idx);
+			if (ret == 0)
+				return -EIO;
+			return ret;
+		}
+		s->slots[idx]->req_len = chdr.len;
+		s->slots[idx]->resp_len = 0;
+		ret = thread_spawn(srpc_worker, s->slots[idx]);
+		BUG_ON(ret);
+		break;
+
+	case RPC_OP_WINUPDATE:
+		if (unlikely(chdr.len != 0)) {
+			log_warn("srpc: winupdate has nonzero len");
+			return -EINVAL;
+		}
+		assert(chdr.len == 0);
+
+		spin_lock_np(&s->lock);
+		th = s->sender_th;
+		s->sender_th = NULL;
+		s->need_winupdate = true;
+		spin_unlock_np(&s->lock);
+
+		if (th)
+			thread_ready(th);
+
+		goto again;
+	default:
 		log_warn("srpc: got invalid op %d", chdr.op);
 		return -EINVAL;
 	}
 
-	/* reserve a slot */
-	idx = srpc_get_slot(s);
-	if (unlikely(idx < 0)) {
-		log_warn("srpc: client tried to use more than %d slots",
-			 SRPC_MAX_WINDOW);
-		return -ENOENT;
-	}
-
-	/* retrieve the payload */
-	ret = tcp_read_full(s->c, s->slots[idx]->req_buf, chdr.len);
-	if (unlikely(ret <= 0)) {
-		srpc_put_slot(s, idx);
-		if (ret == 0)
-			return -EIO;
-		return ret;
-	}
-	s->slots[idx]->req_len = chdr.len;
-	s->slots[idx]->resp_len = 0;
-	ret = thread_spawn(srpc_worker, s->slots[idx]);
-	BUG_ON(ret);
 	return ret;
 }
 
@@ -298,7 +313,7 @@ static void srpc_sender(void *arg)
 		bitmap_init(s->completed_slots, SRPC_MAX_WINDOW, false);
 		s->need_winupdate = false;
 		spin_unlock_np(&s->lock);
-		srpc_update_window(s, need_winupdate);
+		srpc_update_window(s);
 
 		/* decide whether and which session to wake up */
 		core_id = 0; //get_current_affinity();
@@ -339,8 +354,11 @@ static void srpc_sender(void *arg)
 
 		/* Send WINUPDATE message */
 		if (need_winupdate) {
+			// Give one window to the session who just got up
+			if (s->drained_core >= 0)
+				s->win = 1;
 			s->drained_core = -1;
-			ret = srpc_wakeup(s);
+			ret = srpc_winupdate(s);
 			if (unlikely(ret))
 				goto close;
 		}
@@ -408,7 +426,7 @@ static void srpc_server(void *arg)
 	BUG_ON(!s);
 	memset(s, 0, sizeof(*s));
 	s->c = c;
-	s->win = 1;
+	s->win = 0;
 	s->drained_core = -1;
 	bitmap_init(s->avail_slots, SRPC_MAX_WINDOW, true);
 	waitgroup_init(&s->send_waiter);

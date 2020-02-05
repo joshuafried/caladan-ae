@@ -2,6 +2,7 @@
  * RPC client-side support
  */
 
+#include <base/time.h>
 #include <base/stddef.h>
 #include <base/list.h>
 #include <base/log.h>
@@ -11,6 +12,32 @@
 
 #include "util.h"
 #include "proto.h"
+
+/**
+ * crpc_send_winupdate - send WINUPDATE message to update window size
+ * @s: the RPC session to update the window
+ *
+ * On success, returns 0. On failure returns standard socket errors (< 0)
+ */
+ssize_t crpc_send_winupdate(struct crpc_session *s)
+{
+        struct crpc_hdr chdr;
+        ssize_t ret;
+
+	/* construct the client header */
+	chdr.magic = RPC_REQ_MAGIC;
+	chdr.op = RPC_OP_WINUPDATE;
+	chdr.len = 0;
+
+	/* send the request */
+	ret = tcp_write_full(s->c, &chdr, sizeof(chdr));
+	if (unlikely(ret < 0))
+		return ret;
+
+	assert(ret == sizeof(chdr));
+
+	return 0;
+}
 
 /**
  * crpc_send_one - sends one RPC request
@@ -36,12 +63,18 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	if (unlikely(len > SRPC_BUF_SIZE))
 		return -E2BIG;
 
-	/* adjust the window */
-	if (atomic_read(&s->win_used) >= s->win_avail)
+	/* check the window */
+	if (atomic_read(&s->win_used) >= s->win_avail) {
+		/* if window information is stale, issue winupdate req */
+		if (s->win_timestamp == 0) {
+			ACCESS_ONCE(s->win_timestamp) = microtime();
+			crpc_send_winupdate(s);
+		}
 		return -ENOBUFS;
+	}
 	atomic_inc(&s->win_used);
 
-	/* send the client header */
+	/* construct the client header */
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_CALL;
 	chdr.len = len;
@@ -161,9 +194,11 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout)
 	}
 
 	s->c = c;
-	s->win_avail = 1;
+	s->win_avail = 0;
+	s->win_timestamp = 0;
 	atomic_write(&s->win_used, 0);
 	*sout = s;
+
 	return 0;
 }
 

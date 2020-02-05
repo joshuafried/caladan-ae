@@ -40,6 +40,7 @@ extern int srpc_enable(srpc_fn_t handler);
 
 struct crpc_session {
 	tcpconn_t		*c;
+	uint64_t		win_timestamp;
 	uint32_t		win_avail;
 	atomic_t		win_used;
 };
