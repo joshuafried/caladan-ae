@@ -450,13 +450,12 @@ std::vector<std::string> split(const std::string &text, char sep) {
 
 int main(int argc, char *argv[]) {
   int i, ret;
+  double offered_load;
 
   if (argc < 3) {
     std::cerr << "usage: [cfg_file] [cmd] ..." << std::endl;
     return -EINVAL;
   }
-
-
 
   std::string cmd = argv[2];
   if (cmd.compare("server") == 0) {
@@ -485,24 +484,16 @@ int main(int argc, char *argv[]) {
 
   st = std::stod(argv[5], nullptr);
 
-  for (i = 6; i < argc; i++) {
-    std::vector<std::string> tokens = split(argv[i], ':');
-    if (tokens.size() != 2) return -EINVAL;
-    double rate = std::stod(tokens[0], nullptr);
-    uint64_t duration = std::stoll(tokens[1], nullptr, 0);
-#if 0
-    if (i == 6) {
-      rates.emplace_back(rate, kWarmupUpSeconds * 1e6);
-    }
-#endif
-    rates.emplace_back(rate, duration);
+  offered_load = std::stod(argv[6], nullptr);
+
+  if (offered_load > 0.0) {
+	  offered_loads.push_back(offered_load);
+  } else {
+	  for(double l = 50000; l <= 2000000; l += 50000)
+	    offered_loads.push_back(l);
+	  for(double l = 2500000; l <= 8000000; l += 500000)
+	    offered_loads.push_back(l);
   }
-
-  for(double l = 50000; l <= 2000000; l += 50000)
-    offered_loads.push_back(l);
-
-  for(double l = 2500000; l <= 8000000; l += 500000)
-    offered_loads.push_back(l);
 
   ret = runtime_init(argv[1], ClientHandler, NULL);
   if (ret) {
