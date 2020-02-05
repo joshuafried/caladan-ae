@@ -62,7 +62,6 @@ for client in clients:
     ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
     ssh.connect("{}.utah.cloudlab.us".format(client), username="inhocho", pkey=pk)
     sshs.append(ssh)
-
 loads = range(50000, 2000001, 50000)
 loads += range(2500000, 8000001, 500000)
 
@@ -122,6 +121,7 @@ for load in loads:
     print("{:d},{:.04f},{:f},{:f},{:d},{:f},{:f},{:f},{:f},{:f},{:f},{:f},{:f},{:f},{:f}"\
             .format(NUMCONN, load, throughput, cpu, wsize, mmin, mean,
                 p50, p90, p99, p999, p9999, mmax, win, queue))
+    time.sleep(2)
 
 # close the connection
 for ssh in sshs:
