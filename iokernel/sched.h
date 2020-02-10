@@ -41,10 +41,7 @@ struct sched_ops {
 	 * congested or uncongested, driving core allocation decisions.
 	 */
 	void (*notify_congested)(struct proc *p, bitmap_ptr_t threads,
-			         bitmap_ptr_t io, uint64_t rxq_len,
-				 uint64_t rxq_dequeued, uint64_t rq_len,
-				 uint64_t rq_dequeued, uint64_t hwq_len,
-				 uint64_t hwq_dequeued);
+			         bitmap_ptr_t io);
 
 	/**
 	 * notify_core_needed - notifies the scheduler that a core is needed

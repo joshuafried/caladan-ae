@@ -28,30 +28,6 @@ static inline uint64_t runtime_standing_queue_us(void)
 }
 
 /**
- * runtime_rxq_delay_us - returns the (estimated) rxq delay in us
- */
-static inline uint32_t runtime_rxq_delay_us(void)
-{
-	return ACCESS_ONCE(runtime_congestion->rxq_delay_us);
-}
-
-/**
- * runtime_rq_delay_us - returns the (estimated) rq delay in us
- */
-static inline uint32_t runtime_rq_delay_us(void)
-{
-	return ACCESS_ONCE(runtime_congestion->rq_delay_us);
-}
-
-/**
- * runtime_hwq_delay_us = returns the (estimated) hwq delay in us
- */
-static inline uint32_t runtime_hwq_delay_us(void)
-{
-	return ACCESS_ONCE(runtime_congestion->hwq_delay_us);
-}
-
-/**
  * runtime_load - returns the current CPU usage load
  */
 static inline float runtime_load(void)

@@ -238,8 +238,7 @@ static uint32_t hwq_find_head(struct hwq *h, uint32_t cur_tail, uint32_t last_he
 }
 
 static bool hardware_queue_congested(struct proc *p, struct thread *th, struct hwq *h,
-				bool update_pointers, uint64_t *hwq_len,
-				uint64_t *hwq_dequeued)
+				bool update_pointers)
 {
 	uint32_t cur_tail, cur_head, last_head, last_tail;
 
@@ -257,11 +256,6 @@ static bool hardware_queue_congested(struct proc *p, struct thread *th, struct h
 		h->last_head = cur_head;
 	}
 
-	if (hwq_len && hwq_dequeued) {
-		*hwq_len += (int32_t)(cur_head - cur_tail);
-		*hwq_dequeued += (int32_t)(cur_tail - last_tail);
-	}
-
 	return (th->active || (h->queue_steering && p->active_thread_count)) ? wraps_lt(cur_tail, last_head) :
 				 cur_head != cur_tail;
 }
@@ -274,12 +268,6 @@ static void sched_detect_congestion(struct proc *p)
 	uint32_t cur_tail, cur_head, last_head, last_tail;
 	uint64_t now, timer_tsc;
 	int i;
-	uint64_t rxq_len = 0;
-	uint64_t rxq_dequeued = 0;
-	uint64_t rq_len = 0;
-	uint64_t rq_dequeued = 0;
-	uint64_t hwq_len = 0;
-	uint64_t hwq_dequeued = 0;
 
 	bitmap_init(threads, NCPU, false);
 	bitmap_init(ios, NCPU, false);
@@ -297,8 +285,6 @@ static void sched_detect_congestion(struct proc *p)
 				 cur_head != cur_tail) {
 			bitmap_set(threads, i);
 		}
-		rq_len += (int32_t)(cur_head - cur_tail);
-		rq_dequeued += (int32_t)(cur_tail - last_tail);
 	}
 
 	/* detect RX queue congestion */
@@ -314,15 +300,11 @@ static void sched_detect_congestion(struct proc *p)
 				 cur_head != cur_tail) {
 			bitmap_set(ios, i);
 		}
-		rxq_len += (int32_t)(cur_head - cur_tail);
-		rxq_dequeued += (int32_t)(cur_tail - last_tail);
 
-		if (hardware_queue_congested(p, th, &th->directpath_hwq, true,
-					     &hwq_len, &hwq_dequeued))
+		if (hardware_queue_congested(p, th, &th->directpath_hwq, true))
 			bitmap_set(ios, i);
 
-		if (hardware_queue_congested(p, th, &th->storage_hwq, true,
-					     NULL, NULL))
+		if (hardware_queue_congested(p, th, &th->storage_hwq, true))
 			bitmap_set(ios, i);
 	}
 
@@ -340,8 +322,7 @@ static void sched_detect_congestion(struct proc *p)
 	}
 
 	/* notify the scheduler policy of the current congestion */
-	sched_ops->notify_congested(p, threads, ios, rxq_len, rxq_dequeued,
-				    rq_len, rq_dequeued, hwq_len, hwq_dequeued);
+	sched_ops->notify_congested(p, threads, ios);
 }
 
 /*
@@ -356,8 +337,7 @@ static void sched_detect_io_for_idle_runtime(struct proc *p)
 	for (i = 0; i < p->thread_count; i++) {
 		th = &p->threads[i];
 
-		if (hardware_queue_congested(p, th, &th->directpath_hwq, false,
-					     NULL, NULL)) {
+		if (hardware_queue_congested(p, th, &th->directpath_hwq, false)) {
 			sched_add_core(p);
 			return;
 		}

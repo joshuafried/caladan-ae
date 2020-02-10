@@ -314,10 +314,7 @@ static void mis_update_congestion_info(struct mis_data *sd)
 }
 
 static void mis_notify_congested(struct proc *p, bitmap_ptr_t threads,
-				 bitmap_ptr_t io, uint64_t rxq_len,
-				 uint64_t rxq_dequeued, uint64_t rq_len,
-				 uint64_t rq_dequeued, uint64_t hwq_len,
-				 uint64_t hwq_dequeued)
+				 bitmap_ptr_t io)
 {
 	struct mis_data *sd = (struct mis_data *)p->policy_data;
 	int ret;

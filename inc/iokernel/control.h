@@ -36,9 +36,6 @@ struct q_ptrs {
 struct congestion_info {
 	float			load;
 	uint64_t		standing_queue_us;
-	uint32_t		rxq_delay_us;
-	uint32_t		rq_delay_us;
-	uint32_t		hwq_delay_us;
 };
 
 enum {
