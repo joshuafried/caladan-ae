@@ -62,6 +62,7 @@ static int control_init_hwq(struct shm_region *r,
 {
 	if (hs->hwq_type == HWQ_INVALID) {
 		h->enabled = false;
+		h->busy_since = UINT64_MAX;
 		return 0;
 	}
 
@@ -84,6 +85,7 @@ static int control_init_hwq(struct shm_region *r,
 	if (h->parity_byte_offset > (1 << h->descriptor_log_size))
 		return -EINVAL;
 
+	h->busy_since = UINT64_MAX;
 	h->last_head = 0;
 	h->last_tail = 0;
 

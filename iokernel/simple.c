@@ -28,12 +28,8 @@ struct simple_data {
 	/* congestion info */
 	float			load;
 	uint64_t		standing_queue_us;
-	uint32_t		rxq_delay;
-	uint32_t		rxq_elapsed;
-	uint32_t		rq_delay;
-	uint32_t		rq_elapsed;
-	uint32_t		hwq_delay;
-	uint32_t		hwq_elapsed;
+	uint64_t		rq_oldest_tsc;
+	uint64_t		pkq_oldest_tsc;
 	bool			waking;
 };
 
@@ -238,6 +234,9 @@ static void simple_update_congestion_info(struct simple_data *sd)
 		sd->standing_queue_us = 0;
 	ACCESS_ONCE(info->standing_queue_us) = sd->standing_queue_us;
 
+	ACCESS_ONCE(info->rq_oldest_tsc) = sd->rq_oldest_tsc;
+	ACCESS_ONCE(info->pkq_oldest_tsc) = sd->pkq_oldest_tsc;
+
 	/* update the CPU load */
 	/* TODO: handle using more than guaranteed cores */
         instant_load = (float)sd->threads_active / (float)sd->threads_max;
@@ -246,10 +245,14 @@ static void simple_update_congestion_info(struct simple_data *sd)
 }
 
 static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
-				    bitmap_ptr_t io)
+				    bitmap_ptr_t io, uint64_t rq_oldest_tsc,
+				    uint64_t pkq_oldest_tsc)
 {
 	struct simple_data *sd = (struct simple_data *)p->policy_data;
 	int ret;
+
+	sd->rq_oldest_tsc = rq_oldest_tsc;
+	sd->pkq_oldest_tsc = pkq_oldest_tsc;
 
 	/* do nothing if we woke up a core during the last interval */
 	if (sd->waking) {

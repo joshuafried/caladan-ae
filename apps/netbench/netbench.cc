@@ -293,7 +293,7 @@ void RpcServer(struct srpc_ctx *ctx) {
   memcpy(out, in, sizeof(*out));
   out->tsc_end = hton64(rdtscp(&out->cpu));
   out->cpu = hton32(out->cpu);
-  out->queueing = hton64(rt::RuntimeStandingQueueUS());
+  out->queueing = hton64(rt::RuntimeQueueUS());
 }
 
 void ServerHandler(void *arg) {

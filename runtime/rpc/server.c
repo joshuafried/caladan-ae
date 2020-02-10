@@ -101,7 +101,7 @@ static int srpc_winupdate(struct srpc_session *s)
 
 static void srpc_update_window(struct srpc_session *s)
 {
-	uint64_t us = runtime_standing_queue_us();
+	uint64_t us = runtime_queue_us();
 	float alpha;
 
 	/* Don't update the window if session is on the

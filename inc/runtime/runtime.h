@@ -28,6 +28,27 @@ static inline uint64_t runtime_standing_queue_us(void)
 }
 
 /**
+ * runtime_queue_us - returns the us of the longest queued thread in runqueue
+ * and packet queue
+ */
+static inline uint64_t runtime_queue_us(void)
+{
+	uint64_t now = rdtsc();
+	uint64_t rq_oldest_tsc = ACCESS_ONCE(runtime_congestion->rq_oldest_tsc);
+	uint64_t pkq_oldest_tsc = ACCESS_ONCE(runtime_congestion->pkq_oldest_tsc);
+	uint64_t rq_delay = 0;
+	uint64_t pkq_delay = 0;
+
+	if (now > rq_oldest_tsc)
+		rq_delay = now - rq_oldest_tsc;
+
+	if (now > pkq_oldest_tsc)
+		pkq_delay = now - pkq_oldest_tsc;
+
+	return (rq_delay + pkq_delay) / cycles_per_us;
+}
+
+/**
  * runtime_load - returns the current CPU usage load
  */
 static inline float runtime_load(void)

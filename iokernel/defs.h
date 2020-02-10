@@ -63,6 +63,8 @@ struct hwq {
 
 	uint32_t		last_tail;
 	uint32_t		last_head;
+
+	uint64_t		busy_since;
 };
 
 struct timer {
@@ -82,6 +84,7 @@ struct thread {
 	uint32_t		last_rq_tail;
 	uint32_t		last_rxq_head;
 	uint32_t		last_rxq_tail;
+	uint64_t		rxq_busy_since;
 	unsigned int		core;
 	unsigned int		at_idx;
 	unsigned int		ts_idx;

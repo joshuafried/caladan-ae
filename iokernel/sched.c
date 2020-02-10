@@ -45,6 +45,9 @@ static struct core_state state[NCPU];
 /* policy-specific operations (TODO: should be made configurable) */
 const struct sched_ops *sched_ops;
 
+/* current hardware timestamp */
+static uint64_t cur_tsc;
+
 /**
  * sched_steer_flows - redirects flows to active kthreads
  * @p: the proc for which to reallocate flows
@@ -256,6 +259,17 @@ static bool hardware_queue_congested(struct proc *p, struct thread *th, struct h
 		h->last_head = cur_head;
 	}
 
+	/* check whether hwq is empty */
+	if (cur_head == cur_tail) {
+		h->busy_since = UINT64_MAX;
+		return false;
+	}
+
+	/* check whether there was any progress on draining hwq or new packet
+	 * has arrived */
+	if (cur_tail != last_tail || h->busy_since == UINT64_MAX)
+		h->busy_since = cur_tsc;
+
 	return (th->active || (h->queue_steering && p->active_thread_count)) ? wraps_lt(cur_tail, last_head) :
 				 cur_head != cur_tail;
 }
@@ -272,6 +286,9 @@ static void sched_detect_congestion(struct proc *p)
 	bitmap_init(threads, NCPU, false);
 	bitmap_init(ios, NCPU, false);
 
+	uint64_t rq_oldest_tsc = UINT64_MAX;
+	uint64_t pkq_oldest_tsc = UINT64_MAX;
+
 	/* detect uthread runqueue congestion */
 	for (i = 0; i < p->thread_count; i++) {
 		th = &p->threads[i];
@@ -279,6 +296,7 @@ static void sched_detect_congestion(struct proc *p)
 		cur_tail = load_acquire(&th->q_ptrs->rq_tail);
 		last_head = th->last_rq_head;
 		cur_head = ACCESS_ONCE(th->q_ptrs->rq_head);
+		rq_oldest_tsc = MIN(rq_oldest_tsc, ACCESS_ONCE(th->q_ptrs->oldest_tsc));
 		th->last_rq_head = cur_head;
 		th->last_rq_tail = cur_tail;
 		if (th->active ? wraps_lt(cur_tail, last_head) :
@@ -301,11 +319,20 @@ static void sched_detect_congestion(struct proc *p)
 			bitmap_set(ios, i);
 		}
 
+		/* update oldest tsc of rxq */
+		if (cur_head == cur_tail)
+			th->rxq_busy_since = UINT64_MAX;
+		else if (cur_tail != last_tail || th->rxq_busy_since == UINT64_MAX)
+			th->rxq_busy_since = cur_tsc;
+
 		if (hardware_queue_congested(p, th, &th->directpath_hwq, true))
 			bitmap_set(ios, i);
 
 		if (hardware_queue_congested(p, th, &th->storage_hwq, true))
 			bitmap_set(ios, i);
+
+		pkq_oldest_tsc = MIN(pkq_oldest_tsc, th->directpath_hwq.busy_since);
+		pkq_oldest_tsc = MIN(pkq_oldest_tsc, th->rxq_busy_since);
 	}
 
 	/* detect expired timers */
@@ -322,7 +349,7 @@ static void sched_detect_congestion(struct proc *p)
 	}
 
 	/* notify the scheduler policy of the current congestion */
-	sched_ops->notify_congested(p, threads, ios);
+	sched_ops->notify_congested(p, threads, ios, rq_oldest_tsc, pkq_oldest_tsc);
 }
 
 /*
@@ -390,7 +417,8 @@ void sched_poll(void)
 	 * slow pass --- runs every IOKERNEL_POLL_INTERVAL
 	 */
 
-	now = microtime();
+	cur_tsc = rdtsc();
+	now = (cur_tsc - start_tsc) / cycles_per_us;
 	if (now - last_time >= IOKERNEL_POLL_INTERVAL) {
 		int i;
 
