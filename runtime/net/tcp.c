@@ -223,8 +223,6 @@ tcpconn_t *tcp_conn_alloc(void)
 	c->rxq_ooo_len = 0;
 	list_head_init(&c->rxq_ooo);
 	list_head_init(&c->rxq);
-	c->rxq_delay = 0;
-	c->rxq_len = 0;
 
 	/* egress fields */
 	c->tx_closed = false;
@@ -674,8 +672,6 @@ static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 {
 	struct mbuf *m;
 	size_t readlen = 0;
-	uint64_t sum_delay = 0;
-	uint64_t dequeued = 0;
 
 	*mout = NULL;
 	spin_lock_np(&c->lock);
@@ -712,16 +708,6 @@ static ssize_t tcp_read_wait(tcpconn_t *c, size_t len,
 		list_del_from(&c->rxq, &m->link);
 		list_add_tail(q, &m->link);
 		readlen += mbuf_length(m);
-		c->rxq_len--;
-		sum_delay += (microtime() - m->received);
-		dequeued++;
-	}
-
-	if (dequeued > 0) {
-		if (sum_delay == 0)
-			c->rxq_delay = 0;
-		else
-			c->rxq_delay = c->rxq_len * dequeued * dequeued / sum_delay;
 	}
 
 	c->pcb.rcv_wnd += readlen;
@@ -1029,10 +1015,6 @@ ssize_t tcp_writev(tcpconn_t *c, const struct iovec *iov, int iovcnt)
 	tcp_write_finish(c);
 
 	return sent > 0 ? sent : ret;
-}
-
-uint64_t tcp_rxq_delay_us(tcpconn_t *c) {
-	return c->rxq_delay;
 }
 
 /* resend any pending egress packets that timed out */

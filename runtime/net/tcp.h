@@ -83,8 +83,6 @@ struct tcpconn {
 	unsigned int		rxq_ooo_len;
 	struct list_head	rxq_ooo;
 	struct list_head	rxq;
-	unsigned int		rxq_len;
-	uint64_t		rxq_delay;
 
 	/* egress path */
 	unsigned int		tx_closed:1;
