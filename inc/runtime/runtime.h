@@ -5,6 +5,7 @@
 #pragma once
 
 #include <base/stddef.h>
+#include <base/time.h>
 #include <runtime/thread.h>
 
 
