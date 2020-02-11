@@ -87,12 +87,16 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	assert_mutex_held(&s->lock);
 
 	/* is the queue full? */
-	if (s->head - s->tail >= CRPC_QLEN)
+	if (s->head - s->tail >= CRPC_QLEN) {
+		s->dropped_client++;
 		return false;
+	}
 
 	/* if can't probe, drop the request */
-	if (s->probe_wait_ts > microtime())
+	if (s->probe_wait_ts > microtime()) {
+		s->dropped_client++;
 		return false;
+	}
 
 	pos = s->head++ % CRPC_QLEN;
 	memcpy(s->bufs[pos], buf, len);
@@ -217,6 +221,9 @@ again:
 	s->win_used--;
 	s->probe_sent = false;
 
+	if (!shdr.accepted)
+		s->dropped_server++;
+
 	/* drain the queue and send another probe if allowed/needed */
 	if (shdr.delay_us > CRPC_MIN_DELAY_US || !shdr.accepted)
 		s->probe_wait_ts = microtime() + shdr.probe_us;
@@ -225,8 +232,10 @@ again:
 	crpc_drain_queue(s);
 
 	/* if the delay was high, drop the remaining queue */
-	if (shdr.delay_us > CRPC_MIN_DELAY_US || !shdr.accepted)
+	if (shdr.delay_us > CRPC_MIN_DELAY_US || !shdr.accepted) {
+		s->dropped_client += (s->head - s->tail);
 		s->head = s->tail = 0;
+	}
 
 	s->win_update_ts = microtime();
 	mutex_unlock(&s->lock);
@@ -295,6 +304,16 @@ fail:
 uint32_t crpc_win_avail(struct crpc_session *s)
 {
 	return s->win_avail;
+}
+
+uint64_t crpc_dropped_client(struct crpc_session *s)
+{
+	return s->dropped_client;
+}
+
+uint64_t crpc_dropped_server(struct crpc_session *s)
+{
+	return s->dropped_server;
 }
 
 /**

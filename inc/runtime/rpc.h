@@ -55,6 +55,10 @@ struct crpc_session {
 	uint32_t		tail;
 	void			*bufs[CRPC_QLEN];
 	size_t			lens[CRPC_QLEN];
+
+	/* stats */
+	uint64_t		dropped_client;
+	uint64_t		dropped_server;
 };
 
 extern ssize_t crpc_send_one(struct crpc_session *s,
@@ -63,6 +67,8 @@ extern ssize_t crpc_recv_one(struct crpc_session *s,
 			     void *buf, size_t len);
 extern int crpc_open(struct netaddr raddr, struct crpc_session **sout);
 extern uint32_t crpc_win_avail(struct crpc_session *s);
+extern uint64_t crpc_dropped_client(struct crpc_session *s);
+extern uint64_t crpc_dropped_server(struct crpc_session *s);
 extern void crpc_close(struct crpc_session *s);
 
 /**

@@ -132,18 +132,24 @@ class NetBarrier {
   bool StartExperiment() { return Barrier(); }
 
   bool EndExperiment(std::vector<work_unit> &w, double *offered_rps,
-                     double *rps) {
+                     double *rps, double *dps_cli, double *dps_ser) {
     if (is_leader_) {
       for (auto &c : conns) {
-        double rem_offered_rps, rem_rps;
+        double rem_offered_rps, rem_rps, rem_dps_cli, rem_dps_ser;
         BUG_ON(c->ReadFull(&rem_offered_rps, sizeof(rem_offered_rps)) <= 0);
         BUG_ON(c->ReadFull(&rem_rps, sizeof(rem_rps)) <= 0);
+	BUG_ON(c->ReadFull(&rem_dps_cli, sizeof(rem_dps_cli)) <= 0);
+	BUG_ON(c->ReadFull(&rem_dps_ser, sizeof(rem_dps_ser)) <= 0);
         *offered_rps += rem_offered_rps;
         *rps += rem_rps;
+	*dps_cli += rem_dps_cli;
+	*dps_ser += rem_dps_ser;
       }
     } else {
       BUG_ON(conns[0]->WriteFull(offered_rps, sizeof(*offered_rps)) <= 0);
       BUG_ON(conns[0]->WriteFull(rps, sizeof(*rps)) <= 0);
+      BUG_ON(conns[0]->WriteFull(dps_cli, sizeof(*dps_cli)) <= 0);
+      BUG_ON(conns[0]->WriteFull(dps_ser, sizeof(*dps_ser)) <= 0);
     }
     GatherSamples(w);
     BUG_ON(!Barrier());
@@ -395,7 +401,8 @@ std::vector<work_unit> ClientWorker(
 }
 
 std::vector<work_unit> RunExperiment(
-    int threads, double *reqs_per_sec, double *cpu_usage,
+    int threads, double *reqs_per_sec, double *drops_per_sec_client,
+    double *drops_per_sec_server, double *cpu_usage,
     std::function<std::vector<work_unit>()> wf) {
   // Create one TCP connection per thread.
   std::vector<std::unique_ptr<rt::RpcClient>> conns;
@@ -460,6 +467,17 @@ std::vector<work_unit> RunExperiment(
   double elapsed = duration_cast<sec>(finish - start).count();
   if (reqs_per_sec != nullptr)
     *reqs_per_sec = static_cast<double>(w.size()) / elapsed * 1000000;
+
+  *drops_per_sec_client = 0;
+  *drops_per_sec_server = 0;
+  for (auto &c : conns) {
+    *drops_per_sec_client += c->DroppedClient();
+    *drops_per_sec_server += c->DroppedServer();
+  }
+
+  *drops_per_sec_client = *drops_per_sec_client / elapsed * 1000000;
+  *drops_per_sec_server = *drops_per_sec_server / elapsed * 1000000;
+
   uint64_t idle = u2.idle - u1.idle;
   uint64_t busy = u2.busy - u1.busy;
   if (cpu_usage != nullptr)
@@ -469,7 +487,7 @@ std::vector<work_unit> RunExperiment(
 }
 
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
-                      double cpu_usage) {
+                      double dps_cli, double dps_ser, double cpu_usage) {
   std::sort(w.begin(), w.end(), [](const work_unit &s1, work_unit &s2) {
     return s1.duration_us < s2.duration_us;
   });
@@ -500,16 +518,17 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
              //"#threads,offered_rps,rps,cpu_usage,samples,min,mean,p90,p99,p999,p9999,max"
              //<< std::endl
       << std::setprecision(4) << std::fixed << threads * total_agents << ","
-      << offered_rps << "," << rps << "," << cpu_usage << "," << w.size() << ","
-      << min << "," << mean << "," << p50 << "," << p90 << "," << p99 << ","
-      << p999 << "," << p9999 << "," << max << "," << timex << "," << mean_win
-      << "," << mean_que << std::endl;
+      << offered_rps << "," << rps << "," << dps_cli << "," << dps_ser << ","
+      << cpu_usage << "," << w.size() << "," << min << "," << mean << ","
+      << p50 << "," << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
+      << max << "," << mean_win << "," << mean_que << std::endl;
 }
 
 void SteadyStateExperiment(int threads, double offered_rps,
                            double service_time) {
-  double rps, cpu_usage;
-  std::vector<work_unit> w = RunExperiment(threads, &rps, &cpu_usage, [=] {
+  double rps, cpu_usage, dps_cli, dps_ser;
+  std::vector<work_unit> w = RunExperiment(threads, &rps, &dps_cli, &dps_ser,
+					   &cpu_usage, [=] {
     std::mt19937 rg(rand());
     std::mt19937 dg(rand());
     std::exponential_distribution<double> rd(
@@ -519,10 +538,10 @@ void SteadyStateExperiment(int threads, double offered_rps,
   });
 
   if (b) {
-    if (!b->EndExperiment(w, &offered_rps, &rps)) return;
+    if (!b->EndExperiment(w, &offered_rps, &rps, &dps_cli, &dps_ser)) return;
   }
   // Print the results.
-  PrintStatResults(w, offered_rps, rps, cpu_usage);
+  PrintStatResults(w, offered_rps, rps, dps_cli, dps_ser, cpu_usage);
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {
@@ -539,11 +558,16 @@ void calculate_rates() {
   max = 10.0 * 1000000.0 / (st + 0.5);
   incr = max / 40.0;
   start = incr;
-
+/*
   for (double l = start; l <= max; l += incr)
     offered_loads.push_back(l / (double)total_agents);
 
   for (double l = max + incr; l <= 10 * max; l += max)
+    offered_loads.push_back(l / (double)total_agents);
+*/
+  for (double l = 50000; l <= 2000000; l += 50000)
+    offered_loads.push_back(l / (double)total_agents);
+  for (double l = 2500000; l <= 8000000; l += 500000)
     offered_loads.push_back(l / (double)total_agents);
 }
 
