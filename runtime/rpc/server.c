@@ -322,13 +322,13 @@ static void srpc_sender(void *arg)
 			/* try local list */
 			wakes = srpc_choose_drained_session(core_id);
 
-			/* try to steal from other core */ /*
+			/* try to steal from other core */
 			i = 0;
 			while (!wakes && i <= max_cores) {
 				if (i != core_id)
 					wakes = srpc_choose_drained_session(i);
 				i++;
-			}*/
+			}
 		}
 
 		if (wakes) {
