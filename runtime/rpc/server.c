@@ -17,15 +17,36 @@
 
 /* the maximum supported window size */
 #define SRPC_MAX_WINDOW		64
+/* the minimum runtime queuing delay */
+#define SRPC_MIN_DELAY_US	20
+/* the maximum runtime queuing delay */
+#define SRPC_MAX_DELAY_US	60
 
 /* the handler function for each RPC */
 static srpc_fn_t srpc_handler;
 
+/* drained session list */
+struct srpc_drained_ {
+	spinlock_t lock;
+	struct list_head list;
+	void *pad[5];
+};
+
+BUILD_ASSERT(sizeof(struct srpc_drained_) == CACHE_LINE_SIZE);
+
+static struct srpc_drained_ srpc_drained[NCPU]
+		__attribute__((aligned(CACHE_LINE_SIZE)));
+
 struct srpc_session {
 	tcpconn_t		*c;
+	struct list_node	drained_link;
+	bool			is_drained;
+	/* drained_list's core number. -1 if not in the drained list */
+	int			drained_core;
+	bool			is_linked;
+	bool			need_winupdate;
 	waitgroup_t		send_waiter;
-	bool			probe_pending;
-	bool			probe_accepted;
+	uint32_t		win;
 
 	/* shared state between receiver and sender */
 	DEFINE_BITMAP(avail_slots, SRPC_MAX_WINDOW);
@@ -59,6 +80,53 @@ static void srpc_put_slot(struct srpc_session *s, int slot)
 	bitmap_atomic_set(s->avail_slots, slot);
 }
 
+static int srpc_winupdate(struct srpc_session *s)
+{
+	struct srpc_hdr shdr;
+	int ret;
+
+	/* craft the response header */
+	shdr.magic = RPC_RESP_MAGIC;
+	shdr.op = RPC_OP_WINUPDATE;
+	shdr.len = 0;
+	shdr.win = s->win;
+
+	/* send the packet */
+	ret = tcp_write_full(s->c, &shdr, sizeof(shdr));
+	if (unlikely(ret < 0))
+		return ret;
+
+	return 0;
+}
+
+static void srpc_update_window(struct srpc_session *s)
+{
+	uint64_t us = runtime_standing_queue_us();
+	float alpha;
+
+	/* Don't update the window if session is on the
+	 * drained list */
+	if (s->is_linked) {
+		assert(s->win == 0);
+		return;
+	}
+
+	/* update window (currently DCTCP-like) */
+	if (us >= SRPC_MIN_DELAY_US) {
+		us = MIN(SRPC_MAX_DELAY_US, us);
+		alpha = (float)(us - SRPC_MIN_DELAY_US) /
+			(float)(SRPC_MAX_DELAY_US - SRPC_MIN_DELAY_US);
+		s->win = (float)s->win * (1.0 - alpha / 2.0);
+	} else {
+		s->win++;
+	}
+
+	/* clamp to supported values */
+	/* now we allow zero window */
+	s->win = MAX(s->win, 0);
+	s->win = MIN(s->win, SRPC_MAX_WINDOW - 1);
+}
+
 static void srpc_worker(void *arg)
 {
 	struct srpc_ctx *c = (struct srpc_ctx *)arg;
@@ -80,7 +148,9 @@ static int srpc_recv_one(struct srpc_session *s)
 {
 	struct crpc_hdr chdr;
 	int idx, ret;
+	thread_t *th;
 
+again:
 	/* read the client header */
 	ret = tcp_read_full(s->c, &chdr, sizeof(chdr));
 	if (unlikely(ret <= 0)) {
@@ -99,81 +169,57 @@ static int srpc_recv_one(struct srpc_session *s)
 			 chdr.len, SRPC_BUF_SIZE);
 		return -EINVAL;
 	}
-	if (unlikely(chdr.op >= RPC_OP_MAX)) {
+
+	switch (chdr.op) {
+	case RPC_OP_CALL:
+		/* reserve a slot */
+		idx = srpc_get_slot(s);
+		if (unlikely(idx < 0)) {
+			log_warn("srpc: client tried to use more than %d slots",
+				 SRPC_MAX_WINDOW);
+			return -ENOENT;
+		}
+
+		/* retrieve the payload */
+		ret = tcp_read_full(s->c, s->slots[idx]->req_buf, chdr.len);
+		if (unlikely(ret <= 0)) {
+			srpc_put_slot(s, idx);
+			if (ret == 0)
+				return -EIO;
+			return ret;
+		}
+		s->slots[idx]->req_len = chdr.len;
+		s->slots[idx]->resp_len = 0;
+		ret = thread_spawn(srpc_worker, s->slots[idx]);
+		BUG_ON(ret);
+		break;
+
+	case RPC_OP_WINUPDATE:
+		if (unlikely(chdr.len != 0)) {
+			log_warn("srpc: winupdate has nonzero len");
+			return -EINVAL;
+		}
+		assert(chdr.len == 0);
+
+		spin_lock_np(&s->lock);
+		th = s->sender_th;
+		s->sender_th = NULL;
+		s->need_winupdate = true;
+		spin_unlock_np(&s->lock);
+
+		if (th)
+			thread_ready(th);
+
+		goto again;
+	default:
 		log_warn("srpc: got invalid op %d", chdr.op);
 		return -EINVAL;
 	}
 
-	/* handle probe request */
-	if (chdr.op == RPC_OP_PROBE) {
-		thread_t *th;
-
-		spin_lock_np(&s->lock);
-		s->probe_pending = true;
-		s->probe_accepted = runtime_queue_us() <= 20;
-		th = s->sender_th;
-		s->sender_th = NULL;
-		spin_unlock_np(&s->lock);
-		if (th)
-			thread_ready(th);
-
-		/* trim payload if the probe wasn't accepted */
-		if (!s->probe_accepted) {
-			char buf[SRPC_BUF_SIZE];
-			ret = tcp_read_full(s->c, buf, chdr.len);
-			if (unlikely(ret <= 0)) {
-				if (ret == 0)
-					return -EIO;
-				return ret;
-			}
-			return 0;
-		}
-	}
-
-	/* reserve a slot */
-	idx = srpc_get_slot(s);
-	if (unlikely(idx < 0)) {
-		log_warn("srpc: client tried to use more than %d slots",
-			 SRPC_MAX_WINDOW);
-		return -ENOENT;
-	}
-
-	/* retrieve the payload */
-	ret = tcp_read_full(s->c, s->slots[idx]->req_buf, chdr.len);
-	if (unlikely(ret <= 0)) {
-		srpc_put_slot(s, idx);
-		if (ret == 0)
-			return -EIO;
-		return ret;
-	}
-
-	s->slots[idx]->req_len = chdr.len;
-	s->slots[idx]->resp_len = 0;
-	ret = thread_spawn(srpc_worker, s->slots[idx]);
-	BUG_ON(ret);
 	return ret;
 }
 
-#define SRPC_RTT	10
-#define SRPC_PROBE_RPS	200000
-
-static atomic_t srpc_conn_count;
-
-static uint64_t srpc_calculate_probe_us(void)
-{
-	/*
-	 * TODO: Could adjust based on actual observed probe rate, not number
-	 * of connections. Should also subtract RTT estimate from delay.
-	 */
-
-	uint64_t delay = ONE_SECOND / SRPC_PROBE_RPS *
-			 atomic_read(&srpc_conn_count);
-	if (delay < SRPC_RTT)
-		return 0;
-	return delay - SRPC_RTT;
-}
-
-static int srpc_send_call(struct srpc_session *s, struct srpc_ctx *c)
+static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 {
 	struct iovec vec[2];
 	struct srpc_hdr shdr;
@@ -187,9 +233,7 @@ static int srpc_send_call(struct srpc_session *s, struct srpc_ctx *c)
 	shdr.magic = RPC_RESP_MAGIC;
 	shdr.op = RPC_OP_CALL;
 	shdr.len = c->resp_len;
-	shdr.delay_us = runtime_queue_us();
-	shdr.probe_us = srpc_calculate_probe_us();
-	shdr.accepted = true;
+	shdr.win = s->win;
 
 	/* initialize the SG vector */
 	vec[0].iov_base = &shdr;
@@ -206,40 +250,51 @@ static int srpc_send_call(struct srpc_session *s, struct srpc_ctx *c)
 	return 0;
 }
 
-static int srpc_send_probe(struct srpc_session *s, bool accept)
+static struct srpc_session *srpc_choose_drained_session(int core_id)
 {
-	struct srpc_hdr shdr;
-	ssize_t ret;
+	struct srpc_session *ret = NULL;
 
-	/* initialize the header */
-	shdr.magic = RPC_RESP_MAGIC;
-	shdr.op = RPC_OP_PROBE;
-	shdr.len = 0;
-	shdr.delay_us = runtime_queue_us();
-	shdr.probe_us = srpc_calculate_probe_us();
-	shdr.accepted = accept;
+	assert(core_id >= 0);
+	assert(core_id < runtime_max_cores());
 
-	/* send the request */
-	ret = tcp_write_full(s->c, &shdr, sizeof(shdr));
-	if (unlikely(ret < 0))
-		return ret;
+	if (list_empty(&srpc_drained[core_id].list))
+		return NULL;
 
-	assert(ret == sizeof(shdr));
-	return 0;
+	spin_lock_np(&srpc_drained[core_id].lock);
+	if (list_empty(&srpc_drained[core_id].list)) {
+		spin_unlock_np(&srpc_drained[core_id].lock);
+		return NULL;
+	}
+
+	ret = list_pop(&srpc_drained[core_id].list,
+		       struct srpc_session,
+		       drained_link);
+	assert(ret->drained_core == core_id);
+	assert(ret->is_linked);
+	ret->is_linked = false;
+	spin_unlock_np(&srpc_drained[core_id].lock);
+
+	return ret;
 }
 
 static void srpc_sender(void *arg)
 {
 	DEFINE_BITMAP(tmp, SRPC_MAX_WINDOW);
 	struct srpc_session *s = (struct srpc_session *)arg;
+	struct srpc_session *wakes;
 	int ret, i;
-	bool sleep, probe, accepted;
+	bool sleep;
+	bool need_winupdate;
+	thread_t *th;
+	int max_cores = runtime_max_cores();
+	unsigned int core_id;
 
 	while (true) {
 		/* find slots that have completed */
 		spin_lock_np(&s->lock);
 		while (true) {
-			sleep = !s->closed && !s->probe_pending &&
+			need_winupdate = s->need_winupdate;
+			sleep = !s->closed && !need_winupdate &&
 				bitmap_popcount(s->completed_slots,
 						SRPC_MAX_WINDOW) == 0;
 			if (!sleep) {
@@ -256,27 +311,85 @@ static void srpc_sender(void *arg)
 		}
 		memcpy(tmp, s->completed_slots, sizeof(tmp));
 		bitmap_init(s->completed_slots, SRPC_MAX_WINDOW, false);
-		probe = s->probe_pending;
-		s->probe_pending = false;
-		accepted = s->probe_accepted;
+		s->need_winupdate = false;
 		spin_unlock_np(&s->lock);
+		srpc_update_window(s);
 
-		/* send a probe response if requested */
-		/* TODO: okay to only send reject messages? */
-		if (probe && !accepted) {
-			ret = srpc_send_probe(s, accepted);
+		/* decide whether and which session to wake up */
+		core_id = 0; //get_current_affinity();
+		wakes = NULL;
+		if (s->win > 1) {
+			/* try local list */
+			wakes = srpc_choose_drained_session(core_id);
+
+			/* try to steal from other core */ /*
+			i = 0;
+			while (!wakes && i <= max_cores) {
+				if (i != core_id)
+					wakes = srpc_choose_drained_session(i);
+				i++;
+			}*/
+		}
+
+		if (wakes) {
+			s->win--;
+			assert(s->win >= 1);
+		}
+
+		if (s == wakes) {
+			s->win++;
+			wakes = NULL;
+		}
+
+		/* send a response for each completed slot */
+		bitmap_for_each_set(tmp, SRPC_MAX_WINDOW, i) {
+			ret = srpc_send_one(s, s->slots[i]);
+			if (unlikely(ret)) {
+				bitmap_atomic_or(s->avail_slots, tmp,
+						 SRPC_MAX_WINDOW);
+				goto close;
+			}
+			srpc_put_slot(s, i);
+		}
+
+		/* Send WINUPDATE message */
+		if (need_winupdate) {
+			// Give one window to the session who just got up
+			if (s->drained_core >= 0)
+				s->win = 1;
+			s->drained_core = -1;
+			ret = srpc_winupdate(s);
 			if (unlikely(ret))
 				goto close;
 		}
 
-		/* send a response for each completed slot */
-		ret = 0;
-		bitmap_for_each_set(tmp, SRPC_MAX_WINDOW, i) {
-			ret = srpc_send_call(s, s->slots[i]);
-			srpc_put_slot(s, i);
+		/* add to the drained list if (1) window becomes zero,
+		 * (2) s is not in the list already,
+		 * (3) it has no outstanding requests */
+		if (s->win == 0 && s->drained_core == -1 &&
+		    bitmap_popcount(s->avail_slots, SRPC_MAX_WINDOW) ==
+		    SRPC_MAX_WINDOW) {
+			spin_lock_np(&srpc_drained[core_id].lock);
+			assert(!s->is_linked);
+			list_add_tail(&srpc_drained[core_id].list,
+				      &s->drained_link);
+			s->is_linked = true;
+			spin_unlock_np(&srpc_drained[core_id].lock);
+			s->drained_core = core_id;
 		}
-		if (unlikely(ret))
-			goto close;
+
+		/* wake up the session */
+		if (wakes) {
+			spin_lock_np(&wakes->lock);
+			assert(wakes->win == 0);
+			th = wakes->sender_th;
+			wakes->sender_th = NULL;
+			wakes->need_winupdate = true;
+			spin_unlock_np(&wakes->lock);
+
+			if (th)
+				thread_ready(th);
+		}
 	}
 
 close:
@@ -289,7 +402,6 @@ close:
 		s->sender_th = thread_self();
 		thread_park_and_unlock_np(&s->lock);
 		spin_lock_np(&s->lock);
-		s->sender_th = NULL;
 	}
 	spin_unlock_np(&s->lock);
 
@@ -310,12 +422,12 @@ static void srpc_server(void *arg)
 	thread_t *th;
 	int ret;
 
-	atomic_inc(&srpc_conn_count);
-
 	s = smalloc(sizeof(*s));
 	BUG_ON(!s);
 	memset(s, 0, sizeof(*s));
 	s->c = c;
+	s->win = 0;
+	s->drained_core = -1;
 	bitmap_init(s->avail_slots, SRPC_MAX_WINDOW, true);
 	waitgroup_init(&s->send_waiter);
 	waitgroup_add(&s->send_waiter, 1);
@@ -334,12 +446,25 @@ static void srpc_server(void *arg)
 	s->sender_th = NULL;
 	s->closed = true;
 	spin_unlock_np(&s->lock);
+
 	if (th)
 		thread_ready(th);
 
 	waitgroup_wait(&s->send_waiter);
-	atomic_dec(&srpc_conn_count);
 	tcp_close(c);
+
+	/* remove the session from the drained list */
+	if (s->drained_core >= 0) {
+		spin_lock_np(&srpc_drained[s->drained_core].lock);
+		if (s->is_linked) {
+			list_del_from(&srpc_drained[s->drained_core].list,
+				      &s->drained_link);
+			s->is_linked = false;
+		}
+		spin_unlock_np(&srpc_drained[s->drained_core].lock);
+		s->drained_core = -1;
+	}
+
 	sfree(s);
 }
 
@@ -349,6 +474,12 @@ static void srpc_listener(void *arg)
 	tcpconn_t *c;
 	tcpqueue_t *q;
 	int ret;
+	int i;
+
+	for (i = 0 ; i < NCPU ; ++i) {
+		spin_lock_init(&srpc_drained[i].lock);
+		list_head_init(&srpc_drained[i].list);
+	}
 
 	laddr.ip = 0;
 	laddr.port = SRPC_PORT;

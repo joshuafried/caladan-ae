@@ -8,7 +8,6 @@
 #include <base/atomic.h>
 #include <runtime/net.h>
 #include <runtime/tcp.h>
-#include <runtime/sync.h>
 
 
 /*
@@ -39,26 +38,11 @@ extern int srpc_enable(srpc_fn_t handler);
  * Client API
  */
 
-#define CRPC_QLEN		16
-
 struct crpc_session {
 	tcpconn_t		*c;
-	mutex_t			lock;
-	uint64_t		win_update_ts;
+	uint64_t		win_timestamp;
 	uint32_t		win_avail;
-	uint32_t		win_used;
-	bool			probe_sent;
-	uint64_t		probe_wait_ts;
-
-	/* a queue of pending RPC requests */
-	uint32_t		head;
-	uint32_t		tail;
-	void			*bufs[CRPC_QLEN];
-	size_t			lens[CRPC_QLEN];
-
-	/* stats */
-	uint64_t		dropped_client;
-	uint64_t		dropped_server;
+	atomic_t		win_used;
 };
 
 extern ssize_t crpc_send_one(struct crpc_session *s,
@@ -66,10 +50,8 @@ extern ssize_t crpc_send_one(struct crpc_session *s,
 extern ssize_t crpc_recv_one(struct crpc_session *s,
 			     void *buf, size_t len);
 extern int crpc_open(struct netaddr raddr, struct crpc_session **sout);
-extern uint32_t crpc_win_avail(struct crpc_session *s);
-extern uint64_t crpc_dropped_client(struct crpc_session *s);
-extern uint64_t crpc_dropped_server(struct crpc_session *s);
 extern void crpc_close(struct crpc_session *s);
+extern uint32_t crpc_win_avail(struct crpc_session *s);
 
 /**
  * crpc_is_busy - is the session busy (unable to accept requests right now)
@@ -77,6 +59,5 @@ extern void crpc_close(struct crpc_session *s);
  */
 static inline bool crpc_is_busy(struct crpc_session *s)
 {
-	return false;
-	//return ACCESS_ONCE(s->win_avail) <= atomic_read(&s->win_used);
+	return ACCESS_ONCE(s->win_avail) <= atomic_read(&s->win_used);
 }

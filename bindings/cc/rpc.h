@@ -48,14 +48,6 @@ class RpcClient {
     return crpc_win_avail(s_);
   }
 
-  uint64_t DroppedClient() {
-    return crpc_dropped_client(s_);
-  }
-
-  uint64_t DroppedServer() {
-    return crpc_dropped_server(s_);
-  }
-
   // Shuts down the RPC connection.
   int Shutdown(int how) { return tcp_shutdown(s_->c, how); }
   // Aborts the RPC connection.
