@@ -13,6 +13,9 @@
 #include "util.h"
 #include "proto.h"
 
+#define MAX_CLIENT_QDELAY_US 50
+#define CRPC_CREDIT_LIFETIME_US 20
+
 /**
  * crpc_send_winupdate - send WINUPDATE message to update window size
  * @s: the RPC session to update the window
@@ -39,6 +42,103 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	return 0;
 }
 
+static ssize_t crpc_send_raw(struct crpc_session *s,
+			     const void *buf, size_t len)
+{
+	struct iovec vec[2];
+	struct crpc_hdr chdr;
+	ssize_t ret;
+
+	/* initialize the header */
+	chdr.magic = RPC_REQ_MAGIC;
+	chdr.op = RPC_OP_CALL;
+	chdr.len = len;
+	chdr.demand = s->head - s->tail;
+
+	/* initialize the SG vector */
+	vec[0].iov_base = &chdr;
+	vec[0].iov_len = sizeof(chdr);
+	vec[1].iov_base = (void *)buf;
+	vec[1].iov_len = len;
+
+	/* send the request */
+	ret = tcp_writev_full(s->c, vec, 2);
+	if (unlikely(ret < 0))
+		return ret;
+	assert(ret == sizeof(chdr) + len);
+
+	return len;
+}
+
+static void crpc_drain_queue(struct crpc_session *s)
+{
+	ssize_t ret;
+	int pos;
+	uint64_t now;
+
+	assert_mutex_held(&s->lock);
+
+	if (s->waiting_winupdate) {
+		return;
+	}
+
+	now = microtime();
+	/* remove the old requests */
+	while (s->head != s->tail) {
+		pos = s->tail % CRPC_QLEN;
+		if (now - s->qts[pos] <= MAX_CLIENT_QDELAY_US)
+			break;
+		s->tail++;
+	}
+
+	if (s->head == s->tail)
+		return;
+
+	/* initialize the window */
+	if (s->win_timestamp == 0) {
+		crpc_send_winupdate(s);
+		s->waiting_winupdate = true;
+		return;
+	}
+
+	/* try to drain queued requests: FIFO */
+	while (s->head != s->tail) {
+		if (s->win_used >= s->win_avail)
+			break;
+
+		pos = s->tail++ % CRPC_QLEN;
+		if (now - s->qts[pos] > MAX_CLIENT_QDELAY_US)
+			continue;
+		ret = crpc_send_raw(s, s->bufs[pos], s->lens[pos]);
+		if (ret < 0)
+			break;
+		assert(ret == s->lens[pos]);
+		s->win_used++;
+	}
+}
+
+static bool crpc_enqueue_one(struct crpc_session *s,
+			     const void *buf, size_t len)
+{
+	int pos;
+
+	assert_mutex_held(&s->lock);
+
+	/* if the queue is full, drop tail */
+	if (s->head - s->tail >= CRPC_QLEN)
+		s->tail++;
+
+	pos = s->head++ % CRPC_QLEN;
+	memcpy(s->bufs[pos], buf, len);
+	s->lens[pos] = len;
+	s->qts[pos] = microtime();
+
+	if (unlikely(s->head - s->tail < 0))
+		panic("overflow!\n");
+
+	return true;
+}
+
 /**
  * crpc_send_one - sends one RPC request
  * @s: the RPC session to send to
@@ -55,41 +155,38 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 ssize_t crpc_send_one(struct crpc_session *s,
 		      const void *buf, size_t len)
 {
-	struct iovec vec[2];
-	struct crpc_hdr chdr;
 	ssize_t ret;
+	uint64_t now = microtime();
 
 	/* implementation is currently limited to a maximum payload size */
 	if (unlikely(len > SRPC_BUF_SIZE))
 		return -E2BIG;
 
-	/* check the window */
-	if (atomic_read(&s->win_used) >= s->win_avail) {
-		/* if window information is stale, issue winupdate req */
-		if (s->win_timestamp == 0) {
-			ACCESS_ONCE(s->win_timestamp) = microtime();
-			crpc_send_winupdate(s);
-		}
+	mutex_lock(&s->lock);
+
+	/* TODO: expire stale credits */
+	if (s->win_timestamp > 0 &&
+	    now - s->win_timestamp > CRPC_CREDIT_LIFETIME_US &&
+	    s->win_used < s->win_avail) {
+		s->win_avail = s->win_used;
+		s->win_timestamp = 0;
+	}
+
+	/* hot path, just send */
+	if (s->win_used < s->win_avail && s->head == s->tail) {
+		s->win_used++;
+		ret = crpc_send_raw(s, buf, len);
+		mutex_unlock(&s->lock);
+		return ret;
+	}
+
+	/* cold path, enqueue request and drain the queue */
+	if (!crpc_enqueue_one(s, buf, len)) {
+		mutex_unlock(&s->lock);
 		return -ENOBUFS;
 	}
-	atomic_inc(&s->win_used);
-
-	/* construct the client header */
-	chdr.magic = RPC_REQ_MAGIC;
-	chdr.op = RPC_OP_CALL;
-	chdr.len = len;
-
-	/* initialize the SG vector */
-	vec[0].iov_base = &chdr;
-	vec[0].iov_len = sizeof(chdr);
-	vec[1].iov_base = (void *)buf;
-	vec[1].iov_len = len;
-
-	/* send the request */
-	ret = tcp_writev_full(s->c, vec, 2);
-	if (unlikely(ret < 0))
-		return ret;
-	assert(ret == sizeof(chdr) + len);
+	crpc_drain_queue(s);
+	mutex_unlock(&s->lock);
 
 	return len;
 }
@@ -130,28 +227,37 @@ again:
 
 	switch (shdr.op) {
 	case RPC_OP_CALL:
-		/* receive the payload */
+		/* read the payload */
 		ret = tcp_read_full(s->c, buf, shdr.len);
 		if (unlikely(ret <= 0))
 			return ret;
 		assert(ret == shdr.len);
 
-		/* adjust the window */
-		assert(atomic_read(&s->win_used) > 0);
-		atomic_dec(&s->win_used);
-		ACCESS_ONCE(s->win_avail) = shdr.win;
-		break;
-
-	case RPC_OP_WINUPDATE:
 		/* update the window */
+		mutex_lock(&s->lock);
+		assert(s->win_used > 0);
+		s->win_used--;
+		s->win_avail = shdr.win;
+		s->win_timestamp = microtime();
+		s->waiting_winupdate = false;
+		crpc_drain_queue(s);
+		mutex_unlock(&s->lock);
+		break;
+	case RPC_OP_WINUPDATE:
 		if (unlikely(shdr.len != 0)) {
 			log_warn("crpc: winupdate has nonzero len");
 			return -EINVAL;
 		}
 		assert(shdr.len == 0);
-		ACCESS_ONCE(s->win_avail) = shdr.win;
-		goto again;
 
+		/* update the window */
+		mutex_lock(&s->lock);
+		s->win_avail = shdr.win;
+		s->win_timestamp = microtime();
+		s->waiting_winupdate = false;
+		crpc_drain_queue(s);
+		mutex_unlock(&s->lock);
+		goto again;
 	default:
 		log_warn("crpc: got invalid op %d", shdr.op);
 		return -EINVAL;
@@ -174,7 +280,7 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout)
 	struct netaddr laddr;
 	struct crpc_session *s;
 	tcpconn_t *c;
-	int ret;
+	int i, ret;
 
 	/* set up ephemeral IP and port */
 	laddr.ip = 0;
@@ -192,14 +298,26 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout)
 		tcp_close(c);
 		return -ENOMEM;
 	}
+	memset(s, 0, sizeof(*s));
+
+	for (i = 0; i < CRPC_QLEN; ++i) {
+		s->bufs[i] = smalloc(SRPC_BUF_SIZE);
+		if (!s->bufs[i])
+			goto fail;
+	}
 
 	s->c = c;
-	s->win_avail = 0;
-	s->win_timestamp = 0;
-	atomic_write(&s->win_used, 0);
+	mutex_init(&s->lock);
 	*sout = s;
 
 	return 0;
+
+fail:
+	tcp_close(c);
+	for (i = i - 1; i >= 0; i--)
+		sfree(s->bufs[i]);
+	sfree(s);
+	return -ENOMEM;
 }
 
 uint32_t crpc_win_avail(struct crpc_session *s)
