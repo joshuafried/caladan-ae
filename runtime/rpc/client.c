@@ -31,6 +31,7 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_WINUPDATE;
 	chdr.len = 0;
+	chdr.demand = s->head - s->tail;
 
 	/* send the request */
 	ret = tcp_write_full(s->c, &chdr, sizeof(chdr));
@@ -107,8 +108,6 @@ static void crpc_drain_queue(struct crpc_session *s)
 			break;
 
 		pos = s->tail++ % CRPC_QLEN;
-		if (now - s->qts[pos] > MAX_CLIENT_QDELAY_US)
-			continue;
 		ret = crpc_send_raw(s, s->bufs[pos], s->lens[pos]);
 		if (ret < 0)
 			break;
