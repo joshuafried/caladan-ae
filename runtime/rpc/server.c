@@ -105,7 +105,7 @@ static int srpc_winupdate(struct srpc_session *s)
 
 static void srpc_update_window(struct srpc_session *s)
 {
-	uint64_t us = runtime_standing_queue_us();
+	uint64_t us = runtime_queue_us();
 	float alpha;
 
 	/* Don't update the window if session is on the
@@ -131,7 +131,8 @@ static void srpc_update_window(struct srpc_session *s)
 	s->win = MIN(s->win, SRPC_MAX_WINDOW - 1);
 
 	/* Revive the session if it is the last hope. */
-	if (unlikely(atomic_read(&srpc_num_sess) == 1) && s->win == 0)
+	if (s->win == 0 &&
+	    atomic_read(&srpc_num_sess) <= runtime_max_cores())
 		s->win++;
 }
 
@@ -333,12 +334,11 @@ static void srpc_sender(void *arg)
 			/* try local list */
 			wakes = srpc_choose_drained_session(core_id);
 
-			/* try to steal from other core */
-			i = 0;
-			while (!wakes && i <= max_cores) {
-				if (i != core_id)
-					wakes = srpc_choose_drained_session(i);
-				i++;
+			/* try to steal from other cores */
+			i = (core_id + 1) % max_cores;
+			while (!wakes && i != core_id) {
+				wakes = srpc_choose_drained_session(i);
+				i = (i + 1) % max_cores;
 			}
 		}
 
