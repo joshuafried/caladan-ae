@@ -414,6 +414,7 @@ close:
 		s->sender_th = thread_self();
 		thread_park_and_unlock_np(&s->lock);
 		spin_lock_np(&s->lock);
+		s->sender_th = NULL;
 	}
 	spin_unlock_np(&s->lock);
 
