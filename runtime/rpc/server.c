@@ -51,6 +51,7 @@ struct srpc_session {
 	bool			need_winupdate;
 	waitgroup_t		send_waiter;
 	uint32_t		win;
+	uint32_t		demand;
 
 	/* shared state between receiver and sender */
 	DEFINE_BITMAP(avail_slots, SRPC_MAX_WINDOW);
@@ -132,7 +133,7 @@ static void srpc_update_window(struct srpc_session *s)
 
 	/* Revive the session if it is the last hope. */
 	if (s->win == 0 &&
-	    atomic_read(&srpc_num_sess) <= runtime_max_cores())
+	    atomic_read(&srpc_num_sess) <= 1)
 		s->win++;
 }
 
@@ -201,6 +202,7 @@ again:
 		s->slots[idx]->resp_len = 0;
 		ret = thread_spawn(srpc_worker, s->slots[idx]);
 		BUG_ON(ret);
+		s->demand = chdr.demand;
 		break;
 
 	case RPC_OP_WINUPDATE:
@@ -215,6 +217,7 @@ again:
 		s->sender_th = NULL;
 		s->need_winupdate = true;
 		spin_unlock_np(&s->lock);
+		s->demand = chdr.demand;
 
 		if (th)
 			thread_ready(th);
@@ -455,8 +458,8 @@ static void srpc_server(void *arg)
 	s = smalloc(sizeof(*s));
 	BUG_ON(!s);
 	memset(s, 0, sizeof(*s));
+
 	s->c = c;
-	s->win = 0;
 	s->drained_core = -1;
 	bitmap_init(s->avail_slots, SRPC_MAX_WINDOW, true);
 	waitgroup_init(&s->send_waiter);
