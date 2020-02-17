@@ -489,7 +489,7 @@ std::vector<work_unit> RunExperiment(
 
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
                       double dps_cli, double dps_ser, double cpu_usage) {
-  std::sort(w.begin(), w.end(), [](const work_unit &s1, work_unit &s2) {
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
     return s1.duration_us < s2.duration_us;
   });
   double sum = std::accumulate(
@@ -505,15 +505,25 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
   double min = w[0].duration_us;
   double max = w[w.size() - 1].duration_us;
 
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
+    return s1.window < s2.window;
+  });
   double sum_win = std::accumulate(
       w.begin(), w.end(), 0.0,
       [](double s, const work_unit &c) { return s + c.window; });
   double mean_win = sum_win / w.size();
+  double p1_win = w[count * 0.01].window;
+  double p99_win = w[count * 0.99].window;
 
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
+    return s1.queueing < s2.queueing;
+  });
   double sum_que = std::accumulate(
       w.begin(), w.end(), 0.0,
       [](double s, const work_unit &c) { return s + c.queueing; });
   double mean_que = sum_que / w.size();
+  double p1_que = w[count * 0.01].queueing;
+  double p99_que = w[count * 0.99].queueing;
 
   std::cout  //<<
              //"#threads,offered_rps,rps,cpu_usage,samples,min,mean,p90,p99,p999,p9999,max"
@@ -522,7 +532,8 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << offered_rps << "," << rps << "," << dps_cli << "," << dps_ser << ","
       << cpu_usage << "," << w.size() << "," << min << "," << mean << ","
       << p50 << "," << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
-      << max << "," << mean_win << "," << mean_que << std::endl;
+      << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
+      << p1_que << "," << mean_que << "," << p99_que << std::endl;
 }
 
 void SteadyStateExperiment(int threads, double offered_rps,
@@ -618,6 +629,9 @@ int main(int argc, char *argv[]) {
       std::cerr << "usage: [cfg_file] agent [ip_address] ..." << std::endl;
       return -EINVAL;
     }
+
+    if (argc > 4) offered_load = std::stod(argv[4], nullptr);
+
     ret = runtime_init(argv[1], AgentHandler, NULL);
     if (ret) {
       printf("failed to start runtime\n");
