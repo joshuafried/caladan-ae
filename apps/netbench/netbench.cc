@@ -52,6 +52,7 @@ constexpr uint64_t kIterationsPerUS = 69;  // 83
 constexpr uint64_t kWarmupUpSeconds = 5;
 
 std::vector<double> offered_loads;
+double offered_load;
 
 static SyntheticWorker *workers[NCPU];
 
@@ -558,17 +559,16 @@ void calculate_rates() {
   max = 10.0 * 1000000.0 / (st + 0.5);
   incr = max / 40.0;
   start = incr;
-/*
-  for (double l = start; l <= max; l += incr)
-    offered_loads.push_back(l / (double)total_agents);
 
-  for (double l = max + incr; l <= 10 * max; l += max)
-    offered_loads.push_back(l / (double)total_agents);
-*/
-  for (double l = 50000; l <= 2000000; l += 50000)
-    offered_loads.push_back(l / (double)total_agents);
-  for (double l = 2500000; l <= 8000000; l += 500000)
-    offered_loads.push_back(l / (double)total_agents);
+  if (offered_load > 0.0) {
+    offered_loads.push_back(offered_load / (double)total_agents);
+  } else  {
+    for (double l = start; l <= max; l += incr)
+      offered_loads.push_back(l / (double)total_agents);
+
+    for (double l = max + incr; l <= 10 * max; l += max)
+      offered_loads.push_back(l / (double)total_agents);
+  }
 }
 
 void AgentHandler(void *arg) {
@@ -644,6 +644,7 @@ int main(int argc, char *argv[]) {
   st = std::stod(argv[5], nullptr);
 
   if (argc > 6) total_agents += std::stoi(argv[6], nullptr, 0);
+  if (argc > 7) offered_load = std::stod(argv[7], nullptr);
 
   ret = runtime_init(argv[1], ClientHandler, NULL);
   if (ret) {
