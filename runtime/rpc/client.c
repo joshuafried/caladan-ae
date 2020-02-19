@@ -13,7 +13,7 @@
 #include "util.h"
 #include "proto.h"
 
-#define SLACK_DEMAND		2
+#define MIN_DEMAND		2
 #define MAX_CLIENT_QDELAY_US	100
 #define CRPC_CREDIT_LIFETIME_US	20
 
@@ -32,7 +32,7 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_WINUPDATE;
 	chdr.len = 0;
-	chdr.demand = s->head - s->tail + SLACK_DEMAND;
+	chdr.demand = MAX(s->head - s->tail, MIN_DEMAND);
 	s->last_demand = chdr.demand;
 
 	/* send the request */
@@ -56,7 +56,7 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_CALL;
 	chdr.len = len;
-	chdr.demand = s->head - s->tail + SLACK_DEMAND;
+	chdr.demand = MAX(s->head - s->tail, MIN_DEMAND);
 	s->last_demand = chdr.demand;
 
 	/* initialize the SG vector */
