@@ -146,7 +146,7 @@ void tcp_rtt_estimator(tcpconn_t *c, uint64_t mrtt_us) {
 		srtt = m << 3;
 		c->mdev_us = m << 1;
 	}
-	c->srtt_us = max(1U, srtt);
+	c->srtt_us = MAX(1U, srtt);
 }
 
 /**
