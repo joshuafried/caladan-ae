@@ -130,6 +130,7 @@ static void srpc_update_window(struct srpc_session *s)
 	/* now we allow zero window */
 	s->win = MAX(s->win, 0);
 	s->win = MIN(s->win, SRPC_MAX_WINDOW - 1);
+	s->win = MIN(s->win, s->demand);
 
 	/* Revive the session if it is the last hope. */
 	if (s->win == 0 &&
@@ -328,6 +329,9 @@ static void srpc_sender(void *arg)
 		bitmap_init(s->completed_slots, SRPC_MAX_WINDOW, false);
 		s->need_winupdate = false;
 		spin_unlock_np(&s->lock);
+		/* initialize the window to zero */
+		if (need_winupdate)
+			s->win = 0;
 		srpc_update_window(s);
 
 		/* decide whether and which session to wake up */
