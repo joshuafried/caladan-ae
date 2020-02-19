@@ -122,6 +122,34 @@ static void tcp_worker(void *arg)
 }
 
 /**
+ * From kernel implementation based on an algorithm from the SIGCOMM 88
+ * piece by Van Jacobson.
+ */
+
+void tcp_rtt_estimator(tcpconn_t *c, uint64_t mrtt_us) {
+	long m = mrtt_us;
+	uint32_t srtt = c->srtt_us;
+
+	if (srtt != 0) {
+		m -= (srtt >> 3);
+		srtt += m;
+		if (m < 0) {
+			m = -m;
+			m -= (c->mdev_us >> 2);
+			if (m > 0)
+				m >>= 3;
+		} else {
+			m -= (c->mdev_us >> 2);
+		}
+		c->mdev_us += m;
+	} else {
+		srtt = m << 3;
+		c->mdev_us = m << 1;
+	}
+	c->srtt_us = max(1U, srtt);
+}
+
+/**
  * tcp_conn_ack - removes acknowledged packets from TX queue
  * @c: the TCP connection to update
  * @freeq: a pointer to a list to store acknowledged buffers to later free
@@ -139,6 +167,13 @@ void tcp_conn_ack(tcpconn_t *c, struct list_head *freeq)
 	if (c->tx_exclusive)
 		return;
 
+	int64_t first_ackt, last_ackt;
+	uint32_t pkts_acked = 0;
+	long seq_rtt_us = -1L;
+	long ca_rtt_us = -1L;
+
+	first_ackt = 0;
+
 	/* dequeue buffers that are fully acknowledged */
 	while (true) {
 		m = list_top(&c->txq, struct mbuf, link);
@@ -147,8 +182,25 @@ void tcp_conn_ack(tcpconn_t *c, struct list_head *freeq)
 		if (wraps_gt(m->seg_end, c->pcb.snd_una))
 			break;
 
+		last_ackt = m->timestamp;
+		if (!first_ackt) {
+			first_ackt = last_ackt;
+		}
+
+		pkts_acked++;
+
 		list_pop(&c->txq, struct mbuf, link);
 		list_add_tail(freeq, &m->link);
+	}
+
+	if (likely(first_ackt)) {
+		uint64_t now = microtime();
+		seq_rtt_us = now - first_ackt;
+		ca_rtt_us = now - last_ackt;
+		if (c->min_rtt > ca_rtt_us)
+			c->min_rtt = ca_rtt_us;
+
+		tcp_rtt_estimator(c,seq_rtt_us);
 	}
 }
 

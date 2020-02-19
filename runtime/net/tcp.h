@@ -84,6 +84,11 @@ struct tcpconn {
 	struct list_head	rxq_ooo;
 	struct list_head	rxq;
 
+	/* RTT estimation */
+	uint64_t          	min_rtt;
+	uint64_t		srtt_us;
+	uint64_t		mdev_us;
+
 	/* egress path */
 	unsigned int		tx_closed:1;
 	unsigned int		tx_exclusive:1;
