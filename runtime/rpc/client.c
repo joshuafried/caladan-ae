@@ -13,8 +13,9 @@
 #include "util.h"
 #include "proto.h"
 
-#define MAX_CLIENT_QDELAY_US 50
-#define CRPC_CREDIT_LIFETIME_US 20
+#define SLACK_DEMAND		2
+#define MAX_CLIENT_QDELAY_US	100
+#define CRPC_CREDIT_LIFETIME_US	20
 
 /**
  * crpc_send_winupdate - send WINUPDATE message to update window size
@@ -31,7 +32,8 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_WINUPDATE;
 	chdr.len = 0;
-	chdr.demand = s->head - s->tail;
+	chdr.demand = s->head - s->tail + SLACK_DEMAND;
+	s->last_demand = chdr.demand;
 
 	/* send the request */
 	ret = tcp_write_full(s->c, &chdr, sizeof(chdr));
@@ -54,7 +56,8 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_CALL;
 	chdr.len = len;
-	chdr.demand = s->head - s->tail;
+	chdr.demand = s->head - s->tail + SLACK_DEMAND;
+	s->last_demand = chdr.demand;
 
 	/* initialize the SG vector */
 	vec[0].iov_base = &chdr;
@@ -96,7 +99,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 		return;
 
 	/* initialize the window */
-	if (s->win_timestamp == 0) {
+	if (s->win_timestamp == 0 || s->last_demand == 0) {
 		crpc_send_winupdate(s);
 		s->waiting_winupdate = true;
 		return;

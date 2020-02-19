@@ -47,6 +47,7 @@ struct crpc_session {
 	uint64_t		win_timestamp;
 	uint32_t		win_avail;
 	uint32_t		win_used;
+	uint64_t		last_demand;
 
 	/* a queue of pending RPC requests */
 	uint32_t		head;
