@@ -370,12 +370,22 @@ static void srpc_sender(void *arg)
 			srpc_put_slot(s, i);
 		}
 
+		if (need_winupdate && s->drained_core >= 0) {
+			spin_lock_np(&srpc_drained[s->drained_core].lock);
+			/* Give one window to the session who just got up */
+			if (!s->is_linked) {
+				s->win = 1;
+			} else {
+				list_del_from(&srpc_drained[s->drained_core].list,
+					      &s->drained_link);
+				s->is_linked = false;
+			}
+			spin_unlock_np(&srpc_drained[s->drained_core].lock);
+			s->drained_core = -1;
+		}
+
 		/* Send WINUPDATE message */
 		if (need_winupdate) {
-			// Give one window to the session who just got up
-			if (s->drained_core >= 0)
-				s->win = 1;
-			s->drained_core = -1;
 			ret = srpc_winupdate(s);
 			if (unlikely(ret))
 				goto close;
