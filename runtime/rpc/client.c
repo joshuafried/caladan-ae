@@ -247,8 +247,6 @@ again:
 		if (s->win_avail > 0) {
 			crpc_drain_queue(s);
 		} else {
-			s->head = 0;
-			s->tail = 0;
 			s->win_timestamp = 0;
 		}
 		mutex_unlock(&s->lock);
@@ -269,8 +267,6 @@ again:
 		if (s->win_avail > 0) {
 			crpc_drain_queue(s);
 		} else {
-			s->head = 0;
-			s->tail = 0;
 			s->win_timestamp = 0;
 		}
 		mutex_unlock(&s->lock);
