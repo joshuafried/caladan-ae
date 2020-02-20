@@ -171,6 +171,7 @@ void tcp_conn_ack(tcpconn_t *c, struct list_head *freeq)
 	uint32_t pkts_acked = 0;
 	long seq_rtt_us = -1L;
 	long ca_rtt_us = -1L;
+	uint64_t now = microtime();
 
 	first_ackt = 0;
 
@@ -188,13 +189,14 @@ void tcp_conn_ack(tcpconn_t *c, struct list_head *freeq)
 		}
 
 		pkts_acked++;
+		c->deliverd++;
+		c->last_delivered_ts = now;
 
 		list_pop(&c->txq, struct mbuf, link);
 		list_add_tail(freeq, &m->link);
 	}
 
 	if (likely(first_ackt)) {
-		uint64_t now = microtime();
 		seq_rtt_us = now - first_ackt;
 		ca_rtt_us = now - last_ackt;
 		if (c->min_rtt > ca_rtt_us)

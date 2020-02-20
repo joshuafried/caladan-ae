@@ -14,6 +14,7 @@
 
 #include "defs.h"
 #include "waitq.h"
+#include "tcp_bbr.h"
 
 /* adjustable constants */
 #define TCP_MSS	(ETH_MTU - sizeof(struct ip_hdr) - sizeof(struct tcp_hdr))
@@ -49,6 +50,7 @@ struct tcp_pcb {
 	uint32_t	snd_una;	/* send unacknowledged */
 	uint32_t	snd_nxt;	/* send next */
 	uint32_t	snd_wnd;	/* send window */
+	uint32_t	snd_cwnd;	/* send window set by congestion control */
 	uint32_t	snd_up;		/* send urgent pointer */
 	uint32_t	snd_wl1;	/* last window update - seq number */
 	uint32_t	snd_wl2;	/* last window update - ack number */
@@ -64,6 +66,8 @@ struct tcp_pcb {
 	};
 	uint32_t	rcv_up;		/* receive urgent pointer */
 	uint32_t	irs;		/* initial receive sequence number */
+
+	struct bbr	cc;		/* cc info-ToDo:abstract to handle other protocols */
 };
 
 /* the TCP connection struct */
@@ -99,6 +103,12 @@ struct tcpconn {
 	struct list_head	txq;
 	bool			do_fast_retransmit;
 	uint32_t		fast_retransmit_last_ack;
+
+	uint32_t		delivered;
+	uint32_t		lost;
+	uint64_t		last_delivered_ts;
+	uint64_t		sk_pacing_rate;
+	uint32_t		app_limited;
 
 	/* timeouts */
 	uint64_t next_timeout;
