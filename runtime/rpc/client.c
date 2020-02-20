@@ -14,7 +14,7 @@
 #include "proto.h"
 
 #define MIN_DEMAND		2
-#define MAX_CLIENT_QDELAY_US	100
+#define MAX_CLIENT_QDELAY_US	120
 #define CRPC_CREDIT_LIFETIME_US	20
 
 /**
@@ -166,12 +166,13 @@ ssize_t crpc_send_one(struct crpc_session *s,
 
 	mutex_lock(&s->lock);
 
-	/* TODO: expire stale credits */
+	/* expire stale credits */
 	if (s->win_timestamp > 0 &&
 	    now - s->win_timestamp > CRPC_CREDIT_LIFETIME_US &&
 	    s->win_used < s->win_avail) {
 		s->win_avail = s->win_used;
-		s->win_timestamp = 0;
+		if (s->win_used == 0)
+			s->win_timestamp = 0;
 	}
 
 	/* hot path, just send */
@@ -242,7 +243,14 @@ again:
 		s->win_avail = shdr.win;
 		s->win_timestamp = microtime();
 		s->waiting_winupdate = false;
-		crpc_drain_queue(s);
+
+		if (s->win_avail > 0) {
+			crpc_drain_queue(s);
+		} else {
+			s->head = 0;
+			s->tail = 0;
+			s->win_timestamp = 0;
+		}
 		mutex_unlock(&s->lock);
 		break;
 	case RPC_OP_WINUPDATE:
@@ -257,8 +265,16 @@ again:
 		s->win_avail = shdr.win;
 		s->win_timestamp = microtime();
 		s->waiting_winupdate = false;
-		crpc_drain_queue(s);
+
+		if (s->win_avail > 0) {
+			crpc_drain_queue(s);
+		} else {
+			s->head = 0;
+			s->tail = 0;
+			s->win_timestamp = 0;
+		}
 		mutex_unlock(&s->lock);
+
 		goto again;
 	default:
 		log_warn("crpc: got invalid op %d", shdr.op);
