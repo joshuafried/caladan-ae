@@ -48,6 +48,10 @@ class RpcClient {
     return crpc_win_avail(s_);
   }
 
+  float Queue() {
+    return crpc_queue(s_);
+  }
+
   // Shuts down the RPC connection.
   int Shutdown(int how) { return tcp_shutdown(s_->c, how); }
   // Aborts the RPC connection.

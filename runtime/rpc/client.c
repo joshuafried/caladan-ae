@@ -98,6 +98,11 @@ static void crpc_drain_queue(struct crpc_session *s)
 	if (s->head == s->tail)
 		return;
 
+	/* wait finish. allow probing */
+	if (s->win_avail == 0 &&
+	    now - s->win_timestamp > MAX_CLIENT_QDELAY_US)
+		s->win_timestamp = 0;
+
 	/* initialize the window */
 	if (s->win_timestamp == 0 || s->last_demand == 0) {
 		crpc_send_winupdate(s);
@@ -111,6 +116,8 @@ static void crpc_drain_queue(struct crpc_session *s)
 			break;
 
 		pos = s->tail++ % CRPC_QLEN;
+		s->num_que++;
+		s->sum_que += (now - s->qts[pos]);
 		ret = crpc_send_raw(s, s->bufs[pos], s->lens[pos]);
 		if (ret < 0)
 			break;
@@ -158,13 +165,14 @@ ssize_t crpc_send_one(struct crpc_session *s,
 		      const void *buf, size_t len)
 {
 	ssize_t ret;
-	uint64_t now = microtime();
+	uint64_t now;
 
 	/* implementation is currently limited to a maximum payload size */
 	if (unlikely(len > SRPC_BUF_SIZE))
 		return -E2BIG;
 
 	mutex_lock(&s->lock);
+	now = microtime();
 
 	/* expire stale credits */
 	if (s->win_timestamp > 0 &&
@@ -178,6 +186,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	/* hot path, just send */
 	if (s->win_used < s->win_avail && s->head == s->tail) {
 		s->win_used++;
+		s->num_que++;
 		ret = crpc_send_raw(s, buf, len);
 		mutex_unlock(&s->lock);
 		return ret;
@@ -246,8 +255,6 @@ again:
 
 		if (s->win_avail > 0) {
 			crpc_drain_queue(s);
-		} else {
-			s->win_timestamp = 0;
 		}
 		mutex_unlock(&s->lock);
 		break;
@@ -266,8 +273,6 @@ again:
 
 		if (s->win_avail > 0) {
 			crpc_drain_queue(s);
-		} else {
-			s->win_timestamp = 0;
 		}
 		mutex_unlock(&s->lock);
 
@@ -337,6 +342,14 @@ fail:
 uint32_t crpc_win_avail(struct crpc_session *s)
 {
 	return s->win_avail;
+}
+
+float crpc_queue(struct crpc_session *s)
+{
+	if (s->num_que > 0)
+		return (float)s->sum_que / (float)s->num_que;
+	else
+		return 0.0;
 }
 
 /**
