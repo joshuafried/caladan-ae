@@ -68,7 +68,8 @@ struct work_unit {
   uint64_t window;
   uint64_t tsc;
   uint32_t cpu;
-  uint64_t queueing;
+  uint64_t server_queue;
+  uint64_t client_queue;
 };
 
 class NetBarrier {
@@ -134,27 +135,24 @@ class NetBarrier {
 
   bool EndExperiment(std::vector<work_unit> &w, double *offered_rps,
                      double *rps, double *dps_cli, double *dps_ser,
-		     double *min_tput, double *max_tput, double *cli_que) {
+		     double *min_tput, double *max_tput) {
     if (is_leader_) {
       for (auto &c : conns) {
         double rem_offered_rps, rem_rps, rem_dps_cli, rem_dps_ser;
-	double rem_max_tput, rem_min_tput, rem_cli_que;
+	double rem_max_tput, rem_min_tput;
         BUG_ON(c->ReadFull(&rem_offered_rps, sizeof(rem_offered_rps)) <= 0);
         BUG_ON(c->ReadFull(&rem_rps, sizeof(rem_rps)) <= 0);
 	BUG_ON(c->ReadFull(&rem_dps_cli, sizeof(rem_dps_cli)) <= 0);
 	BUG_ON(c->ReadFull(&rem_dps_ser, sizeof(rem_dps_ser)) <= 0);
 	BUG_ON(c->ReadFull(&rem_min_tput, sizeof(rem_min_tput)) <= 0);
 	BUG_ON(c->ReadFull(&rem_max_tput, sizeof(rem_max_tput)) <= 0);
-	BUG_ON(c->ReadFull(&rem_cli_que, sizeof(rem_cli_que)) <= 0);
         *offered_rps += rem_offered_rps;
         *rps += rem_rps;
 	*dps_cli += rem_dps_cli;
 	*dps_ser += rem_dps_ser;
 	*min_tput = MIN(*min_tput, rem_min_tput);
 	*max_tput = MAX(*max_tput, rem_max_tput);
-	*cli_que += rem_cli_que;
       }
-      *cli_que = *cli_que / (conns.size() + 1);
     } else {
       BUG_ON(conns[0]->WriteFull(offered_rps, sizeof(*offered_rps)) <= 0);
       BUG_ON(conns[0]->WriteFull(rps, sizeof(*rps)) <= 0);
@@ -162,7 +160,6 @@ class NetBarrier {
       BUG_ON(conns[0]->WriteFull(dps_ser, sizeof(*dps_ser)) <= 0);
       BUG_ON(conns[0]->WriteFull(min_tput, sizeof(*min_tput)) <= 0);
       BUG_ON(conns[0]->WriteFull(max_tput, sizeof(*max_tput)) <= 0);
-      BUG_ON(conns[0]->WriteFull(cli_que, sizeof(*cli_que)) <= 0);
     }
     GatherSamples(w);
     BUG_ON(!Barrier());
@@ -285,7 +282,7 @@ struct payload {
   uint64_t index;
   uint64_t tsc_end;
   uint32_t cpu;
-  uint64_t queueing;
+  uint64_t server_queue;
 };
 
 // The maximum lateness to tolerate before dropping egress samples.
@@ -312,7 +309,7 @@ void RpcServer(struct srpc_ctx *ctx) {
   memcpy(out, in, sizeof(*out));
   out->tsc_end = hton64(rdtscp(&out->cpu));
   out->cpu = hton32(out->cpu);
-  out->queueing = hton64(rt::RuntimeQueueUS());
+  out->server_queue = hton64(rt::RuntimeQueueUS());
 }
 
 void ServerHandler(void *arg) {
@@ -364,10 +361,11 @@ std::vector<work_unit> ClientWorker(
       barrier();
       uint64_t idx = ntoh64(rp.index);
       w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
+      w[idx].duration_us -= w[idx].client_queue;
       w[idx].window = c->WinAvail();
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
-      w[idx].queueing = ntoh64(rp.queueing);
+      w[idx].server_queue = ntoh64(rp.server_queue);
     }
   });
 
@@ -400,7 +398,7 @@ std::vector<work_unit> ClientWorker(
     // Send an RPC request.
     p.work_iterations = hton64(w[i].work_us * kIterationsPerUS);
     p.index = hton64(i);
-    ssize_t ret = c->Send(&p, sizeof(p));
+    ssize_t ret = c->Send(&p, sizeof(p), &w[i].client_queue);
     if (ret == -ENOBUFS) continue;
     if (ret != static_cast<ssize_t>(sizeof(p)))
       panic("write failed, ret = %ld", ret);
@@ -416,12 +414,11 @@ std::vector<work_unit> ClientWorker(
 std::vector<work_unit> RunExperiment(
     int threads, double *reqs_per_sec, double *drops_per_sec_client,
     double *drops_per_sec_server, double *min_tput, double *max_tput,
-    double *cli_que,
     double *cpu_usage, std::function<std::vector<work_unit>()> wf) {
   // Create one TCP connection per thread.
   std::vector<std::unique_ptr<rt::RpcClient>> conns;
   for (int i = 0; i < threads; ++i) {
-    std::unique_ptr<rt::RpcClient> outc(rt::RpcClient::Dial(raddr));
+    std::unique_ptr<rt::RpcClient> outc(rt::RpcClient::Dial(raddr, i+1));
     if (unlikely(outc == nullptr)) panic("couldn't connect to raddr.");
     conns.emplace_back(std::move(outc));
   }
@@ -496,15 +493,12 @@ std::vector<work_unit> RunExperiment(
 
   *drops_per_sec_client = 0;
   *drops_per_sec_server = 0;
-  *cli_que = 0;
   *min_tput = min_throughput;
   *max_tput = max_throughput;
   for (auto &c : conns) {
-    *cli_que += c->Queue();
     *drops_per_sec_client += c->DroppedClient();
     *drops_per_sec_server += c->DroppedServer();
   }
-  *cli_que = *cli_que / threads;
 
   *drops_per_sec_client = *drops_per_sec_client / elapsed * 1000000;
   *drops_per_sec_server = *drops_per_sec_server / elapsed * 1000000;
@@ -519,7 +513,7 @@ std::vector<work_unit> RunExperiment(
 
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
                       double dps_cli, double dps_ser, double min_tput,
-		      double max_tput, double cli_que, double cpu_usage) {
+		      double max_tput, double cpu_usage) {
   std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
     return s1.duration_us < s2.duration_us;
   });
@@ -547,14 +541,14 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
   double p99_win = w[count * 0.99].window;
 
   std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
-    return s1.queueing < s2.queueing;
+    return s1.server_queue < s2.server_queue;
   });
   double sum_que = std::accumulate(
       w.begin(), w.end(), 0.0,
-      [](double s, const work_unit &c) { return s + c.queueing; });
+      [](double s, const work_unit &c) { return s + c.server_queue; });
   double mean_que = sum_que / w.size();
-  double p1_que = w[count * 0.01].queueing;
-  double p99_que = w[count * 0.99].queueing;
+  double p1_que = w[count * 0.01].server_queue;
+  double p99_que = w[count * 0.99].server_queue;
 
   cpu_usage = (cpu_usage - 0.05) / 0.5;
 
@@ -567,14 +561,14 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << cpu_usage << "," << w.size() << "," << min << "," << mean << ","
       << p50 << "," << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
       << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
-      << p1_que << "," << mean_que << "," << p99_que << "," << cli_que << std::endl;
+      << p1_que << "," << mean_que << "," << p99_que << std::endl;
 }
 
 void SteadyStateExperiment(int threads, double offered_rps,
                            double service_time) {
-  double rps, cpu_usage, dps_cli, dps_ser, min_tput, max_tput, cli_que;
+  double rps, cpu_usage, dps_cli, dps_ser, min_tput, max_tput;
   std::vector<work_unit> w = RunExperiment(threads, &rps, &dps_cli, &dps_ser,
-					   &min_tput, &max_tput, &cli_que,
+					   &min_tput, &max_tput,
 					   &cpu_usage, [=] {
     std::mt19937 rg(rand());
     std::mt19937 dg(rand());
@@ -586,12 +580,12 @@ void SteadyStateExperiment(int threads, double offered_rps,
 
   if (b) {
     if (!b->EndExperiment(w, &offered_rps, &rps, &dps_cli, &dps_ser,
-			  &min_tput, &max_tput, &cli_que))
+			  &min_tput, &max_tput))
       return;
   }
   // Print the results.
   PrintStatResults(w, offered_rps, rps, dps_cli, dps_ser,
-		   min_tput, max_tput, cli_que, cpu_usage);
+		   min_tput, max_tput, cpu_usage);
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {

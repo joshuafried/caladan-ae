@@ -23,10 +23,11 @@ class RpcClient {
   RpcClient& operator=(const RpcClient&) = delete;
 
   // Creates an RPC session.
-  static RpcClient *Dial(netaddr raddr) {
+  static RpcClient *Dial(netaddr raddr, int id) {
     crpc_session *s;
     raddr.port = SRPC_PORT;
     int ret = crpc_open(raddr, &s);
+    s->id = id;
     if (ret) return nullptr;
     return new RpcClient(s);
   }
@@ -35,8 +36,8 @@ class RpcClient {
   bool IsBusy() const { return crpc_is_busy(s_); }
 
   // Sends an RPC request.
-  ssize_t Send(const void *buf, size_t len) {
-    return crpc_send_one(s_, buf, len);
+  ssize_t Send(const void *buf, size_t len, uint64_t *cque = nullptr) {
+    return crpc_send_one(s_, buf, len, cque);
   }
 
   // Receives an RPC request.
@@ -46,10 +47,6 @@ class RpcClient {
 
   uint32_t WinAvail() {
     return crpc_win_avail(s_);
-  }
-
-  float Queue() {
-    return crpc_queue(s_);
   }
 
   // Shuts down the RPC connection.

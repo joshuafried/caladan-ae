@@ -13,7 +13,6 @@
 #include "util.h"
 #include "proto.h"
 
-#define MIN_DEMAND		2
 #define MAX_CLIENT_QDELAY_US	120
 #define CRPC_CREDIT_LIFETIME_US	20
 
@@ -32,8 +31,7 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_WINUPDATE;
 	chdr.len = 0;
-	chdr.demand = MAX(s->head - s->tail, MIN_DEMAND);
-	s->last_demand = chdr.demand;
+	chdr.demand = s->head - s->tail;
 
 	/* send the request */
 	ret = tcp_write_full(s->c, &chdr, sizeof(chdr));
@@ -56,8 +54,7 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_CALL;
 	chdr.len = len;
-	chdr.demand = MAX(s->head - s->tail, MIN_DEMAND);
-	s->last_demand = chdr.demand;
+	chdr.demand = s->head - s->tail;
 
 	/* initialize the SG vector */
 	vec[0].iov_base = &chdr;
@@ -78,7 +75,6 @@ static void crpc_drain_queue(struct crpc_session *s)
 {
 	ssize_t ret;
 	int pos;
-	uint64_t now;
 
 	assert_mutex_held(&s->lock);
 
@@ -86,25 +82,11 @@ static void crpc_drain_queue(struct crpc_session *s)
 		return;
 	}
 
-	now = microtime();
-	/* remove the old requests */
-	while (s->head != s->tail) {
-		pos = s->tail % CRPC_QLEN;
-		if (now - s->qts[pos] <= MAX_CLIENT_QDELAY_US)
-			break;
-		s->tail++;
-	}
-
 	if (s->head == s->tail)
 		return;
 
-	/* wait finish. allow probing */
-	if (s->win_avail == 0 &&
-	    now - s->win_timestamp > MAX_CLIENT_QDELAY_US)
-		s->win_timestamp = 0;
-
 	/* initialize the window */
-	if (s->win_timestamp == 0 || s->last_demand == 0) {
+	if (s->win_timestamp == 0) {
 		crpc_send_winupdate(s);
 		s->waiting_winupdate = true;
 		return;
@@ -116,8 +98,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 			break;
 
 		pos = s->tail++ % CRPC_QLEN;
-		s->num_que++;
-		s->sum_que += (now - s->qts[pos]);
+		*s->cques[pos] = microtime() - *s->cques[pos];
 		ret = crpc_send_raw(s, s->bufs[pos], s->lens[pos]);
 		if (ret < 0)
 			break;
@@ -127,7 +108,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 }
 
 static bool crpc_enqueue_one(struct crpc_session *s,
-			     const void *buf, size_t len)
+			     const void *buf, size_t len, uint64_t *cque)
 {
 	int pos;
 
@@ -138,9 +119,10 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 		s->tail++;
 
 	pos = s->head++ % CRPC_QLEN;
+	*cque = microtime();
 	memcpy(s->bufs[pos], buf, len);
 	s->lens[pos] = len;
-	s->qts[pos] = microtime();
+	s->cques[pos] = cque;
 
 	if (unlikely(s->head - s->tail < 0))
 		panic("overflow!\n");
@@ -162,7 +144,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
  * errors (< 0).
  */
 ssize_t crpc_send_one(struct crpc_session *s,
-		      const void *buf, size_t len)
+		      const void *buf, size_t len, uint64_t *cque)
 {
 	ssize_t ret;
 	uint64_t now;
@@ -186,14 +168,14 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	/* hot path, just send */
 	if (s->win_used < s->win_avail && s->head == s->tail) {
 		s->win_used++;
-		s->num_que++;
+		*cque = 0;
 		ret = crpc_send_raw(s, buf, len);
 		mutex_unlock(&s->lock);
 		return ret;
 	}
 
 	/* cold path, enqueue request and drain the queue */
-	if (!crpc_enqueue_one(s, buf, len)) {
+	if (!crpc_enqueue_one(s, buf, len, cque)) {
 		mutex_unlock(&s->lock);
 		return -ENOBUFS;
 	}
@@ -342,14 +324,6 @@ fail:
 uint32_t crpc_win_avail(struct crpc_session *s)
 {
 	return s->win_avail;
-}
-
-float crpc_queue(struct crpc_session *s)
-{
-	if (s->num_que > 0)
-		return (float)s->sum_que / (float)s->num_que;
-	else
-		return 0.0;
 }
 
 /**

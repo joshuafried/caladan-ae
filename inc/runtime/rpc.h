@@ -41,32 +41,29 @@ extern int srpc_enable(srpc_fn_t handler);
 #define CRPC_QLEN		16
 
 struct crpc_session {
+	uint64_t		id;
 	tcpconn_t		*c;
 	mutex_t			lock;
 	bool			waiting_winupdate;
 	uint64_t		win_timestamp;
 	uint32_t		win_avail;
 	uint32_t		win_used;
-	uint64_t		last_demand;
-	uint64_t		sum_que;
-	uint64_t		num_que;
 
 	/* a queue of pending RPC requests */
 	uint32_t		head;
 	uint32_t		tail;
 	void			*bufs[CRPC_QLEN];
 	size_t			lens[CRPC_QLEN];
-	uint64_t		qts[CRPC_QLEN];
+	uint64_t		*cques[CRPC_QLEN];
 };
 
 extern ssize_t crpc_send_one(struct crpc_session *s,
-			     const void *buf, size_t len);
+			     const void *buf, size_t len, uint64_t *cque);
 extern ssize_t crpc_recv_one(struct crpc_session *s,
 			     void *buf, size_t len);
 extern int crpc_open(struct netaddr raddr, struct crpc_session **sout);
 extern void crpc_close(struct crpc_session *s);
 extern uint32_t crpc_win_avail(struct crpc_session *s);
-extern float crpc_queue(struct crpc_session *s);
 
 /**
  * crpc_is_busy - is the session busy (unable to accept requests right now)
