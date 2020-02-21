@@ -1,4 +1,5 @@
 extern "C" {
+#include <base/time.h>
 #include <base/log.h>
 #include <net/ip.h>
 #include <unistd.h>
@@ -342,7 +343,7 @@ std::vector<work_unit> ClientWorker(
     rt::RpcClient *c, rt::WaitGroup *starter, rt::WaitGroup *starter2,
     std::function<std::vector<work_unit>()> wf) {
   std::vector<work_unit> w(wf());
-  std::vector<time_point<steady_clock>> timings;
+  std::vector<uint64_t> timings;
   timings.reserve(w.size());
 
   // Start the receiver thread.
@@ -356,11 +357,9 @@ std::vector<work_unit> ClientWorker(
         panic("read failed, ret = %ld", ret);
       }
 
-      barrier();
-      auto ts = steady_clock::now();
-      barrier();
+      uint64_t now = microtime();
       uint64_t idx = ntoh64(rp.index);
-      w[idx].duration_us = duration_cast<sec>(ts - timings[idx]).count();
+      w[idx].duration_us = now - timings[idx];
       w[idx].duration_us -= w[idx].client_queue;
       w[idx].window = c->WinAvail();
       w[idx].tsc = ntoh64(rp.tsc_end);
@@ -391,9 +390,7 @@ std::vector<work_unit> ClientWorker(
         kMaxCatchUpUS)
       continue;
 
-    barrier();
-    timings[i] = steady_clock::now();
-    barrier();
+    timings[i] = microtime();
 
     // Send an RPC request.
     p.work_iterations = hton64(w[i].work_us * kIterationsPerUS);
