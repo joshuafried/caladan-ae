@@ -39,6 +39,7 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 		return ret;
 
 	assert(ret == sizeof(chdr));
+	s->last_demand = chdr.demand;
 
 	return 0;
 }
@@ -67,6 +68,7 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 	if (unlikely(ret < 0))
 		return ret;
 	assert(ret == sizeof(chdr) + len);
+	s->last_demand = chdr.demand;
 
 	return len;
 }
@@ -86,7 +88,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 		return;
 
 	/* initialize the window */
-	if (s->win_timestamp == 0) {
+	if (s->win_timestamp == 0 || s->last_demand == 0) {
 		crpc_send_winupdate(s);
 		s->waiting_winupdate = true;
 		return;
@@ -239,6 +241,7 @@ again:
 			crpc_drain_queue(s);
 		}
 		mutex_unlock(&s->lock);
+
 		break;
 	case RPC_OP_WINUPDATE:
 		if (unlikely(shdr.len != 0)) {
