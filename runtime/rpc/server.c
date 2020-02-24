@@ -30,6 +30,9 @@ static srpc_fn_t srpc_handler;
 /* total number of session */
 atomic_t srpc_num_sess;
 
+/* the number of drained session */
+atomic_t srpc_num_drained;
+
 /* drained session list */
 struct srpc_drained_ {
 	spinlock_t lock;
@@ -134,6 +137,12 @@ static void srpc_update_window(struct srpc_session *s)
 	/* now we allow zero window */
 	s->win = MAX(s->win, 0);
 	s->win = MIN(s->win, SRPC_MAX_WINDOW - 1);
+
+	/* avoid all the session is drained. */
+	if (s->win == 0 &&
+	    atomic_read(&srpc_num_sess) - atomic_read(&srpc_num_drained)
+	    <= runtime_max_cores())
+		s->win++;
 }
 
 static void srpc_worker(void *arg)
@@ -289,6 +298,7 @@ static struct srpc_session *srpc_choose_drained_session(int core_id)
 	assert(ret->is_linked);
 	ret->is_linked = false;
 	spin_unlock_np(&srpc_drained[core_id].lock);
+	atomic_dec(&srpc_num_drained);
 
 	return ret;
 }
@@ -337,15 +347,13 @@ static void srpc_sender(void *arg)
 		if (need_winupdate)
 			s->win = 0;
 
-		if (demand > 0)
-			srpc_update_window(s);
-		else
-			s->win = 0;
+		srpc_update_window(s);
 
 		/* decide whether and which session to wake up */
 		core_id = get_current_affinity();
 		wakes = NULL;
-		if (s->win > 1) {
+
+		if (s->win > 1 || (s->win > 0 && demand == 0)) {
 			/* try local list */
 			wakes = srpc_choose_drained_session(core_id);
 
@@ -357,15 +365,15 @@ static void srpc_sender(void *arg)
 			}
 		}
 
+		if (s == wakes)
+			wakes = NULL;
+
 		if (wakes) {
 			s->win--;
-			assert(s->win >= 1);
 		}
 
-		if (s == wakes) {
-			s->win++;
-			wakes = NULL;
-		}
+		if (demand == 0)
+			s->win = 0;
 
 		/* send a response for each completed slot */
 		bitmap_for_each_set(tmp, SRPC_MAX_WINDOW, i) {
@@ -387,6 +395,7 @@ static void srpc_sender(void *arg)
 				list_del_from(&srpc_drained[s->drained_core].list,
 					      &s->drained_link);
 				s->is_linked = false;
+				atomic_dec(&srpc_num_drained);
 			}
 			spin_unlock_np(&srpc_drained[s->drained_core].lock);
 			s->drained_core = -1;
@@ -415,6 +424,7 @@ static void srpc_sender(void *arg)
 			s->is_linked = true;
 			spin_unlock_np(&srpc_drained[core_id].lock);
 			s->drained_core = core_id;
+			atomic_inc(&srpc_num_drained);
 		}
 
 		/* wake up the session */
@@ -452,6 +462,7 @@ close:
 			list_del_from(&srpc_drained[s->drained_core].list,
 				      &s->drained_link);
 			s->is_linked = false;
+			atomic_dec(&srpc_num_drained);
 		}
 		spin_unlock_np(&srpc_drained[s->drained_core].lock);
 		s->drained_core = -1;
@@ -526,6 +537,7 @@ static void srpc_listener(void *arg)
 	srpc_last_winupdate = microtime();
 
 	atomic_write(&srpc_num_sess, 0);
+	atomic_write(&srpc_num_drained, 0);
 
 	laddr.ip = 0;
 	laddr.port = SRPC_PORT;
