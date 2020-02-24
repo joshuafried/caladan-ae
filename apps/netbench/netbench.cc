@@ -182,13 +182,17 @@ class NetBarrier {
           size_t nelem;
           BUG_ON(agg_conns_[i]->ReadFull(&nelem, sizeof(nelem)) <= 0);
 
-          work_unit *wunits = new work_unit[nelem];
-          BUG_ON(agg_conns_[i]->ReadFull(wunits, sizeof(work_unit) * nelem) <=
-                 0);
-          std::vector<work_unit> v(wunits, wunits + nelem);
-          delete[] wunits;
+	  if (likely(nelem > 0)) {
+            work_unit *wunits = new work_unit[nelem];
+            BUG_ON(agg_conns_[i]->ReadFull(wunits, sizeof(work_unit) * nelem) <=
+                   0);
+            std::vector<work_unit> v(wunits, wunits + nelem);
+            delete[] wunits;
 
-          samples[i].reset(new std::vector<work_unit>(std::move(v)));
+            samples[i].reset(new std::vector<work_unit>(std::move(v)));
+	  } else {
+	    samples[i].reset(new std::vector<work_unit>());
+	  }
         }));
       }
 
@@ -204,8 +208,9 @@ class NetBarrier {
           work_unit *start = w.data() + elems * i;
           if (i == npara - 1) elems += w.size() % npara;
           BUG_ON(agg_conns_[i]->WriteFull(&elems, sizeof(elems)) <= 0);
-          BUG_ON(agg_conns_[i]->WriteFull(start, sizeof(work_unit) * elems) <=
-                 0);
+	  if (likely(elems > 0))
+	    BUG_ON(agg_conns_[i]->WriteFull(start, sizeof(work_unit) * elems)
+	           <= 0);
         }));
       }
       for (auto &t : th) t.Join();
@@ -511,6 +516,12 @@ std::vector<work_unit> RunExperiment(
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
                       double dps_cli, double dps_ser, double min_tput,
 		      double max_tput, double cpu_usage) {
+  if (w.size() == 0) {
+    std::cout << std::setprecision(4) << std::fixed << threads * total_agents
+    << "," << offered_rps << "," << "-" << std::endl;
+    return;
+  }
+
   std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
     return s1.duration_us < s2.duration_us;
   });
