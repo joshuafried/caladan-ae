@@ -18,6 +18,7 @@ extern "C" {
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <random>
@@ -62,6 +63,13 @@ constexpr uint64_t kUptimeMagic = 0xDEADBEEF;
 struct uptime {
   uint64_t idle;
   uint64_t busy;
+};
+
+constexpr uint64_t kStatPort = 40;
+constexpr uint64_t kStatMagic = 0xDEADBEEF;
+struct sstat {
+  uint64_t rx_pkts;
+  uint64_t tx_pkts;
 };
 
 struct work_unit {
@@ -135,30 +143,23 @@ class NetBarrier {
   bool StartExperiment() { return Barrier(); }
 
   bool EndExperiment(std::vector<work_unit> &w, double *offered_rps,
-                     double *rps, double *dps_cli, double *dps_ser,
-		     double *min_tput, double *max_tput) {
+                     double *rps, double *min_tput, double *max_tput) {
     if (is_leader_) {
       for (auto &c : conns) {
-        double rem_offered_rps, rem_rps, rem_dps_cli, rem_dps_ser;
+        double rem_offered_rps, rem_rps;
 	double rem_max_tput, rem_min_tput;
         BUG_ON(c->ReadFull(&rem_offered_rps, sizeof(rem_offered_rps)) <= 0);
         BUG_ON(c->ReadFull(&rem_rps, sizeof(rem_rps)) <= 0);
-	BUG_ON(c->ReadFull(&rem_dps_cli, sizeof(rem_dps_cli)) <= 0);
-	BUG_ON(c->ReadFull(&rem_dps_ser, sizeof(rem_dps_ser)) <= 0);
 	BUG_ON(c->ReadFull(&rem_min_tput, sizeof(rem_min_tput)) <= 0);
 	BUG_ON(c->ReadFull(&rem_max_tput, sizeof(rem_max_tput)) <= 0);
         *offered_rps += rem_offered_rps;
         *rps += rem_rps;
-	*dps_cli += rem_dps_cli;
-	*dps_ser += rem_dps_ser;
 	*min_tput = MIN(*min_tput, rem_min_tput);
 	*max_tput = MAX(*max_tput, rem_max_tput);
       }
     } else {
       BUG_ON(conns[0]->WriteFull(offered_rps, sizeof(*offered_rps)) <= 0);
       BUG_ON(conns[0]->WriteFull(rps, sizeof(*rps)) <= 0);
-      BUG_ON(conns[0]->WriteFull(dps_cli, sizeof(*dps_cli)) <= 0);
-      BUG_ON(conns[0]->WriteFull(dps_ser, sizeof(*dps_ser)) <= 0);
       BUG_ON(conns[0]->WriteFull(min_tput, sizeof(*min_tput)) <= 0);
       BUG_ON(conns[0]->WriteFull(max_tput, sizeof(*max_tput)) <= 0);
     }
@@ -280,6 +281,55 @@ uptime ReadUptime() {
   if (ret != static_cast<ssize_t>(sizeof(u)))
     panic("uptime response failed, ret = %ld", ret);
   return uptime{ntoh64(u.idle), ntoh64(u.busy)};
+}
+
+sstat ReadServerStat() {
+  char *buf_;
+  std::string buf;
+  std::map<std::string, uint64_t> smap;
+  std::unique_ptr<rt::TcpConn> c(
+      rt::TcpConn::Dial({0,0}, {raddr.ip, kStatPort}));
+  uint64_t magic = hton64(kStatMagic);
+  ssize_t ret = c->WriteFull(&magic, sizeof(magic));
+  if (ret != static_cast<ssize_t>(sizeof(magic)))
+    panic("server stat request failed, ret = %ld", ret);
+
+  size_t resp_len;
+  ret = c->ReadFull(&resp_len, sizeof(resp_len));
+  if (ret != static_cast<ssize_t>(sizeof(resp_len)))
+    panic("server stat response failed, ret = %ld", ret);
+
+  buf_ = (char *)malloc(resp_len);
+
+  ret = c->ReadFull(buf_, resp_len);
+  if (ret != static_cast<ssize_t>(resp_len))
+    panic("server stat response failed, ret = %ld", ret);
+
+  buf = std::string(buf_);
+
+  size_t pos_com = 0;
+  size_t pos_col = 0;
+  std::string token;
+  std::string key;
+  uint64_t value;
+
+  while ((pos_com = buf.find(",")) != std::string::npos) {
+    token = buf.substr(0, pos_com);
+    pos_col = token.find(":");
+    if (pos_col == std::string::npos)
+      continue;
+
+    key = token.substr(0, pos_col);
+    value = std::stoull(token.substr(pos_col+1, pos_com));
+
+    smap[key] = value;
+
+    buf.erase(0, pos_com + 1);
+  }
+
+  free(buf_);
+
+  return sstat{smap["rx_packets"], smap["tx_packets"]};
 }
 
 constexpr uint64_t kNetbenchPort = 8001;
@@ -414,9 +464,9 @@ std::vector<work_unit> ClientWorker(
 }
 
 std::vector<work_unit> RunExperiment(
-    int threads, double *reqs_per_sec, double *drops_per_sec_client,
-    double *drops_per_sec_server, double *min_tput, double *max_tput,
-    double *cpu_usage, std::function<std::vector<work_unit>()> wf) {
+    int threads, double *reqs_per_sec, double *min_tput, double *max_tput,
+    double *cpu_usage, double *rx_pps, double *tx_pps,
+    std::function<std::vector<work_unit>()> wf) {
   // Create one TCP connection per thread.
   std::vector<std::unique_ptr<rt::RpcClient>> conns;
   for (int i = 0; i < threads; ++i) {
@@ -451,6 +501,7 @@ std::vector<work_unit> RunExperiment(
   auto start = steady_clock::now();
   barrier();
   uptime u1 = ReadUptime();
+  sstat s1 = ReadServerStat();
 
   // Wait for the workers to finish.
   for (auto &t : th) t.Join();
@@ -460,6 +511,7 @@ std::vector<work_unit> RunExperiment(
   auto finish = steady_clock::now();
   barrier();
   uptime u2 = ReadUptime();
+  sstat s2 = ReadServerStat();
 
   // Force the connections to close.
   for (auto &c : conns) c->Abort();
@@ -493,29 +545,27 @@ std::vector<work_unit> RunExperiment(
   if (reqs_per_sec != nullptr)
     *reqs_per_sec = static_cast<double>(w.size()) / elapsed * 1000000;
 
-  *drops_per_sec_client = 0;
-  *drops_per_sec_server = 0;
   *min_tput = min_throughput;
   *max_tput = max_throughput;
-  for (auto &c : conns) {
-    *drops_per_sec_client += c->DroppedClient();
-    *drops_per_sec_server += c->DroppedServer();
-  }
-
-  *drops_per_sec_client = *drops_per_sec_client / elapsed * 1000000;
-  *drops_per_sec_server = *drops_per_sec_server / elapsed * 1000000;
 
   uint64_t idle = u2.idle - u1.idle;
   uint64_t busy = u2.busy - u1.busy;
   if (cpu_usage != nullptr)
     *cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
 
+  uint64_t rx_pkts = s2.rx_pkts - s1.rx_pkts;
+  uint64_t tx_pkts = s2.tx_pkts - s1.tx_pkts;
+  if (rx_pps != nullptr)
+    *rx_pps = static_cast<double>(rx_pkts) / elapsed * 1000000;
+  if (tx_pps != nullptr)
+    *tx_pps = static_cast<double>(tx_pkts) / elapsed * 1000000;
+
   return w;
 }
 
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
-                      double dps_cli, double dps_ser, double min_tput,
-		      double max_tput, double cpu_usage) {
+                      double min_tput, double max_tput, double cpu_usage,
+		      double rx_pps, double tx_pps) {
   if (w.size() == 0) {
     std::cout << std::setprecision(4) << std::fixed << threads * total_agents
     << "," << offered_rps << "," << "-" << std::endl;
@@ -564,20 +614,20 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
              //"#threads,offered_rps,rps,cpu_usage,samples,min,mean,p90,p99,p999,p9999,max"
              //<< std::endl
       << std::setprecision(4) << std::fixed << threads * total_agents << ","
-      << offered_rps << "," << rps << "," << dps_cli << "," << dps_ser << ","
-      << min_tput << "," << max_tput << ","
+      << offered_rps << "," << rps << "," << min_tput << "," << max_tput << ","
       << cpu_usage << "," << w.size() << "," << min << "," << mean << ","
       << p50 << "," << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
       << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
-      << p1_que << "," << mean_que << "," << p99_que << std::endl;
+      << p1_que << "," << mean_que << "," << p99_que << "," << rx_pps << ","
+      << tx_pps << std::endl;
 }
 
 void SteadyStateExperiment(int threads, double offered_rps,
                            double service_time) {
-  double rps, cpu_usage, dps_cli, dps_ser, min_tput, max_tput;
-  std::vector<work_unit> w = RunExperiment(threads, &rps, &dps_cli, &dps_ser,
-					   &min_tput, &max_tput,
-					   &cpu_usage, [=] {
+  double rps, cpu_usage, min_tput, max_tput;
+  double rx_pps, tx_pps;
+  std::vector<work_unit> w = RunExperiment(threads, &rps, &min_tput, &max_tput,
+					   &cpu_usage, &rx_pps, &tx_pps, [=] {
     std::mt19937 rg(rand());
     std::mt19937 dg(rand());
     std::exponential_distribution<double> rd(
@@ -587,13 +637,13 @@ void SteadyStateExperiment(int threads, double offered_rps,
   });
 
   if (b) {
-    if (!b->EndExperiment(w, &offered_rps, &rps, &dps_cli, &dps_ser,
+    if (!b->EndExperiment(w, &offered_rps, &rps,
 			  &min_tput, &max_tput))
       return;
   }
   // Print the results.
-  PrintStatResults(w, offered_rps, rps, dps_cli, dps_ser,
-		   min_tput, max_tput, cpu_usage);
+  PrintStatResults(w, offered_rps, rps, min_tput, max_tput, cpu_usage,
+		   rx_pps, tx_pps);
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {
