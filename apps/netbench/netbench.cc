@@ -563,6 +563,14 @@ std::vector<work_unit> RunExperiment(
   return w;
 }
 
+void PrintHeader() {
+  std::cout << "num_threads," << "offered_load," << "throughput," << "min_tput,"
+	    << "max_tput," << "cpu," << "sample size," << "min," << "mean,"
+	    << "p50," << "p90," << "p99," << "p999," << "p9999," << "max,"
+	    << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q,"
+	    << "p99_q," << "rx_pps," << "tx_pps" << std::endl;
+}
+
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
                       double min_tput, double max_tput, double cpu_usage,
 		      double rx_pps, double tx_pps) {
@@ -641,6 +649,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
 			  &min_tput, &max_tput))
       return;
   }
+
   // Print the results.
   PrintStatResults(w, offered_rps, rps, min_tput, max_tput, cpu_usage,
 		   rx_pps, tx_pps);
@@ -691,6 +700,9 @@ void ClientHandler(void *arg) {
   }
 
   calculate_rates();
+
+  /* Print Header */
+  PrintHeader();
 
   for (double i : offered_loads) {
     SteadyStateExperiment(threads, i, st);
