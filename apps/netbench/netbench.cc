@@ -48,6 +48,7 @@ netaddr raddr, master;
 double st;
 
 std::ofstream json_out;
+std::ofstream csv_out;
 
 int total_agents = 1;
 // number of iterations required for 1us on target server
@@ -565,12 +566,12 @@ std::vector<work_unit> RunExperiment(
   return w;
 }
 
-void PrintHeader() {
-  std::cout << "num_threads," << "offered_load," << "throughput," << "min_tput,"
-	    << "max_tput," << "cpu," << "sample size," << "min," << "mean,"
-	    << "p50," << "p90," << "p99," << "p999," << "p9999," << "max,"
-	    << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q,"
-	    << "p99_q," << "rx_pps," << "tx_pps" << std::endl;
+void PrintHeader(std::ostream& os) {
+  os << "num_threads," << "offered_load," << "throughput," << "min_tput,"
+     << "max_tput," << "cpu," << "sample size," << "min," << "mean,"
+     << "p50," << "p90," << "p99," << "p999," << "p9999," << "max,"
+     << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q,"
+     << "p99_q," << "rx_pps," << "tx_pps" << std::endl;
 }
 
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
@@ -630,6 +631,14 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
       << p1_que << "," << mean_que << "," << p99_que << "," << rx_pps << ","
       << tx_pps << std::endl;
+
+  csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
+      << offered_rps << "," << rps << "," << min_tput << "," << max_tput << ","
+      << cpu_usage << "," << w.size() << "," << min << "," << mean << ","
+      << p50 << "," << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
+      << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
+      << p1_que << "," << mean_que << "," << p99_que << "," << rx_pps << ","
+      << tx_pps << std::endl << std::flush;
 
   json_out << "{"
 	   << "\"num_threads\":" << threads * total_agents << ","
@@ -734,11 +743,16 @@ void ClientHandler(void *arg) {
   std::string json_fname = std::string("outputs/dist_exp_st_") +
 	  std::to_string((int)st) + std::string("_nconn_") +
 	  std::to_string((int)(threads * total_agents)) + std::string(".json");
+  std::string csv_fname = std::string("outputs/dist_exp_st_") +
+	  std::to_string((int)st) + std::string("_nconn_") +
+	  std::to_string((int)(threads * total_agents)) + std::string(".csv");
   json_out.open(json_fname);
+  csv_out.open(csv_fname);
   json_out << "[";
 
   /* Print Header */
-  PrintHeader();
+  PrintHeader(csv_out);
+  PrintHeader(std::cout);
 
   for (double i : offered_loads) {
     SteadyStateExperiment(threads, i, st);
@@ -748,6 +762,7 @@ void ClientHandler(void *arg) {
   json_out.seekp(pos-2);
   json_out << "]";
   json_out.close();
+  csv_out.close();
 }
 
 }  // anonymous namespace
