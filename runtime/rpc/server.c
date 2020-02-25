@@ -23,6 +23,8 @@
 #define SRPC_MIN_DELAY_US	20
 /* the maximum runtime queuing delay */
 #define SRPC_MAX_DELAY_US	60
+/* round trip time in us */
+#define SRPC_RTT_US		10
 
 /* the handler function for each RPC */
 static srpc_fn_t srpc_handler;
@@ -44,9 +46,6 @@ BUILD_ASSERT(sizeof(struct srpc_drained_) == CACHE_LINE_SIZE);
 
 static struct srpc_drained_ srpc_drained[NCPU]
 		__attribute__((aligned(CACHE_LINE_SIZE)));
-
-static spinlock_t srpc_lock;
-static uint64_t srpc_last_winupdate;
 
 struct srpc_session {
 	tcpconn_t		*c;
@@ -406,9 +405,6 @@ static void srpc_sender(void *arg)
 			ret = srpc_winupdate(s);
 			if (unlikely(ret))
 				goto close;
-			spin_lock_np(&srpc_lock);
-			srpc_last_winupdate = microtime();
-			spin_unlock_np(&srpc_lock);
 		}
 
 		/* add to the drained list if (1) window becomes zero,
@@ -520,6 +516,48 @@ static void srpc_server(void *arg)
 	sfree(s);
 }
 
+static void srpc_waker(void *arg) {
+	uint64_t us;
+	unsigned int max_cores = runtime_max_cores();
+	unsigned int core_id;
+	unsigned int i;
+	struct srpc_session *wakes;
+	thread_t *th;
+
+	while (true) {
+		timer_sleep(SRPC_RTT_US);
+		us = runtime_queue_us();
+		if (us >= SRPC_MIN_DELAY_US)
+			continue;
+
+		/* wake up a drained thread */
+		core_id = get_current_affinity();
+
+		/* try local list */
+		wakes = srpc_choose_drained_session(core_id);
+
+		/* try to steal from other cores */
+		i = (core_id + 1) % max_cores;
+		while (!wakes && i != core_id) {
+			wakes = srpc_choose_drained_session(i);
+			i = (i + 1) % max_cores;
+		}
+
+		/* wake up the session */
+		if (wakes) {
+			spin_lock_np(&wakes->lock);
+			assert(wakes->win == 0);
+			th = wakes->sender_th;
+			wakes->sender_th = NULL;
+			wakes->need_winupdate = true;
+			spin_unlock_np(&wakes->lock);
+
+			if (th)
+				thread_ready(th);
+		}
+	}
+}
+
 static void srpc_listener(void *arg)
 {
 	struct netaddr laddr;
@@ -533,9 +571,6 @@ static void srpc_listener(void *arg)
 		list_head_init(&srpc_drained[i].list);
 	}
 
-	spin_lock_init(&srpc_lock);
-	srpc_last_winupdate = microtime();
-
 	atomic_write(&srpc_num_sess, 0);
 	atomic_write(&srpc_num_drained, 0);
 
@@ -543,6 +578,9 @@ static void srpc_listener(void *arg)
 	laddr.port = SRPC_PORT;
 
 	ret = tcp_listen(laddr, 4096, &q);
+	BUG_ON(ret);
+
+	ret = thread_spawn(srpc_waker, NULL);
 	BUG_ON(ret);
 
 	while (true) {
