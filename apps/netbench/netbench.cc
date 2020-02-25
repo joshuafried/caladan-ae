@@ -47,6 +47,8 @@ netaddr raddr, master;
 // the mean service time in us.
 double st;
 
+std::ofstream json_out;
+
 int total_agents = 1;
 // number of iterations required for 1us on target server
 constexpr uint64_t kIterationsPerUS = 69;  // 83
@@ -628,6 +630,32 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
       << p1_que << "," << mean_que << "," << p99_que << "," << rx_pps << ","
       << tx_pps << std::endl;
+
+  json_out << "{"
+	   << "\"num_threads\":" << threads * total_agents << ","
+	   << "\"offered_load\":" << offered_rps << ","
+	   << "\"throughput\":" << rps << ","
+	   << "\"min_tput\":" << min_tput << ","
+	   << "\"max_tput\":" << max_tput << ","
+	   << "\"cpu\":" << cpu_usage << ","
+	   << "\"num_sample\":" << w.size() << ","
+	   << "\"min\":" << min << ","
+	   << "\"mean\":" << mean << ","
+	   << "\"p50\":" << p50 << ","
+	   << "\"p90\":" << p90 << ","
+	   << "\"p99\":" << p99 << ","
+	   << "\"p999\":" << p999 << ","
+	   << "\"p9999\":" << p9999 << ","
+	   << "\"max\":" << max << ","
+	   << "\"p1_win\":" << p1_win << ","
+	   << "\"mean_win\":" << mean_win << ","
+	   << "\"p99_win\":" << p99_win << ","
+	   << "\"p1_q\":" << p1_que << ","
+	   << "\"mean_q\":" << mean_que << ","
+	   << "\"p99_q\":" << p99_que << ","
+	   << "\"rx_pps\":" << rx_pps << ","
+	   << "\"tx_pps\":" << tx_pps
+	   << "}," << std::endl << std::flush;
 }
 
 void SteadyStateExperiment(int threads, double offered_rps,
@@ -701,12 +729,21 @@ void ClientHandler(void *arg) {
 
   calculate_rates();
 
+  std::string json_fname = std::string("outputs/dist_exp_st_") +
+	  std::to_string((int)st) + std::string("_nconn_") +
+	  std::to_string((int)threads) + std::string(".json");
+  json_out.open(json_fname);
+  json_out << "[";
+
   /* Print Header */
   PrintHeader();
 
   for (double i : offered_loads) {
     SteadyStateExperiment(threads, i, st);
   }
+  json_out.seekp(json_out.tellp()-2);
+  json_out << "]";
+  json_out.close();
 }
 
 }  // anonymous namespace
