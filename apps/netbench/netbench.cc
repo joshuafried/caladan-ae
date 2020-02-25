@@ -722,6 +722,8 @@ void AgentHandler(void *arg) {
 }
 
 void ClientHandler(void *arg) {
+  int pos;
+
   if (total_agents > 1) {
     b = new NetBarrier(total_agents - 1);
     BUG_ON(!b);
@@ -731,7 +733,7 @@ void ClientHandler(void *arg) {
 
   std::string json_fname = std::string("outputs/dist_exp_st_") +
 	  std::to_string((int)st) + std::string("_nconn_") +
-	  std::to_string((int)threads) + std::string(".json");
+	  std::to_string((int)(threads * total_agents)) + std::string(".json");
   json_out.open(json_fname);
   json_out << "[";
 
@@ -741,7 +743,9 @@ void ClientHandler(void *arg) {
   for (double i : offered_loads) {
     SteadyStateExperiment(threads, i, st);
   }
-  json_out.seekp(json_out.tellp()-2);
+
+  pos = json_out.tellp();
+  json_out.seekp(pos-2);
   json_out << "]";
   json_out.close();
 }
