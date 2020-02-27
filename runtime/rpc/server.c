@@ -72,6 +72,12 @@ struct srpc_session {
 	struct srpc_ctx		*slots[SRPC_MAX_WINDOW];
 };
 
+/* credit-related stats */
+atomic64_t srpc_stat_winupdate_sent_;
+atomic64_t srpc_stat_resp_sent_;
+atomic64_t srpc_stat_req_recvd_;
+atomic64_t srpc_stat_winupdate_recvd_;
+
 static int srpc_get_slot(struct srpc_session *s)
 {
 	int slot = __builtin_ffsl(s->avail_slots[0]) - 1;
@@ -106,6 +112,8 @@ static int srpc_winupdate(struct srpc_session *s)
 	ret = tcp_write_full(s->c, &shdr, sizeof(shdr));
 	if (unlikely(ret < 0))
 		return ret;
+
+	atomic64_inc(&srpc_stat_winupdate_sent_);
 
 	return 0;
 }
@@ -212,6 +220,8 @@ again:
 		spin_lock_np(&s->lock);
 		s->demand = chdr.demand;
 		spin_unlock_np(&s->lock);
+
+		atomic64_inc(&srpc_stat_req_recvd_);
 		break;
 
 	case RPC_OP_WINUPDATE:
@@ -234,6 +244,7 @@ again:
 		if (th)
 			thread_ready(th);
 
+		atomic64_inc(&srpc_stat_winupdate_recvd_);
 		goto again;
 	default:
 		log_warn("srpc: got invalid op %d", chdr.op);
@@ -271,6 +282,9 @@ static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 		return ret;
 
 	assert(ret == sizeof(shdr) + c->resp_len);
+
+	atomic64_inc(&srpc_stat_resp_sent_);
+
 	return 0;
 }
 
@@ -574,6 +588,12 @@ static void srpc_listener(void *arg)
 	atomic_write(&srpc_num_sess, 0);
 	atomic_write(&srpc_num_drained, 0);
 
+	/* init stats */
+	atomic64_write(&srpc_stat_winupdate_sent_, 0);
+	atomic64_write(&srpc_stat_resp_sent_, 0);
+	atomic64_write(&srpc_stat_req_recvd_, 0);
+	atomic64_write(&srpc_stat_winupdate_recvd_, 0);
+
 	laddr.ip = 0;
 	laddr.port = SRPC_PORT;
 
@@ -614,4 +634,24 @@ int srpc_enable(srpc_fn_t handler)
 	ret = thread_spawn(srpc_listener, NULL);
 	BUG_ON(ret);
 	return 0;
+}
+
+uint64_t srpc_stat_winupdate_sent()
+{
+	return atomic64_read(&srpc_stat_winupdate_sent_);
+}
+
+uint64_t srpc_stat_resp_sent()
+{
+	return atomic64_read(&srpc_stat_resp_sent_);
+}
+
+uint64_t srpc_stat_req_recvd()
+{
+	return atomic64_read(&srpc_stat_req_recvd_);
+}
+
+uint64_t srpc_stat_winupdate_recvd()
+{
+	return atomic64_read(&srpc_stat_winupdate_recvd_);
 }

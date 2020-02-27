@@ -66,6 +66,10 @@ constexpr uint64_t kUptimeMagic = 0xDEADBEEF;
 struct uptime {
   uint64_t idle;
   uint64_t busy;
+  uint64_t winupdate_sent;
+  uint64_t resp_sent;
+  uint64_t req_recvd;
+  uint64_t winupdate_recvd;
 };
 
 constexpr uint64_t kStatPort = 40;
@@ -249,7 +253,11 @@ void UptimeWorker(std::unique_ptr<rt::TcpConn> c) {
     ss >> tmp >> user >> nice >> system >> idle >> iowait >> irq >> softirq >>
         steal >> guest >> guest_nice;
     uptime u = {hton64(idle + iowait),
-                hton64(user + nice + system + irq + softirq + steal)};
+                hton64(user + nice + system + irq + softirq + steal),
+                rt::RpcServerStatWinupdateSent(),
+                rt::RpcServerStatRespSent(),
+                rt::RpcServerStatReqRecvd(),
+                rt::RpcServerStatWinupdateRecvd()};
 
     // Send an uptime response.
     ssize_t sret = c->WriteFull(&u, sizeof(u));
@@ -283,7 +291,8 @@ uptime ReadUptime() {
   ret = c->ReadFull(&u, sizeof(u));
   if (ret != static_cast<ssize_t>(sizeof(u)))
     panic("uptime response failed, ret = %ld", ret);
-  return uptime{ntoh64(u.idle), ntoh64(u.busy)};
+  return uptime{ntoh64(u.idle), ntoh64(u.busy), u.winupdate_sent,
+                u.resp_sent, u.req_recvd, u.winupdate_recvd};
 }
 
 sstat ReadServerStat() {
@@ -468,7 +477,8 @@ std::vector<work_unit> ClientWorker(
 
 std::vector<work_unit> RunExperiment(
     int threads, double *reqs_per_sec, double *min_tput, double *max_tput,
-    double *cpu_usage, double *rx_pps, double *tx_pps,
+    double *cpu_usage, double *rx_pps, double *tx_pps, double *winupdate_sent,
+    double *resp_sent, double *req_recvd, double *winupdate_recvd,
     std::function<std::vector<work_unit>()> wf) {
   // Create one TCP connection per thread.
   std::vector<std::unique_ptr<rt::RpcClient>> conns;
@@ -563,6 +573,19 @@ std::vector<work_unit> RunExperiment(
   if (tx_pps != nullptr)
     *tx_pps = static_cast<double>(tx_pkts) / elapsed * 1000000;
 
+  uint64_t total_winupdate_sent = u2.winupdate_sent - u1.winupdate_sent;
+  uint64_t total_resp_sent = u2.resp_sent - u1.resp_sent;
+  uint64_t total_req_recvd = u2.req_recvd - u1.req_recvd;
+  uint64_t total_winupdate_recvd = u2.winupdate_recvd - u1.winupdate_recvd;
+  if (winupdate_sent != nullptr)
+    *winupdate_sent = static_cast<double>(total_winupdate_sent) / elapsed * 1000000;
+  if (resp_sent != nullptr)
+    *resp_sent = static_cast<double>(total_resp_sent) / elapsed * 1000000;
+  if (req_recvd != nullptr)
+    *req_recvd = static_cast<double>(total_req_recvd) / elapsed * 1000000;
+  if (winupdate_recvd != nullptr)
+    *winupdate_recvd = static_cast<double>(total_winupdate_recvd) / elapsed * 1000000;
+
   return w;
 }
 
@@ -571,12 +594,14 @@ void PrintHeader(std::ostream& os) {
      << "max_tput," << "cpu," << "sample size," << "min," << "mean,"
      << "p50," << "p90," << "p99," << "p999," << "p9999," << "max,"
      << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q,"
-     << "p99_q," << "rx_pps," << "tx_pps" << std::endl;
+     << "p99_q," << "rx_pps," << "tx_pps," << "winupdate_sent," << "resp_sent,"
+     << "req_recvd," << "winupdate_recvd" << std::endl;
 }
 
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
                       double min_tput, double max_tput, double cpu_usage,
-		      double rx_pps, double tx_pps) {
+		      double rx_pps, double tx_pps, double winupdate_sent,
+		      double resp_sent, double req_recvd, double winupdate_recvd) {
   if (w.size() == 0) {
     std::cout << std::setprecision(4) << std::fixed << threads * total_agents
     << "," << offered_rps << "," << "-" << std::endl;
@@ -630,7 +655,8 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << p50 << "," << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
       << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
       << p1_que << "," << mean_que << "," << p99_que << "," << rx_pps << ","
-      << tx_pps << std::endl;
+      << tx_pps << "," << winupdate_sent << "," << resp_sent << ","
+      << req_recvd << "," << winupdate_recvd << std::endl;
 
   csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
       << offered_rps << "," << rps << "," << min_tput << "," << max_tput << ","
@@ -638,7 +664,8 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
       << p50 << "," << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
       << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
       << p1_que << "," << mean_que << "," << p99_que << "," << rx_pps << ","
-      << tx_pps << std::endl << std::flush;
+      << tx_pps << "," << winupdate_sent << "," << resp_sent << ","
+      << req_recvd << "," << winupdate_recvd << std::endl << std::flush;
 
   json_out << "{"
 	   << "\"num_threads\":" << threads * total_agents << ","
@@ -663,7 +690,11 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
 	   << "\"mean_q\":" << mean_que << ","
 	   << "\"p99_q\":" << p99_que << ","
 	   << "\"rx_pps\":" << rx_pps << ","
-	   << "\"tx_pps\":" << tx_pps
+	   << "\"tx_pps\":" << tx_pps << ","
+	   << "\"winupdate_sent\":" << winupdate_sent << ","
+	   << "\"resp_sent\":" << resp_sent << ","
+	   << "\"req_recvd\":" << req_recvd << ","
+	   << "\"winupdate_recvd\":" << winupdate_recvd
 	   << "}," << std::endl << std::flush;
 }
 
@@ -671,8 +702,11 @@ void SteadyStateExperiment(int threads, double offered_rps,
                            double service_time) {
   double rps, cpu_usage, min_tput, max_tput;
   double rx_pps, tx_pps;
+  double winupdate_sent, resp_sent, req_recvd, winupdate_recvd;
   std::vector<work_unit> w = RunExperiment(threads, &rps, &min_tput, &max_tput,
-					   &cpu_usage, &rx_pps, &tx_pps, [=] {
+					   &cpu_usage, &rx_pps, &tx_pps,
+					   &winupdate_sent, &resp_sent,
+					   &req_recvd, &winupdate_recvd, [=] {
     std::mt19937 rg(rand());
     std::mt19937 dg(rand());
     std::exponential_distribution<double> rd(
@@ -689,7 +723,8 @@ void SteadyStateExperiment(int threads, double offered_rps,
 
   // Print the results.
   PrintStatResults(w, offered_rps, rps, min_tput, max_tput, cpu_usage,
-		   rx_pps, tx_pps);
+		   rx_pps, tx_pps, winupdate_sent, resp_sent, req_recvd,
+		   winupdate_recvd);
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {
