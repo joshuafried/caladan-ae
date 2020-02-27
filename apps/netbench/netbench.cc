@@ -90,7 +90,7 @@ struct work_unit {
 
 class NetBarrier {
  public:
-  static constexpr uint64_t npara = 100;
+  static constexpr uint64_t npara = 10;
   NetBarrier(int npeers) {
     threads /= total_agents;
 
