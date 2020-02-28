@@ -61,9 +61,9 @@ double offered_load;
 
 static SyntheticWorker *workers[NCPU];
 
-constexpr uint64_t kUptimePort = 8002;
-constexpr uint64_t kUptimeMagic = 0xDEADBEEF;
-struct uptime {
+constexpr uint64_t kServerStatPort = 8002;
+constexpr uint64_t kServerStatMagic = 0xDEADBEEF;
+struct sstat {
   uint64_t idle;
   uint64_t busy;
   uint64_t winupdate_sent;
@@ -72,9 +72,9 @@ struct uptime {
   uint64_t winupdate_recvd;
 };
 
-constexpr uint64_t kStatPort = 40;
-constexpr uint64_t kStatMagic = 0xDEADBEEF;
-struct sstat {
+constexpr uint64_t kShenangoStatPort = 40;
+constexpr uint64_t kShenangoStatMagic = 0xDEADBEEF;
+struct shstat {
   uint64_t rx_pkts;
   uint64_t tx_pkts;
 };
@@ -228,7 +228,7 @@ class NetBarrier {
 
 static NetBarrier *b;
 
-void UptimeWorker(std::unique_ptr<rt::TcpConn> c) {
+void ServerStatWorker(std::unique_ptr<rt::TcpConn> c) {
   while (true) {
     // Receive an uptime request.
     uint64_t magic;
@@ -240,7 +240,7 @@ void UptimeWorker(std::unique_ptr<rt::TcpConn> c) {
     }
 
     // Check for the right magic value.
-    if (ntoh64(magic) != kUptimeMagic) break;
+    if (ntoh64(magic) != kServerStatMagic) break;
 
     // Calculate the current uptime.
     std::ifstream file("/proc/stat");
@@ -252,12 +252,12 @@ void UptimeWorker(std::unique_ptr<rt::TcpConn> c) {
         guest_nice;
     ss >> tmp >> user >> nice >> system >> idle >> iowait >> irq >> softirq >>
         steal >> guest >> guest_nice;
-    uptime u = {hton64(idle + iowait),
-                hton64(user + nice + system + irq + softirq + steal),
-                rt::RpcServerStatWinupdateSent(),
-                rt::RpcServerStatRespSent(),
-                rt::RpcServerStatReqRecvd(),
-                rt::RpcServerStatWinupdateRecvd()};
+    sstat u = {idle + iowait,
+               user + nice + system + irq + softirq + steal,
+               rt::RpcServerStatWinupdateSent(),
+               rt::RpcServerStatRespSent(),
+               rt::RpcServerStatReqRecvd(),
+               rt::RpcServerStatWinupdateRecvd()};
 
     // Send an uptime response.
     ssize_t sret = c->WriteFull(&u, sizeof(u));
@@ -269,39 +269,39 @@ void UptimeWorker(std::unique_ptr<rt::TcpConn> c) {
   }
 }
 
-void UptimeServer() {
-  std::unique_ptr<rt::TcpQueue> q(rt::TcpQueue::Listen({0, kUptimePort}, 4096));
+void ServerStatServer() {
+  std::unique_ptr<rt::TcpQueue> q(rt::TcpQueue::Listen({0, kServerStatPort}, 4096));
   if (q == nullptr) panic("couldn't listen for connections");
 
   while (true) {
     rt::TcpConn *c = q->Accept();
     if (c == nullptr) panic("couldn't accept a connection");
-    rt::Thread([=] { UptimeWorker(std::unique_ptr<rt::TcpConn>(c)); }).Detach();
+    rt::Thread([=] { ServerStatWorker(std::unique_ptr<rt::TcpConn>(c)); }).Detach();
   }
 }
 
-uptime ReadUptime() {
+sstat ReadServerStat() {
   std::unique_ptr<rt::TcpConn> c(
-      rt::TcpConn::Dial({0, 0}, {raddr.ip, kUptimePort}));
-  uint64_t magic = hton64(kUptimeMagic);
+      rt::TcpConn::Dial({0, 0}, {raddr.ip, kServerStatPort}));
+  uint64_t magic = hton64(kServerStatMagic);
   ssize_t ret = c->WriteFull(&magic, sizeof(magic));
   if (ret != static_cast<ssize_t>(sizeof(magic)))
-    panic("uptime request failed, ret = %ld", ret);
-  uptime u;
+    panic("sstat request failed, ret = %ld", ret);
+  sstat u;
   ret = c->ReadFull(&u, sizeof(u));
   if (ret != static_cast<ssize_t>(sizeof(u)))
-    panic("uptime response failed, ret = %ld", ret);
-  return uptime{ntoh64(u.idle), ntoh64(u.busy), u.winupdate_sent,
+    panic("sstat response failed, ret = %ld", ret);
+  return sstat{u.idle, u.busy, u.winupdate_sent,
                 u.resp_sent, u.req_recvd, u.winupdate_recvd};
 }
 
-sstat ReadServerStat() {
+shstat ReadShenangoStat() {
   char *buf_;
   std::string buf;
   std::map<std::string, uint64_t> smap;
   std::unique_ptr<rt::TcpConn> c(
-      rt::TcpConn::Dial({0,0}, {raddr.ip, kStatPort}));
-  uint64_t magic = hton64(kStatMagic);
+      rt::TcpConn::Dial({0,0}, {raddr.ip, kShenangoStatPort}));
+  uint64_t magic = hton64(kShenangoStatMagic);
   ssize_t ret = c->WriteFull(&magic, sizeof(magic));
   if (ret != static_cast<ssize_t>(sizeof(magic)))
     panic("server stat request failed, ret = %ld", ret);
@@ -341,7 +341,7 @@ sstat ReadServerStat() {
 
   free(buf_);
 
-  return sstat{smap["rx_packets"], smap["tx_packets"]};
+  return shstat{smap["rx_packets"], smap["tx_packets"]};
 }
 
 constexpr uint64_t kNetbenchPort = 8001;
@@ -381,7 +381,7 @@ void RpcServer(struct srpc_ctx *ctx) {
 }
 
 void ServerHandler(void *arg) {
-  rt::Thread([] { UptimeServer(); }).Detach();
+  rt::Thread([] { ServerStatServer(); }).Detach();
   int num_cores = rt::RuntimeMaxCores();
 
   for (int i = 0; i < num_cores; ++i) {
@@ -513,8 +513,8 @@ std::vector<work_unit> RunExperiment(
   timex = std::time(nullptr);
   auto start = steady_clock::now();
   barrier();
-  uptime u1 = ReadUptime();
-  sstat s1 = ReadServerStat();
+  sstat u1 = ReadServerStat();
+  shstat s1 = ReadShenangoStat();
 
   // Wait for the workers to finish.
   for (auto &t : th) t.Join();
@@ -523,8 +523,8 @@ std::vector<work_unit> RunExperiment(
   barrier();
   auto finish = steady_clock::now();
   barrier();
-  uptime u2 = ReadUptime();
-  sstat s2 = ReadServerStat();
+  sstat u2 = ReadServerStat();
+  shstat s2 = ReadShenangoStat();
 
   // Force the connections to close.
   for (auto &c : conns) c->Abort();
