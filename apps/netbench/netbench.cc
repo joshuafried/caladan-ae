@@ -61,22 +61,34 @@ double offered_load;
 
 static SyntheticWorker *workers[NCPU];
 
-constexpr uint64_t kServerStatPort = 8002;
-constexpr uint64_t kServerStatMagic = 0xDEADBEEF;
-struct sstat {
+constexpr uint64_t kRPCStatPort = 8002;
+constexpr uint64_t kRPCStatMagic = 0xDEADBEEF;
+struct rpcstat_raw {
   uint64_t idle;
   uint64_t busy;
-  uint64_t winupdate_sent;
-  uint64_t resp_sent;
-  uint64_t req_recvd;
-  uint64_t winupdate_recvd;
+  unsigned int num_cores;
+  unsigned int max_cores;
+  uint64_t winu_rx;
+  uint64_t winu_tx;
+  uint64_t req_rx;
+  uint64_t resp_tx;
 };
 
 constexpr uint64_t kShenangoStatPort = 40;
 constexpr uint64_t kShenangoStatMagic = 0xDEADBEEF;
-struct shstat {
+struct shstat_raw {
   uint64_t rx_pkts;
   uint64_t tx_pkts;
+};
+
+struct sstat {
+  double cpu_usage;
+  double rx_pps;
+  double tx_pps;
+  double winu_rx_pps;
+  double winu_tx_pps;
+  double req_rx_pps;
+  double resp_tx_pps;
 };
 
 struct work_unit {
@@ -232,7 +244,7 @@ class NetBarrier {
 
 static NetBarrier *b;
 
-void ServerStatWorker(std::unique_ptr<rt::TcpConn> c) {
+void RPCStatWorker(std::unique_ptr<rt::TcpConn> c) {
   while (true) {
     // Receive an uptime request.
     uint64_t magic;
@@ -244,7 +256,7 @@ void ServerStatWorker(std::unique_ptr<rt::TcpConn> c) {
     }
 
     // Check for the right magic value.
-    if (ntoh64(magic) != kServerStatMagic) break;
+    if (ntoh64(magic) != kRPCStatMagic) break;
 
     // Calculate the current uptime.
     std::ifstream file("/proc/stat");
@@ -256,12 +268,14 @@ void ServerStatWorker(std::unique_ptr<rt::TcpConn> c) {
         guest_nice;
     ss >> tmp >> user >> nice >> system >> idle >> iowait >> irq >> softirq >>
         steal >> guest >> guest_nice;
-    sstat u = {idle + iowait,
+    rpcstat_raw u = {idle + iowait,
                user + nice + system + irq + softirq + steal,
-               rt::RpcServerStatWinupdateSent(),
-               rt::RpcServerStatRespSent(),
-               rt::RpcServerStatReqRecvd(),
-               rt::RpcServerStatWinupdateRecvd()};
+	       rt::RuntimeMaxCores(),
+	       static_cast<unsigned int>(sysconf(_SC_NPROCESSORS_ONLN)),
+	       rt::RpcServerStatWinuRx(),
+	       rt::RpcServerStatWinuTx(),
+	       rt::RpcServerStatReqRx(),
+	       rt::RpcServerStatRespTx()};
 
     // Send an uptime response.
     ssize_t sret = c->WriteFull(&u, sizeof(u));
@@ -273,33 +287,33 @@ void ServerStatWorker(std::unique_ptr<rt::TcpConn> c) {
   }
 }
 
-void ServerStatServer() {
-  std::unique_ptr<rt::TcpQueue> q(rt::TcpQueue::Listen({0, kServerStatPort}, 4096));
+void RPCStatServer() {
+  std::unique_ptr<rt::TcpQueue> q(rt::TcpQueue::Listen({0, kRPCStatPort}, 4096));
   if (q == nullptr) panic("couldn't listen for connections");
 
   while (true) {
     rt::TcpConn *c = q->Accept();
     if (c == nullptr) panic("couldn't accept a connection");
-    rt::Thread([=] { ServerStatWorker(std::unique_ptr<rt::TcpConn>(c)); }).Detach();
+    rt::Thread([=] { RPCStatWorker(std::unique_ptr<rt::TcpConn>(c)); }).Detach();
   }
 }
 
-sstat ReadServerStat() {
+rpcstat_raw ReadRPCStat() {
   std::unique_ptr<rt::TcpConn> c(
-      rt::TcpConn::Dial({0, 0}, {raddr.ip, kServerStatPort}));
-  uint64_t magic = hton64(kServerStatMagic);
+      rt::TcpConn::Dial({0, 0}, {raddr.ip, kRPCStatPort}));
+  uint64_t magic = hton64(kRPCStatMagic);
   ssize_t ret = c->WriteFull(&magic, sizeof(magic));
   if (ret != static_cast<ssize_t>(sizeof(magic)))
     panic("sstat request failed, ret = %ld", ret);
-  sstat u;
+  rpcstat_raw u;
   ret = c->ReadFull(&u, sizeof(u));
   if (ret != static_cast<ssize_t>(sizeof(u)))
     panic("sstat response failed, ret = %ld", ret);
-  return sstat{u.idle, u.busy, u.winupdate_sent,
-                u.resp_sent, u.req_recvd, u.winupdate_recvd};
+  return rpcstat_raw{u.idle, u.busy, u.num_cores, u.max_cores, u.winu_rx,
+                   u.winu_tx, u.req_rx, u.resp_tx};
 }
 
-shstat ReadShenangoStat() {
+shstat_raw ReadShenangoStat() {
   char *buf_;
   std::string buf;
   std::map<std::string, uint64_t> smap;
@@ -308,18 +322,18 @@ shstat ReadShenangoStat() {
   uint64_t magic = hton64(kShenangoStatMagic);
   ssize_t ret = c->WriteFull(&magic, sizeof(magic));
   if (ret != static_cast<ssize_t>(sizeof(magic)))
-    panic("server stat request failed, ret = %ld", ret);
+    panic("Shenango stat request failed, ret = %ld", ret);
 
   size_t resp_len;
   ret = c->ReadFull(&resp_len, sizeof(resp_len));
   if (ret != static_cast<ssize_t>(sizeof(resp_len)))
-    panic("server stat response failed, ret = %ld", ret);
+    panic("Shenango stat response failed, ret = %ld", ret);
 
   buf_ = (char *)malloc(resp_len);
 
   ret = c->ReadFull(buf_, resp_len);
   if (ret != static_cast<ssize_t>(resp_len))
-    panic("server stat response failed, ret = %ld", ret);
+    panic("Shenango stat response failed, ret = %ld", ret);
 
   buf = std::string(buf_);
 
@@ -345,7 +359,7 @@ shstat ReadShenangoStat() {
 
   free(buf_);
 
-  return shstat{smap["rx_packets"], smap["tx_packets"]};
+  return shstat_raw{smap["rx_packets"], smap["tx_packets"]};
 }
 
 constexpr uint64_t kNetbenchPort = 8001;
@@ -385,7 +399,7 @@ void RpcServer(struct srpc_ctx *ctx) {
 }
 
 void ServerHandler(void *arg) {
-  rt::Thread([] { ServerStatServer(); }).Detach();
+  rt::Thread([] { RPCStatServer(); }).Detach();
   int num_cores = rt::RuntimeMaxCores();
 
   for (int i = 0; i < num_cores; ++i) {
@@ -481,9 +495,7 @@ std::vector<work_unit> ClientWorker(
 
 std::vector<work_unit> RunExperiment(
     int threads, double *reqs_per_sec, double *min_tput, double *max_tput,
-    double *cpu_usage, double *rx_pps, double *tx_pps, double *winupdate_sent,
-    double *resp_sent, double *req_recvd, double *winupdate_recvd,
-    std::function<std::vector<work_unit>()> wf) {
+    struct sstat *s, std::function<std::vector<work_unit>()> wf) {
   // Create one TCP connection per thread.
   std::vector<std::unique_ptr<rt::RpcClient>> conns;
   for (int i = 0; i < threads; ++i) {
@@ -517,11 +529,11 @@ std::vector<work_unit> RunExperiment(
   timex = std::time(nullptr);
   auto start = steady_clock::now();
   barrier();
-  sstat s1, s2;
-  shstat sh1, sh2;
+  rpcstat_raw s1, s2;
+  shstat_raw sh1, sh2;
 
   if (!b || b->IsLeader()) {
-    s1 = ReadServerStat();
+    s1 = ReadRPCStat();
     sh1 = ReadShenangoStat();
   }
 
@@ -534,7 +546,7 @@ std::vector<work_unit> RunExperiment(
   barrier();
 
   if (!b || b->IsLeader()) {
-    s2 = ReadServerStat();
+    s2 = ReadRPCStat();
     sh2 = ReadShenangoStat();
   }
 
@@ -573,31 +585,27 @@ std::vector<work_unit> RunExperiment(
   *min_tput = min_throughput;
   *max_tput = max_throughput;
 
-  if (!b || b->IsLeader()) {
+  if ((!b || b->IsLeader()) && s) {
     uint64_t idle = s2.idle - s1.idle;
     uint64_t busy = s2.busy - s1.busy;
-    if (cpu_usage != nullptr)
-      *cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
+    s->cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
+
+    s->cpu_usage = (s->cpu_usage - 1 / static_cast<double>(s1.max_cores)) /
+	    (static_cast<double>(s1.num_cores) / static_cast<double>(s1.max_cores));
+
+    uint64_t winu_rx_pkts = s2.winu_rx - s1.winu_rx;
+    uint64_t winu_tx_pkts = s2.winu_tx - s1.winu_tx;
+    uint64_t req_rx_pkts = s2.req_rx - s1.req_rx;
+    uint64_t resp_tx_pkts = s2.resp_tx - s1.resp_tx;
+    s->winu_rx_pps = static_cast<double>(winu_rx_pkts) / elapsed * 1000000;
+    s->winu_tx_pps = static_cast<double>(winu_tx_pkts) / elapsed * 1000000;
+    s->req_rx_pps = static_cast<double>(req_rx_pkts) / elapsed * 1000000;
+    s->resp_tx_pps = static_cast<double>(resp_tx_pkts) / elapsed * 1000000;
 
     uint64_t rx_pkts = sh2.rx_pkts - sh1.rx_pkts;
     uint64_t tx_pkts = sh2.tx_pkts - sh1.tx_pkts;
-    if (rx_pps != nullptr)
-      *rx_pps = static_cast<double>(rx_pkts) / elapsed * 1000000;
-    if (tx_pps != nullptr)
-      *tx_pps = static_cast<double>(tx_pkts) / elapsed * 1000000;
-
-    uint64_t total_winupdate_sent = s2.winupdate_sent - s1.winupdate_sent;
-    uint64_t total_resp_sent = s2.resp_sent - s1.resp_sent;
-    uint64_t total_req_recvd = s2.req_recvd - s1.req_recvd;
-    uint64_t total_winupdate_recvd = s2.winupdate_recvd - s1.winupdate_recvd;
-    if (winupdate_sent != nullptr)
-      *winupdate_sent = static_cast<double>(total_winupdate_sent) / elapsed * 1000000;
-    if (resp_sent != nullptr)
-      *resp_sent = static_cast<double>(total_resp_sent) / elapsed * 1000000;
-    if (req_recvd != nullptr)
-      *req_recvd = static_cast<double>(total_req_recvd) / elapsed * 1000000;
-    if (winupdate_recvd != nullptr)
-      *winupdate_recvd = static_cast<double>(total_winupdate_recvd) / elapsed * 1000000;
+    s->rx_pps = static_cast<double>(rx_pkts) / elapsed * 1000000;
+    s->tx_pps = static_cast<double>(tx_pkts) / elapsed * 1000000;
   }
 
   return w;
@@ -608,14 +616,12 @@ void PrintHeader(std::ostream& os) {
      << "max_tput," << "cpu," << "sample size," << "min," << "mean,"
      << "p50," << "p90," << "p99," << "p999," << "p9999," << "max,"
      << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q,"
-     << "p99_q," << "rx_pps," << "tx_pps," << "winupdate_sent," << "resp_sent,"
-     << "req_recvd," << "winupdate_recvd" << std::endl;
+     << "p99_q," << "rx_pps," << "tx_pps," << "winu_rx_pps," << "winu_tx_pps,"
+     << "req_rx_pps," << "resp_tx_pps" << std::endl;
 }
 
 void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
-                      double min_tput, double max_tput, double cpu_usage,
-		      double rx_pps, double tx_pps, double winupdate_sent,
-		      double resp_sent, double req_recvd, double winupdate_recvd) {
+                      double min_tput, double max_tput, struct sstat s) {
   if (w.size() == 0) {
     std::cout << std::setprecision(4) << std::fixed << threads * total_agents
     << "," << offered_rps << "," << "-" << std::endl;
@@ -658,28 +664,26 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
   double p1_que = w[count * 0.01].server_queue;
   double p99_que = w[count * 0.99].server_queue;
 
-  cpu_usage = (cpu_usage - 0.05) / 0.5;
-
   std::cout  //<<
              //"#threads,offered_rps,rps,cpu_usage,samples,min,mean,p90,p99,p999,p9999,max"
              //<< std::endl
       << std::setprecision(4) << std::fixed << threads * total_agents << ","
       << offered_rps << "," << rps << "," << min_tput << "," << max_tput << ","
-      << cpu_usage << "," << w.size() << "," << min << "," << mean << ","
+      << s.cpu_usage << "," << w.size() << "," << min << "," << mean << ","
       << p50 << "," << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
       << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
-      << p1_que << "," << mean_que << "," << p99_que << "," << rx_pps << ","
-      << tx_pps << "," << winupdate_sent << "," << resp_sent << ","
-      << req_recvd << "," << winupdate_recvd << std::endl;
+      << p1_que << "," << mean_que << "," << p99_que << "," << s.rx_pps << ","
+      << s.tx_pps << "," << s.winu_rx_pps << "," << s.winu_tx_pps << ","
+      << s.req_rx_pps << "," << s.resp_tx_pps << std::endl;
 
   csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
       << offered_rps << "," << rps << "," << min_tput << "," << max_tput << ","
-      << cpu_usage << "," << w.size() << "," << min << "," << mean << ","
+      << s.cpu_usage << "," << w.size() << "," << min << "," << mean << ","
       << p50 << "," << p90 << "," << p99 << "," << p999 << "," << p9999 << ","
       << max << "," << p1_win << "," << mean_win << "," << p99_win << ","
-      << p1_que << "," << mean_que << "," << p99_que << "," << rx_pps << ","
-      << tx_pps << "," << winupdate_sent << "," << resp_sent << ","
-      << req_recvd << "," << winupdate_recvd << std::endl << std::flush;
+      << p1_que << "," << mean_que << "," << p99_que << "," << s.rx_pps << ","
+      << s.tx_pps << "," << s.winu_rx_pps << "," << s.winu_tx_pps << ","
+      << s.req_rx_pps << "," << s.resp_tx_pps << std::endl << std::flush;
 
   json_out << "{"
 	   << "\"num_threads\":" << threads * total_agents << ","
@@ -687,7 +691,7 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
 	   << "\"throughput\":" << rps << ","
 	   << "\"min_tput\":" << min_tput << ","
 	   << "\"max_tput\":" << max_tput << ","
-	   << "\"cpu\":" << cpu_usage << ","
+	   << "\"cpu\":" << s.cpu_usage << ","
 	   << "\"num_sample\":" << w.size() << ","
 	   << "\"min\":" << min << ","
 	   << "\"mean\":" << mean << ","
@@ -703,24 +707,21 @@ void PrintStatResults(std::vector<work_unit> w, double offered_rps, double rps,
 	   << "\"p1_q\":" << p1_que << ","
 	   << "\"mean_q\":" << mean_que << ","
 	   << "\"p99_q\":" << p99_que << ","
-	   << "\"rx_pps\":" << rx_pps << ","
-	   << "\"tx_pps\":" << tx_pps << ","
-	   << "\"winupdate_sent\":" << winupdate_sent << ","
-	   << "\"resp_sent\":" << resp_sent << ","
-	   << "\"req_recvd\":" << req_recvd << ","
-	   << "\"winupdate_recvd\":" << winupdate_recvd
+	   << "\"rx_pps\":" << s.rx_pps << ","
+	   << "\"tx_pps\":" << s.tx_pps << ","
+	   << "\"winu_rx_pps\":" << s.winu_rx_pps << ","
+	   << "\"winu_tx_pps\":" << s.winu_tx_pps << ","
+	   << "\"req_rx_pps\":" << s.req_rx_pps << ","
+	   << "\"resp_tx_pps\":" << s.resp_tx_pps
 	   << "}," << std::endl << std::flush;
 }
 
 void SteadyStateExperiment(int threads, double offered_rps,
                            double service_time) {
-  double rps, cpu_usage, min_tput, max_tput;
-  double rx_pps, tx_pps;
-  double winupdate_sent, resp_sent, req_recvd, winupdate_recvd;
+  double rps, min_tput, max_tput;
+  struct sstat s;
   std::vector<work_unit> w = RunExperiment(threads, &rps, &min_tput, &max_tput,
-					   &cpu_usage, &rx_pps, &tx_pps,
-					   &winupdate_sent, &resp_sent,
-					   &req_recvd, &winupdate_recvd, [=] {
+					   &s, [=] {
     std::mt19937 rg(rand());
     std::mt19937 dg(rand());
     std::exponential_distribution<double> rd(
@@ -736,9 +737,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
   }
 
   // Print the results.
-  PrintStatResults(w, offered_rps, rps, min_tput, max_tput, cpu_usage,
-		   rx_pps, tx_pps, winupdate_sent, resp_sent, req_recvd,
-		   winupdate_recvd);
+  PrintStatResults(w, offered_rps, rps, min_tput, max_tput, s);
 }
 
 int StringToAddr(const char *str, uint32_t *addr) {

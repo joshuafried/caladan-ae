@@ -32,10 +32,10 @@ struct srpc_ctx {
 typedef void (*srpc_fn_t)(struct srpc_ctx *ctx);
 
 extern int srpc_enable(srpc_fn_t handler);
-extern uint64_t srpc_stat_winupdate_sent();
-extern uint64_t srpc_stat_resp_sent();
-extern uint64_t srpc_stat_req_recvd();
-extern uint64_t srpc_stat_winupdate_recvd();
+extern uint64_t srpc_stat_winu_rx();
+extern uint64_t srpc_stat_winu_tx();
+extern uint64_t srpc_stat_req_rx();
+extern uint64_t srpc_stat_resp_tx();
 
 /*
  * Client API

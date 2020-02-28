@@ -65,9 +65,8 @@ class RpcClient {
 // Can only be called once.
 int RpcServerEnable(std::function<void(struct srpc_ctx *)> f);
 
-uint64_t RpcServerStatWinupdateSent();
-uint64_t RpcServerStatRespSent();
-uint64_t RpcServerStatReqRecvd();
-uint64_t RpcServerStatWinupdateRecvd();
-
+uint64_t RpcServerStatWinuRx();
+uint64_t RpcServerStatWinuTx();
+uint64_t RpcServerStatReqRx();
+uint64_t RpcServerStatRespTx();
 } // namespace rt

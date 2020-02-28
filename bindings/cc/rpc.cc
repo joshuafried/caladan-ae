@@ -19,20 +19,20 @@ int RpcServerEnable(std::function<void(struct srpc_ctx *)> f) {
   return ret;
 }
 
-uint64_t RpcServerStatWinupdateSent() {
-  return srpc_stat_winupdate_sent();
+uint64_t RpcServerStatWinuRx() {
+  return srpc_stat_winu_rx();
 }
 
-uint64_t RpcServerStatRespSent() {
-  return srpc_stat_resp_sent();
+uint64_t RpcServerStatWinuTx() {
+  return srpc_stat_winu_tx();
 }
 
-uint64_t RpcServerStatReqRecvd() {
-  return srpc_stat_req_recvd();
+uint64_t RpcServerStatReqRx() {
+  return srpc_stat_req_rx();
 }
 
-uint64_t RpcServerStatWinupdateRecvd() {
-  return srpc_stat_winupdate_recvd();
+uint64_t RpcServerStatRespTx() {
+  return srpc_stat_resp_tx();
 }
 
 } // namespace rt
