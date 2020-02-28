@@ -40,6 +40,7 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 
 	assert(ret == sizeof(chdr));
 	s->last_demand = chdr.demand;
+	s->winu_tx_++;
 
 	return 0;
 }
@@ -69,6 +70,7 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 		return ret;
 	assert(ret == sizeof(chdr) + len);
 	s->last_demand = chdr.demand;
+	s->req_tx_++;
 
 	return len;
 }
@@ -117,8 +119,10 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	assert_mutex_held(&s->lock);
 
 	/* if the queue is full, drop tail */
-	if (s->head - s->tail >= CRPC_QLEN)
+	if (s->head - s->tail >= CRPC_QLEN) {
 		s->tail++;
+		s->req_dropped_++;
+	}
 
 	pos = s->head++ % CRPC_QLEN;
 	*cque = microtime();
@@ -162,6 +166,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	if (s->win_timestamp > 0 &&
 	    now - s->win_timestamp > CRPC_CREDIT_LIFETIME_US &&
 	    s->win_used < s->win_avail) {
+		s->win_expired_ += (s->win_avail - s->win_used);
 		s->win_avail = s->win_used;
 		if (s->win_used == 0)
 			s->win_timestamp = 0;
@@ -241,6 +246,7 @@ again:
 			crpc_drain_queue(s);
 		}
 		mutex_unlock(&s->lock);
+		s->resp_rx_++;
 
 		break;
 	case RPC_OP_WINUPDATE:
@@ -260,6 +266,7 @@ again:
 			crpc_drain_queue(s);
 		}
 		mutex_unlock(&s->lock);
+		s->winu_rx_++;
 
 		goto again;
 	default:

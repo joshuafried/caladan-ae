@@ -49,6 +49,30 @@ class RpcClient {
     return crpc_win_avail(s_);
   }
 
+  uint64_t StatWinuRx() {
+    return crpc_stat_winu_rx(s_);
+  }
+
+  uint64_t StatWinuTx() {
+    return crpc_stat_winu_tx(s_);
+  }
+
+  uint64_t StatRespRx() {
+    return crpc_stat_resp_rx(s_);
+  }
+
+  uint64_t StatReqTx() {
+    return crpc_stat_req_tx(s_);
+  }
+
+  uint64_t StatWinExpired() {
+    return crpc_stat_win_expired(s_);
+  }
+
+  uint64_t StatReqDropped() {
+    return crpc_stat_req_dropped(s_);
+  }
+
   // Shuts down the RPC connection.
   int Shutdown(int how) { return tcp_shutdown(s_->c, how); }
   // Aborts the RPC connection.
