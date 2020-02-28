@@ -175,6 +175,10 @@ class NetBarrier {
     return is_leader_;
   }
 
+  bool IsLeader() {
+    return is_leader_;
+  }
+
  private:
   std::vector<std::unique_ptr<rt::TcpConn>> conns;
   std::unique_ptr<rt::TcpQueue> aggregator_;
@@ -513,8 +517,13 @@ std::vector<work_unit> RunExperiment(
   timex = std::time(nullptr);
   auto start = steady_clock::now();
   barrier();
-  sstat u1 = ReadServerStat();
-  shstat s1 = ReadShenangoStat();
+  sstat s1, s2;
+  shstat sh1, sh2;
+
+  if (!b || b->IsLeader()) {
+    s1 = ReadServerStat();
+    sh1 = ReadShenangoStat();
+  }
 
   // Wait for the workers to finish.
   for (auto &t : th) t.Join();
@@ -523,8 +532,11 @@ std::vector<work_unit> RunExperiment(
   barrier();
   auto finish = steady_clock::now();
   barrier();
-  sstat u2 = ReadServerStat();
-  shstat s2 = ReadShenangoStat();
+
+  if (!b || b->IsLeader()) {
+    s2 = ReadServerStat();
+    sh2 = ReadShenangoStat();
+  }
 
   // Force the connections to close.
   for (auto &c : conns) c->Abort();
@@ -561,30 +573,32 @@ std::vector<work_unit> RunExperiment(
   *min_tput = min_throughput;
   *max_tput = max_throughput;
 
-  uint64_t idle = u2.idle - u1.idle;
-  uint64_t busy = u2.busy - u1.busy;
-  if (cpu_usage != nullptr)
-    *cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
+  if (!b || b->IsLeader()) {
+    uint64_t idle = s2.idle - s1.idle;
+    uint64_t busy = s2.busy - s1.busy;
+    if (cpu_usage != nullptr)
+      *cpu_usage = static_cast<double>(busy) / static_cast<double>(idle + busy);
 
-  uint64_t rx_pkts = s2.rx_pkts - s1.rx_pkts;
-  uint64_t tx_pkts = s2.tx_pkts - s1.tx_pkts;
-  if (rx_pps != nullptr)
-    *rx_pps = static_cast<double>(rx_pkts) / elapsed * 1000000;
-  if (tx_pps != nullptr)
-    *tx_pps = static_cast<double>(tx_pkts) / elapsed * 1000000;
+    uint64_t rx_pkts = sh2.rx_pkts - sh1.rx_pkts;
+    uint64_t tx_pkts = sh2.tx_pkts - sh1.tx_pkts;
+    if (rx_pps != nullptr)
+      *rx_pps = static_cast<double>(rx_pkts) / elapsed * 1000000;
+    if (tx_pps != nullptr)
+      *tx_pps = static_cast<double>(tx_pkts) / elapsed * 1000000;
 
-  uint64_t total_winupdate_sent = u2.winupdate_sent - u1.winupdate_sent;
-  uint64_t total_resp_sent = u2.resp_sent - u1.resp_sent;
-  uint64_t total_req_recvd = u2.req_recvd - u1.req_recvd;
-  uint64_t total_winupdate_recvd = u2.winupdate_recvd - u1.winupdate_recvd;
-  if (winupdate_sent != nullptr)
-    *winupdate_sent = static_cast<double>(total_winupdate_sent) / elapsed * 1000000;
-  if (resp_sent != nullptr)
-    *resp_sent = static_cast<double>(total_resp_sent) / elapsed * 1000000;
-  if (req_recvd != nullptr)
-    *req_recvd = static_cast<double>(total_req_recvd) / elapsed * 1000000;
-  if (winupdate_recvd != nullptr)
-    *winupdate_recvd = static_cast<double>(total_winupdate_recvd) / elapsed * 1000000;
+    uint64_t total_winupdate_sent = s2.winupdate_sent - s1.winupdate_sent;
+    uint64_t total_resp_sent = s2.resp_sent - s1.resp_sent;
+    uint64_t total_req_recvd = s2.req_recvd - s1.req_recvd;
+    uint64_t total_winupdate_recvd = s2.winupdate_recvd - s1.winupdate_recvd;
+    if (winupdate_sent != nullptr)
+      *winupdate_sent = static_cast<double>(total_winupdate_sent) / elapsed * 1000000;
+    if (resp_sent != nullptr)
+      *resp_sent = static_cast<double>(total_resp_sent) / elapsed * 1000000;
+    if (req_recvd != nullptr)
+      *req_recvd = static_cast<double>(total_req_recvd) / elapsed * 1000000;
+    if (winupdate_recvd != nullptr)
+      *winupdate_recvd = static_cast<double>(total_winupdate_recvd) / elapsed * 1000000;
+  }
 
   return w;
 }
