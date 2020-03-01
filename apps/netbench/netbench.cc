@@ -80,12 +80,20 @@ constexpr uint64_t kShenangoStatMagic = 0xDEADBEEF;
 struct shstat_raw {
   uint64_t rx_pkts;
   uint64_t tx_pkts;
+  uint64_t rx_bytes;
+  uint64_t tx_bytes;
+  uint64_t drops;
+  uint64_t rx_tcp_ooo;
 };
 
 struct sstat {
   double cpu_usage;
   double rx_pps;
   double tx_pps;
+  double rx_bps;
+  double tx_bps;
+  double rx_drops_pps;
+  double rx_ooo_pps;
   double winu_rx_pps;
   double winu_tx_pps;
   double req_rx_pps;
@@ -387,7 +395,8 @@ shstat_raw ReadShenangoStat() {
 
   free(buf_);
 
-  return shstat_raw{smap["rx_packets"], smap["tx_packets"]};
+  return shstat_raw{smap["rx_packets"], smap["tx_packets"], smap["rx_bytes"],
+	            smap["tx_bytes"], smap["drops"], smap["rx_tcp_out_of_order"]};
 }
 
 constexpr uint64_t kNetbenchPort = 8001;
@@ -644,8 +653,16 @@ std::vector<work_unit> RunExperiment(
 
     uint64_t rx_pkts = sh2.rx_pkts - sh1.rx_pkts;
     uint64_t tx_pkts = sh2.tx_pkts - sh1.tx_pkts;
+    uint64_t rx_bytes = sh2.rx_bytes - sh1.rx_bytes;
+    uint64_t tx_bytes = sh2.tx_bytes - sh1.tx_bytes;
+    uint64_t drops = sh2.drops - sh1.drops;
+    uint64_t rx_tcp_ooo = sh2.rx_tcp_ooo - sh1.rx_tcp_ooo;
     ss->rx_pps = static_cast<double>(rx_pkts) / elapsed_ * 1000000;
     ss->tx_pps = static_cast<double>(tx_pkts) / elapsed_ * 1000000;
+    ss->rx_bps = static_cast<double>(rx_bytes) / elapsed_ * 8000000;
+    ss->tx_bps = static_cast<double>(tx_bytes) / elapsed_ * 8000000;
+    ss->rx_drops_pps = static_cast<double>(drops) / elapsed_ * 1000000;
+    ss->rx_ooo_pps = static_cast<double>(rx_tcp_ooo) / elapsed_ * 1000000;
   }
 
   *elapsed = elapsed_;
@@ -657,7 +674,8 @@ void PrintHeader(std::ostream& os) {
   os << "num_threads," << "offered_load," << "throughput," << "cpu," << "min,"
      << "mean," << "p50," << "p90," << "p99," << "p999," << "p9999," << "max,"
      << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q," << "p99_q,"
-     << "server:rx_pps," << "server:tx_pps," << "server:winu_rx_pps,"
+     << "server:rx_pps," << "server:tx_pps," << "server:rx_bps," << "server:tx_bps,"
+     << "server:rx_drops_pps," << "server:rx_ooo_pps," << "server:winu_rx_pps,"
      << "server:winu_tx_pps," << "server:req_rx_pps," << "server:resp_tx_pps,"
      << "client:min_tput," << "client:max_tput," << "client:winu_rx_pps,"
      << "client:winu_tx_pps," << "client:resp_rx_pps," << "client:req_tx_pps,"
@@ -719,12 +737,13 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << p999 << "," << p9999 << "," << max << "," << p1_win << ","
       << mean_win << "," << p99_win << "," << p1_que << "," << mean_que << ","
       << p99_que << "," << ss->rx_pps << "," << ss->tx_pps << ","
-      << ss->winu_rx_pps << "," << ss->winu_tx_pps << "," << ss->req_rx_pps << ","
-      << ss->resp_tx_pps << "," << cs->min_percli_tput << ","
-      << cs->max_percli_tput << "," << mean_cque << "," << cs->winu_rx_pps << ","
-      << cs->resp_rx_pps << "," << cs->req_tx_pps << ","
-      << cs->win_expired_wps << "," << cs->req_dropped_rps
-      << std::endl;
+      << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
+      << ss->rx_ooo_pps << "," << ss->winu_rx_pps << "," << ss->winu_tx_pps << ","
+      << ss->req_rx_pps << "," << ss->resp_tx_pps << ","
+      << cs->min_percli_tput << "," << cs->max_percli_tput << ","
+      << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
+      << cs->req_tx_pps << "," << cs->win_expired_wps << ","
+      << cs->req_dropped_rps << std::endl;
 
   csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
       << cs->offered_rps << "," << cs->rps << "," << ss->cpu_usage << ","
@@ -732,12 +751,13 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << p999 << "," << p9999 << "," << max << "," << p1_win << ","
       << mean_win << "," << p99_win << "," << p1_que << "," << mean_que << ","
       << p99_que << "," << ss->rx_pps << "," << ss->tx_pps << ","
-      << ss->winu_rx_pps << "," << ss->winu_tx_pps << "," << ss->req_rx_pps << ","
-      << ss->resp_tx_pps << "," << cs->min_percli_tput << ","
-      << cs->max_percli_tput << "," << mean_cque << "," << cs->winu_rx_pps << ","
-      << cs->resp_rx_pps << "," << cs->req_tx_pps << ","
-      << cs->win_expired_wps << "," << cs->req_dropped_rps
-      << std::endl << std::flush;
+      << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
+      << ss->rx_ooo_pps << "," << ss->winu_rx_pps << "," << ss->winu_tx_pps << ","
+      << ss->req_rx_pps << "," << ss->resp_tx_pps << ","
+      << cs->min_percli_tput << "," << cs->max_percli_tput << ","
+      << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
+      << cs->req_tx_pps << "," << cs->win_expired_wps << ","
+      << cs->req_dropped_rps << std::endl << std::flush;
 
   json_out << "{"
 	   << "\"num_threads\":" << threads * total_agents << ","
@@ -760,6 +780,10 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 	   << "\"p99_q\":" << p99_que << ","
 	   << "\"server:rx_pps\":" << ss->rx_pps << ","
 	   << "\"server:tx_pps\":" << ss->tx_pps << ","
+	   << "\"server:rx_bps\":" << ss->rx_bps << ","
+	   << "\"server:tx_bps\":" << ss->tx_bps << ","
+	   << "\"server:rx_drops_pps\":" << ss->rx_drops_pps << ","
+	   << "\"server:rx_ooo_pps\":" << ss->rx_ooo_pps << ","
 	   << "\"server:winu_rx_pps\":" << ss->winu_rx_pps << ","
 	   << "\"server:winu_tx_pps\":" << ss->winu_tx_pps << ","
 	   << "\"server:req_rx_pps\":" << ss->req_rx_pps << ","
