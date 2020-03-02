@@ -75,6 +75,7 @@ struct srpc_session {
 /* credit-related stats */
 atomic64_t srpc_stat_winu_rx_;
 atomic64_t srpc_stat_winu_tx_;
+atomic64_t srpc_stat_win_tx_;
 atomic64_t srpc_stat_req_rx_;
 atomic64_t srpc_stat_resp_tx_;
 
@@ -114,7 +115,7 @@ static int srpc_winupdate(struct srpc_session *s)
 		return ret;
 
 	atomic64_inc(&srpc_stat_winu_tx_);
-
+	atomic64_fetch_and_add(&srpc_stat_win_tx_, shdr.win);
 	return 0;
 }
 
@@ -284,7 +285,7 @@ static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 	assert(ret == sizeof(shdr) + c->resp_len);
 
 	atomic64_inc(&srpc_stat_resp_tx_);
-
+	atomic64_fetch_and_add(&srpc_stat_win_tx_, shdr.win);
 	return 0;
 }
 
@@ -644,6 +645,11 @@ uint64_t srpc_stat_winu_rx()
 uint64_t srpc_stat_winu_tx()
 {
 	return atomic64_read(&srpc_stat_winu_tx_);
+}
+
+uint64_t srpc_stat_win_tx()
+{
+	return atomic64_read(&srpc_stat_win_tx_);
 }
 
 uint64_t srpc_stat_req_rx()

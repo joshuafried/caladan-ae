@@ -64,13 +64,14 @@ static SyntheticWorker *workers[NCPU];
 /* server-side stat */
 constexpr uint64_t kRPCSStatPort = 8002;
 constexpr uint64_t kRPCSStatMagic = 0xDEADBEEF;
-struct rpcsstat_raw {
+struct sstat_raw {
   uint64_t idle;
   uint64_t busy;
   unsigned int num_cores;
   unsigned int max_cores;
   uint64_t winu_rx;
   uint64_t winu_tx;
+  uint64_t win_tx;
   uint64_t req_rx;
   uint64_t resp_tx;
 };
@@ -96,6 +97,7 @@ struct sstat {
   double rx_ooo_pps;
   double winu_rx_pps;
   double winu_tx_pps;
+  double win_tx_wps;
   double req_rx_pps;
   double resp_tx_pps;
 };
@@ -304,14 +306,15 @@ void RPCSStatWorker(std::unique_ptr<rt::TcpConn> c) {
         guest_nice;
     ss >> tmp >> user >> nice >> system >> idle >> iowait >> irq >> softirq >>
         steal >> guest >> guest_nice;
-    rpcsstat_raw u = {idle + iowait,
-               user + nice + system + irq + softirq + steal,
-	       rt::RuntimeMaxCores(),
-	       static_cast<unsigned int>(sysconf(_SC_NPROCESSORS_ONLN)),
-	       rt::RpcServerStatWinuRx(),
-	       rt::RpcServerStatWinuTx(),
-	       rt::RpcServerStatReqRx(),
-	       rt::RpcServerStatRespTx()};
+    sstat_raw u = {idle + iowait,
+                   user + nice + system + irq + softirq + steal,
+	           rt::RuntimeMaxCores(),
+	           static_cast<unsigned int>(sysconf(_SC_NPROCESSORS_ONLN)),
+	           rt::RpcServerStatWinuRx(),
+	           rt::RpcServerStatWinuTx(),
+		   rt::RpcServerStatWinTx(),
+	           rt::RpcServerStatReqRx(),
+	           rt::RpcServerStatRespTx()};
 
     // Send an uptime response.
     ssize_t sret = c->WriteFull(&u, sizeof(u));
@@ -334,19 +337,19 @@ void RPCSStatServer() {
   }
 }
 
-rpcsstat_raw ReadRPCSStat() {
+sstat_raw ReadRPCSStat() {
   std::unique_ptr<rt::TcpConn> c(
       rt::TcpConn::Dial({0, 0}, {raddr.ip, kRPCSStatPort}));
   uint64_t magic = hton64(kRPCSStatMagic);
   ssize_t ret = c->WriteFull(&magic, sizeof(magic));
   if (ret != static_cast<ssize_t>(sizeof(magic)))
     panic("sstat request failed, ret = %ld", ret);
-  rpcsstat_raw u;
+  sstat_raw u;
   ret = c->ReadFull(&u, sizeof(u));
   if (ret != static_cast<ssize_t>(sizeof(u)))
     panic("sstat response failed, ret = %ld", ret);
-  return rpcsstat_raw{u.idle, u.busy, u.num_cores, u.max_cores, u.winu_rx,
-                   u.winu_tx, u.req_rx, u.resp_tx};
+  return sstat_raw{u.idle, u.busy, u.num_cores, u.max_cores, u.winu_rx,
+                   u.winu_tx, u.win_tx, u.req_rx, u.resp_tx};
 }
 
 shstat_raw ReadShenangoStat() {
@@ -566,7 +569,7 @@ std::vector<work_unit> RunExperiment(
   timex = std::time(nullptr);
   auto start = steady_clock::now();
   barrier();
-  rpcsstat_raw s1, s2;
+  sstat_raw s1, s2;
   shstat_raw sh1, sh2;
 
   if (!b || b->IsLeader()) {
@@ -644,10 +647,12 @@ std::vector<work_unit> RunExperiment(
 
     uint64_t winu_rx_pkts = s2.winu_rx - s1.winu_rx;
     uint64_t winu_tx_pkts = s2.winu_tx - s1.winu_tx;
+    uint64_t win_tx_wins = s2.win_tx - s1.win_tx;
     uint64_t req_rx_pkts = s2.req_rx - s1.req_rx;
     uint64_t resp_tx_pkts = s2.resp_tx - s1.resp_tx;
     ss->winu_rx_pps = static_cast<double>(winu_rx_pkts) / elapsed_ * 1000000;
     ss->winu_tx_pps = static_cast<double>(winu_tx_pkts) / elapsed_ * 1000000;
+    ss->win_tx_wps = static_cast<double>(win_tx_wins) / elapsed_ * 1000000;
     ss->req_rx_pps = static_cast<double>(req_rx_pkts) / elapsed_ * 1000000;
     ss->resp_tx_pps = static_cast<double>(resp_tx_pkts) / elapsed_ * 1000000;
 
@@ -676,10 +681,11 @@ void PrintHeader(std::ostream& os) {
      << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q," << "p99_q,"
      << "server:rx_pps," << "server:tx_pps," << "server:rx_bps," << "server:tx_bps,"
      << "server:rx_drops_pps," << "server:rx_ooo_pps," << "server:winu_rx_pps,"
-     << "server:winu_tx_pps," << "server:req_rx_pps," << "server:resp_tx_pps,"
-     << "client:min_tput," << "client:max_tput," << "client:winu_rx_pps,"
-     << "client:winu_tx_pps," << "client:resp_rx_pps," << "client:req_tx_pps,"
-     << "client:win_expired_wps," << "client:req_dropped_rps" << std::endl;
+     << "server:winu_tx_pps," << "server:win_tx_wps," << "server:req_rx_pps,"
+     << "server:resp_tx_pps," << "client:min_tput," << "client:max_tput,"
+     << "client:winu_rx_pps," << "client:winu_tx_pps," << "client:resp_rx_pps,"
+     << "client:req_tx_pps," << "client:win_expired_wps," << "client:req_dropped_rps"
+     << std::endl;
 }
 
 void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
@@ -739,7 +745,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << p99_que << "," << ss->rx_pps << "," << ss->tx_pps << ","
       << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
       << ss->rx_ooo_pps << "," << ss->winu_rx_pps << "," << ss->winu_tx_pps << ","
-      << ss->req_rx_pps << "," << ss->resp_tx_pps << ","
+      << ss->win_tx_wps << "," << ss->req_rx_pps << "," << ss->resp_tx_pps << ","
       << cs->min_percli_tput << "," << cs->max_percli_tput << ","
       << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
       << cs->req_tx_pps << "," << cs->win_expired_wps << ","
@@ -753,7 +759,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << p99_que << "," << ss->rx_pps << "," << ss->tx_pps << ","
       << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
       << ss->rx_ooo_pps << "," << ss->winu_rx_pps << "," << ss->winu_tx_pps << ","
-      << ss->req_rx_pps << "," << ss->resp_tx_pps << ","
+      << ss->win_tx_wps << "," << ss->req_rx_pps << "," << ss->resp_tx_pps << ","
       << cs->min_percli_tput << "," << cs->max_percli_tput << ","
       << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
       << cs->req_tx_pps << "," << cs->win_expired_wps << ","
@@ -786,6 +792,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 	   << "\"server:rx_ooo_pps\":" << ss->rx_ooo_pps << ","
 	   << "\"server:winu_rx_pps\":" << ss->winu_rx_pps << ","
 	   << "\"server:winu_tx_pps\":" << ss->winu_tx_pps << ","
+	   << "\"server:win_tx_wps\":" << ss->win_tx_wps << ","
 	   << "\"server:req_rx_pps\":" << ss->req_rx_pps << ","
 	   << "\"server:resp_tx_pps\":" << ss->resp_tx_pps << ","
 	   << "\"client:min_tput\":" << cs->min_percli_tput << ","
