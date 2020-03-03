@@ -53,8 +53,10 @@ std::ofstream csv_out;
 int total_agents = 1;
 // number of iterations required for 1us on target server
 constexpr uint64_t kIterationsPerUS = 69;  // 83
-// Number of seconds to warmup at rate 0
-constexpr uint64_t kWarmupUpSeconds = 5;
+// Total duration of the experiment in us
+constexpr uint64_t kExperimentTime = 2000000;
+// RTT
+constexpr uint64_t kRTT = 10;
 
 std::vector<double> offered_loads;
 double offered_load;
@@ -457,10 +459,12 @@ template <class Arrival, class Service>
 std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
                                     double last_us) {
   std::vector<work_unit> w;
-  while (cur_us < last_us) {
+  while (true) {
     cur_us += a();
+    if (cur_us > last_us) break;
     w.emplace_back(work_unit{cur_us, s(), 0});
   }
+
   return w;
 }
 
@@ -527,6 +531,7 @@ std::vector<work_unit> ClientWorker(
   }
 
   // rt::Sleep(1 * rt::kSeconds);
+  rt::Sleep((int)(kRTT + 2*st));
   BUG_ON(c->Shutdown(SHUT_RDWR));
   th.Join();
 
@@ -610,9 +615,13 @@ std::vector<work_unit> RunExperiment(
   double elapsed_ = duration_cast<sec>(finish - start).count();
   double min_throughput = 0.0;
   double max_throughput = 0.0;
+  uint64_t offered = 0;
+
   for (int i = 0; i < threads; ++i) {
     auto &v = *samples[i];
     double throughput;
+
+    offered += v.size();
     // Remove requests that did not complete.
     v.erase(std::remove_if(v.begin(), v.end(),
 			   [](const work_unit &s) {return s.duration_us == 0;}),
@@ -632,6 +641,7 @@ std::vector<work_unit> RunExperiment(
 
   // Report results.
   if (csr) {
+    csr->offered_rps = static_cast<double>(offered) / elapsed_ * 1000000;
     csr->rps = static_cast<double>(w.size()) / elapsed_ * 1000000;
     csr->min_percli_tput = min_throughput;
     csr->max_percli_tput = max_throughput;
@@ -815,7 +825,6 @@ void SteadyStateExperiment(int threads, double offered_rps,
   double elapsed;
 
   memset(&csr, 0, sizeof(csr));
-  csr.offered_rps = offered_rps;
   std::vector<work_unit> w = RunExperiment(threads, &csr, &ss, &elapsed,
 					   [=] {
     std::mt19937 rg(rand());
@@ -823,7 +832,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
     std::exponential_distribution<double> rd(
         1.0 / (1000000.0 / (offered_rps / static_cast<double>(threads))));
     std::exponential_distribution<double> wd(1.0 / service_time);
-    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, 2000000);
+    return GenerateWork(std::bind(rd, rg), std::bind(wd, dg), 0, kExperimentTime);
   });
 
   if (b) {
