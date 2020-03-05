@@ -56,7 +56,7 @@ struct srpc_session {
 	bool			is_linked;
 	bool			need_winupdate;
 	waitgroup_t		send_waiter;
-	uint64_t		win;
+	double			win;
 	uint64_t		demand;
 
 	/* shared state between receiver and sender */
@@ -107,7 +107,7 @@ static int srpc_winupdate(struct srpc_session *s)
 	shdr.magic = RPC_RESP_MAGIC;
 	shdr.op = RPC_OP_WINUPDATE;
 	shdr.len = 0;
-	shdr.win = s->win;
+	shdr.win = (uint64_t)s->win;
 
 	/* send the packet */
 	ret = tcp_write_full(s->c, &shdr, sizeof(shdr));
@@ -127,7 +127,7 @@ static void srpc_update_window(struct srpc_session *s)
 	/* Don't update the window if session is on the
 	 * drained list */
 	if (s->is_linked) {
-		assert(s->win == 0);
+		assert(s->win < 1.0);
 		return;
 	}
 
@@ -136,21 +136,21 @@ static void srpc_update_window(struct srpc_session *s)
 		us = MIN(SRPC_MAX_DELAY_US, us);
 		alpha = (float)(us - SRPC_MIN_DELAY_US) /
 			(float)(SRPC_MAX_DELAY_US - SRPC_MIN_DELAY_US);
-		s->win = (float)s->win * (1.0 - alpha / 2.0);
+		s->win = s->win * (1.0 - alpha / 2.0);
 	} else {
-		s->win++;
+		s->win += 1.0;
 	}
 
 	/* clamp to supported values */
 	/* now we allow zero window */
-	s->win = MAX(s->win, 0);
+	s->win = MAX(s->win, 0.0);
 	s->win = MIN(s->win, SRPC_MAX_WINDOW - 1);
 
 	/* avoid all the session is drained. */
-	if (s->win == 0 &&
+	if (s->win < 1.0 &&
 	    atomic_read(&srpc_num_sess) - atomic_read(&srpc_num_drained)
 	    <= runtime_max_cores())
-		s->win++;
+		s->win += 1.0;
 }
 
 static void srpc_worker(void *arg)
@@ -269,7 +269,7 @@ static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 	shdr.magic = RPC_RESP_MAGIC;
 	shdr.op = RPC_OP_CALL;
 	shdr.len = c->resp_len;
-	shdr.win = s->win;
+	shdr.win = (uint64_t)s->win;
 
 	/* initialize the SG vector */
 	vec[0].iov_base = &shdr;
@@ -359,7 +359,7 @@ static void srpc_sender(void *arg)
 		num_resp = bitmap_popcount(tmp, SRPC_MAX_WINDOW);
 		/* initialize the window to zero */
 		if (need_winupdate)
-			s->win = 0;
+			s->win = 0.0;
 
 		srpc_update_window(s);
 
@@ -367,7 +367,7 @@ static void srpc_sender(void *arg)
 		core_id = get_current_affinity();
 		wakes = NULL;
 
-		if (s->win > 1 || (s->win > 0 && demand == 0)) {
+		if (s->win >= 2.0 || (s->win >= 1.0 && demand == 0)) {
 			/* try local list */
 			wakes = srpc_choose_drained_session(core_id);
 
@@ -383,11 +383,11 @@ static void srpc_sender(void *arg)
 			wakes = NULL;
 
 		if (wakes) {
-			s->win--;
+			s->win -= 1.0;
 		}
 
 		if (demand == 0)
-			s->win = 0;
+			s->win = 0.0;
 
 		/* send a response for each completed slot */
 		bitmap_for_each_set(tmp, SRPC_MAX_WINDOW, i) {
@@ -404,7 +404,7 @@ static void srpc_sender(void *arg)
 			spin_lock_np(&srpc_drained[s->drained_core].lock);
 			/* Give one window to the session who just got up */
 			if (!s->is_linked) {
-				s->win = 1;
+				s->win = 1.0;
 			} else {
 				list_del_from(&srpc_drained[s->drained_core].list,
 					      &s->drained_link);
@@ -416,7 +416,7 @@ static void srpc_sender(void *arg)
 		}
 
 		/* Send WINUPDATE message */
-		if (need_winupdate && num_resp == 0 && s->win > 0) {
+		if (need_winupdate && num_resp == 0 && s->win >= 1.0) {
 			ret = srpc_winupdate(s);
 			if (unlikely(ret))
 				goto close;
@@ -425,7 +425,7 @@ static void srpc_sender(void *arg)
 		/* add to the drained list if (1) window becomes zero,
 		 * (2) s is not in the list already,
 		 * (3) it has no outstanding requests */
-		if (s->win == 0 && demand > 0 && s->drained_core == -1 &&
+		if (s->win < 1.0 && demand > 0 && s->drained_core == -1 &&
 		    bitmap_popcount(s->avail_slots, SRPC_MAX_WINDOW) ==
 		    SRPC_MAX_WINDOW) {
 			spin_lock_np(&srpc_drained[core_id].lock);
@@ -441,7 +441,7 @@ static void srpc_sender(void *arg)
 		/* wake up the session */
 		if (wakes) {
 			spin_lock_np(&wakes->lock);
-			assert(wakes->win == 0);
+			assert(wakes->win < 1.0);
 			th = wakes->sender_th;
 			wakes->sender_th = NULL;
 			wakes->need_winupdate = true;
@@ -561,7 +561,7 @@ static void srpc_waker(void *arg) {
 		/* wake up the session */
 		if (wakes) {
 			spin_lock_np(&wakes->lock);
-			assert(wakes->win == 0);
+			assert(wakes->win < 1.0);
 			th = wakes->sender_th;
 			wakes->sender_th = NULL;
 			wakes->need_winupdate = true;
