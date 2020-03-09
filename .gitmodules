@@ -7,3 +7,7 @@
 [submodule "rdma-core"]
 	path = rdma-core
 	url = https://github.com/linux-rdma/rdma-core
+[submodule "apps/memcached"]
+	path = apps/memcached
+	url = https://github.com/joshuafried/shenango-memcached.git
+	branch = rpc-dispatcher
