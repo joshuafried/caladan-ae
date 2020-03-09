@@ -13,8 +13,9 @@
 #include "util.h"
 #include "proto.h"
 
-#define MAX_CLIENT_QDELAY_US	120
-#define CRPC_CREDIT_LIFETIME_US	20
+#define CRPC_MAX_CLIENT_DELAY_US	-1
+#define CRPC_CREDIT_LIFETIME_US		20
+#define CRPC_MIN_DEMAND			0
 
 /**
  * crpc_send_winupdate - send WINUPDATE message to update window size
@@ -31,7 +32,7 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_WINUPDATE;
 	chdr.len = 0;
-	chdr.demand = s->head - s->tail;
+	chdr.demand = MAX(CRPC_MIN_DEMAND, s->head - s->tail);
 
 	/* send the request */
 	ret = tcp_write_full(s->c, &chdr, sizeof(chdr));
@@ -56,7 +57,7 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_CALL;
 	chdr.len = len;
-	chdr.demand = s->head - s->tail;
+	chdr.demand = MAX(CRPC_MIN_DEMAND, s->head - s->tail);
 
 	/* initialize the SG vector */
 	vec[0].iov_base = &chdr;
@@ -79,6 +80,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 {
 	ssize_t ret;
 	int pos;
+	uint64_t now;
 
 	assert_mutex_held(&s->lock);
 
@@ -86,8 +88,10 @@ static void crpc_drain_queue(struct crpc_session *s)
 		return;
 	}
 
+#if CRPC_MIN_DEMAND == 0
 	if (s->head == s->tail)
 		return;
+#endif
 
 	/* initialize the window */
 	if (s->win_timestamp == 0 || s->last_demand == 0) {
@@ -95,6 +99,18 @@ static void crpc_drain_queue(struct crpc_session *s)
 		s->waiting_winupdate = true;
 		return;
 	}
+
+#if CRPC_MAX_CLIENT_DELAY_US > 0
+	/* Remove old requests */
+	now = microtime();
+	while (s->head != s->tail) {
+		pos = s->tail % CRPC_QLEN;
+		if (now - *s->cques[pos] <= CRPC_MAX_CLIENT_DELAY_US)
+			break;
+		s->tail++;
+		s->req_dropped_++;
+	}
+#endif
 
 	/* try to drain queued requests: FIFO */
 	while (s->head != s->tail) {
@@ -117,6 +133,13 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	int pos;
 
 	assert_mutex_held(&s->lock);
+
+#if CRPC_MAX_CLIENT_DELAY_US == 0
+	if (s->win_used >= s->win_avail) {
+		s->req_dropped_++;
+		return false;
+	}
+#endif
 
 	/* if the queue is full, drop tail */
 	if (s->head - s->tail >= CRPC_QLEN) {
@@ -162,6 +185,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	mutex_lock(&s->lock);
 	now = microtime();
 
+#if CRPC_CREDIT_LIFETIME_US > 0
 	/* expire stale credits */
 	if (s->win_timestamp > 0 &&
 	    now - s->win_timestamp > CRPC_CREDIT_LIFETIME_US &&
@@ -171,6 +195,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 		if (s->win_used == 0)
 			s->win_timestamp = 0;
 	}
+#endif
 
 	/* hot path, just send */
 	if (s->win_used < s->win_avail && s->head == s->tail) {
@@ -183,6 +208,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 
 	/* cold path, enqueue request and drain the queue */
 	if (!crpc_enqueue_one(s, buf, len, cque)) {
+		crpc_drain_queue(s);
 		mutex_unlock(&s->lock);
 		return -ENOBUFS;
 	}
