@@ -123,6 +123,7 @@ static void srpc_update_window(struct srpc_session *s)
 {
 	uint64_t us = runtime_queue_us();
 	float alpha;
+	int win = (int)s->win;
 
 	/* Don't update the window if session is on the
 	 * drained list */
@@ -138,7 +139,10 @@ static void srpc_update_window(struct srpc_session *s)
 			(float)(SRPC_MAX_DELAY_US - SRPC_MIN_DELAY_US);
 		s->win = s->win * (1.0 - alpha / 2.0);
 	} else {
-		s->win += 1.0;
+		if (win == 0)
+			s->win = 1.0;
+		else
+			s->win += 1.0 / (float)win;
 	}
 
 	/* clamp to supported values */
@@ -150,7 +154,7 @@ static void srpc_update_window(struct srpc_session *s)
 	if (s->win < 1.0 &&
 	    atomic_read(&srpc_num_sess) - atomic_read(&srpc_num_drained)
 	    <= runtime_max_cores())
-		s->win += 1.0;
+		s->win = 1.0;
 }
 
 static void srpc_worker(void *arg)
