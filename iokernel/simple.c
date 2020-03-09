@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <asm/ops.h>
 #include <base/stddef.h>
 
 #include "defs.h"
@@ -250,9 +251,16 @@ static void simple_notify_congested(struct proc *p, bitmap_ptr_t threads,
 {
 	struct simple_data *sd = (struct simple_data *)p->policy_data;
 	int ret;
+	uint64_t now;
 
-	sd->rq_oldest_tsc = rq_oldest_tsc;
-	sd->pkq_oldest_tsc = pkq_oldest_tsc;
+	if (sd->threads_active < sd->threads_max) {
+		now = rdtsc();
+		sd->rq_oldest_tsc = now;
+		sd->pkq_oldest_tsc = now;
+	} else {
+		sd->rq_oldest_tsc = rq_oldest_tsc;
+		sd->pkq_oldest_tsc = pkq_oldest_tsc;
+	}
 
 	/* do nothing if we woke up a core during the last interval */
 	if (sd->waking) {
