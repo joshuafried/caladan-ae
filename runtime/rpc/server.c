@@ -535,48 +535,6 @@ static void srpc_server(void *arg)
 	sfree(s);
 }
 
-static void srpc_waker(void *arg) {
-	uint64_t us;
-	unsigned int max_cores = runtime_max_cores();
-	unsigned int core_id;
-	unsigned int i;
-	struct srpc_session *wakes;
-	thread_t *th;
-
-	while (true) {
-		timer_sleep(SRPC_RTT_US);
-		us = runtime_queue_us();
-		if (us >= SRPC_MIN_DELAY_US)
-			continue;
-
-		/* wake up a drained thread */
-		core_id = get_current_affinity();
-
-		/* try local list */
-		wakes = srpc_choose_drained_session(core_id);
-
-		/* try to steal from other cores */
-		i = (core_id + 1) % max_cores;
-		while (!wakes && i != core_id) {
-			wakes = srpc_choose_drained_session(i);
-			i = (i + 1) % max_cores;
-		}
-
-		/* wake up the session */
-		if (wakes) {
-			spin_lock_np(&wakes->lock);
-			assert(wakes->win < 1.0);
-			th = wakes->sender_th;
-			wakes->sender_th = NULL;
-			wakes->need_winupdate = true;
-			spin_unlock_np(&wakes->lock);
-
-			if (th)
-				thread_ready(th);
-		}
-	}
-}
-
 static void srpc_listener(void *arg)
 {
 	struct netaddr laddr;
@@ -603,9 +561,6 @@ static void srpc_listener(void *arg)
 	laddr.port = SRPC_PORT;
 
 	ret = tcp_listen(laddr, 4096, &q);
-	BUG_ON(ret);
-
-	ret = thread_spawn(srpc_waker, NULL);
 	BUG_ON(ret);
 
 	while (true) {
