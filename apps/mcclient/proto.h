@@ -132,7 +132,7 @@ ssize_t ConstructMemcachedGetReq(
   hdr->data_type = 0;
   hdr->reserved_or_status = 0;
   hdr->total_body_length = body_len;
-  hdr->opaque = 0;
+  hdr->opaque = _id;
   hdr->cas = 0;
   buf += sizeof(struct MemcachedHdr);
 
