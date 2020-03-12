@@ -127,8 +127,6 @@ struct cstat {
 };
 
 struct work_unit {
-  char *req;
-  int req_len;
   double start_us, duration_us;
   uint64_t window;
   uint64_t tsc;
@@ -353,22 +351,11 @@ template <class Arrival>
 std::vector<work_unit> GenerateWork(Arrival a, double cur_us,
                                     double last_us) {
   std::vector<work_unit> w;
-  char *req;
   struct MemcachedHdr* hdr;
-  uint32_t id = 0;
-  int reqlen;
   while (true) {
     cur_us += a();
     if (cur_us > last_us) break;
-    req = (char *)smalloc(4096);
-    std::string key = std::to_string(rand());
-    std::string value = std::string("a");
-    reqlen = ConstructMemcachedSetReq(req, 4096, id, key.c_str(), key.length(),
-				      value.c_str(), 1);
-    hdr = reinterpret_cast<struct MemcachedHdr *>(req);
-    hton(hdr);
-    w.emplace_back(work_unit{req, reqlen, cur_us, 0});
-    id++;
+    w.emplace_back(work_unit{cur_us, 0});
   }
 
   return w;
@@ -383,27 +370,22 @@ std::vector<work_unit> ClientWorker(
 
   // Start the receiver thread.
   auto th = rt::Thread([&] {
-    MemcachedHdr rp;
-    char rpbody[4096];
+    char resp[4096];
+    struct MemcachedHdr *hdr;
 
     while (true) {
-      ssize_t ret = c->Recv(&rp, sizeof(rp));
-      if (ret != static_cast<ssize_t>(sizeof(rp))) {
+      ssize_t ret = c->Recv(resp, 4096);
+
+      hdr = reinterpret_cast<struct MemcachedHdr *>(resp);
+      ntoh(hdr);
+
+      if (ret != static_cast<ssize_t>(sizeof(MemcachedHdr) + hdr->total_body_length)) {
         if (ret == 0 || ret < 0) break;
         panic("read failed, ret = %ld", ret);
       }
-      ntoh(&rp);
-
-      if (rp.total_body_length > 0) {
-        ret = c->Recv(rpbody, rp.total_body_length);
-        if (ret != static_cast<ssize_t>(rp.total_body_length)) {
-          if (ret == 0 || ret < 0) break;
-	  panic("read failed, ret = %ld", ret);
-        }
-      }
 
       uint64_t now = microtime();
-      uint32_t idx = rp.opaque;
+      uint32_t idx = hdr->opaque;
       w[idx].duration_us = now - timings[idx];
       w[idx].duration_us -= w[idx].client_queue;
       w[idx].window = c->WinAvail();
@@ -422,6 +404,9 @@ std::vector<work_unit> ClientWorker(
   barrier();
 
   auto wsize = w.size();
+  char buf[4096];
+  struct MemcachedHdr *hdr;
+  int buflen;
 
   for (unsigned int i = 0; i < wsize; ++i) {
     barrier();
@@ -435,11 +420,16 @@ std::vector<work_unit> ClientWorker(
       continue;
 
     timings[i] = microtime();
-
+    std::string key = std::to_string(rand() % 100000);
+    std::string value = std::string("abcdef");
+    buflen = ConstructMemcachedSetReq(buf, 4096, i, key.c_str(), key.length(),
+				      value.c_str(), value.length());
+    hdr = reinterpret_cast<struct MemcachedHdr *>(buf);
+    hton(hdr);
     // Send an RPC request.
-    ssize_t ret = c->Send(w[i].req, w[i].req_len, &w[i].client_queue);
+    ssize_t ret = c->Send(buf, buflen, &w[i].client_queue);
     if (ret == -ENOBUFS) continue;
-    if (ret != static_cast<ssize_t>(w[i].req_len))
+    if (ret != static_cast<ssize_t>(buflen))
       panic("write failed, ret = %ld", ret);
   }
 
