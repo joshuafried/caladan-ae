@@ -45,6 +45,7 @@ using sec = duration<double, std::micro>;
 int threads;
 // the remote UDP address of the server.
 netaddr raddr, master;
+int wtype;
 
 std::ofstream json_out;
 std::ofstream csv_out;
@@ -152,6 +153,7 @@ class NetBarrier {
       conns.emplace_back(c);
       BUG_ON(c->WriteFull(&threads, sizeof(threads)) <= 0);
       BUG_ON(c->WriteFull(&raddr, sizeof(raddr)) <= 0);
+      BUG_ON(c->WriteFull(&wtype, sizeof(wtype)) <= 0);
       BUG_ON(c->WriteFull(&total_agents, sizeof(total_agents)) <= 0);
       for (size_t j = 0; j < npara; j++) {
         rt::TcpConn *c = aggregator_->Accept();
@@ -168,6 +170,7 @@ class NetBarrier {
     is_leader_ = false;
     BUG_ON(c->ReadFull(&threads, sizeof(threads)) <= 0);
     BUG_ON(c->ReadFull(&raddr, sizeof(raddr)) <= 0);
+    BUG_ON(c->ReadFull(&wtype, sizeof(wtype)) <= 0);
     BUG_ON(c->ReadFull(&total_agents, sizeof(total_agents)) <= 0);
     for (size_t i = 0; i < npara; i++) {
       auto c = rt::TcpConn::Dial({0, 0}, {master.ip, kBarrierPort + 1});
@@ -351,7 +354,6 @@ template <class Arrival>
 std::vector<work_unit> GenerateWork(Arrival a, double cur_us,
                                     double last_us) {
   std::vector<work_unit> w;
-  struct MemcachedHdr* hdr;
   while (true) {
     cur_us += a();
     if (cur_us > last_us) break;
@@ -421,9 +423,15 @@ std::vector<work_unit> ClientWorker(
 
     timings[i] = microtime();
     std::string key = std::to_string(rand() % 100000);
-    std::string value = std::string("abcdef");
-    buflen = ConstructMemcachedSetReq(buf, 4096, i, key.c_str(), key.length(),
-				      value.c_str(), value.length());
+    if (wtype == 1) { // SET
+      std::string value = std::string("abcdef");
+      buflen = ConstructMemcachedSetReq(buf, 4096, i, key.c_str(), key.length(),
+					value.c_str(), value.length());
+    } else if (wtype == 2) { // GET
+      buflen = ConstructMemcachedGetReq(buf, 4096, i, key.c_str(), key.length());
+    } else {
+      panic("unsupported workload type\n");
+    }
     hdr = reinterpret_cast<struct MemcachedHdr *>(buf);
     hton(hdr);
     // Send an RPC request.
@@ -804,10 +812,21 @@ void ClientHandler(void *arg) {
 
   calculate_rates();
 
-  std::string json_fname = std::string("outputs/memcached_nconn_") +
-	  std::to_string((int)(threads * total_agents)) + std::string(".json");
-  std::string csv_fname = std::string("outputs/memcached_nconn_") +
-	  std::to_string((int)(threads * total_agents)) + std::string(".csv");
+  std::string wname;
+  if (wtype == 1)
+    wname = std::string("set");
+  else if (wtype == 2)
+    wname = std::string("get");
+  else
+    wname = std::string("unknown");
+
+  std::string json_fname = std::string("outputs/memcached_") + wname +
+	  std::string("_nconn_") + std::to_string((int)(threads * total_agents)) +
+	  std::string(".json");
+  std::string csv_fname = std::string("outputs/memcached_") + wname +
+	  std::string("_nconn_") + std::to_string((int)(threads * total_agents)) +
+	  std::string(".csv");
+
   json_out.open(json_fname);
   csv_out.open(csv_fname);
   json_out << "[";
@@ -857,7 +876,7 @@ int main(int argc, char *argv[]) {
   }
 
   if (argc < 6) {
-    std::cerr << "usage: [cfg_file] client [#threads] [remote_ip] [npeers]"
+    std::cerr << "usage: [cfg_file] client [#threads] [remote_ip] [SET|GET] [npeers]"
               << std::endl;
     return -EINVAL;
   }
@@ -868,8 +887,18 @@ int main(int argc, char *argv[]) {
   if (ret) return -EINVAL;
   raddr.port = kNetbenchPort;
 
-  if (argc > 5) total_agents += std::stoi(argv[5], nullptr, 0);
-  if (argc > 6) offered_load = std::stod(argv[6], nullptr);
+  std::string wtype_ = argv[5];
+  if (wtype_.compare("SET") == 0)
+    wtype = 1;
+  else if (wtype_.compare("GET") == 0)
+    wtype = 2;
+  else {
+    std::cerr << "invalid workload type: " << wtype_ << std::endl;
+    return -EINVAL;
+  }
+
+  if (argc > 6) total_agents += std::stoi(argv[6], nullptr, 0);
+  if (argc > 7) offered_load = std::stod(argv[7], nullptr);
 
   ret = runtime_init(argv[1], ClientHandler, NULL);
   if (ret) {
