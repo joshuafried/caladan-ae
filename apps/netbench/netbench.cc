@@ -132,7 +132,7 @@ struct cstat {
 };
 
 struct work_unit {
-  double start_us, work_us, duration_us;
+  double start_us, work_us, duration_us, latency_us;
   uint64_t window;
   uint64_t tsc;
   uint32_t cpu;
@@ -462,7 +462,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
   while (true) {
     cur_us += a();
     if (cur_us > last_us) break;
-    w.emplace_back(work_unit{cur_us, s(), 0});
+    w.emplace_back(work_unit{cur_us, s(), 0, 0});
   }
 
   return w;
@@ -489,7 +489,7 @@ std::vector<work_unit> ClientWorker(
       uint64_t now = microtime();
       uint64_t idx = ntoh64(rp.index);
       w[idx].duration_us = now - timings[idx];
-      w[idx].duration_us -= w[idx].client_queue;
+      w[idx].latency_us = w[idx].duration_us - w[idx].client_queue;
       w[idx].window = c->WinAvail();
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
@@ -688,9 +688,10 @@ std::vector<work_unit> RunExperiment(
 void PrintHeader(std::ostream& os) {
   os << "num_threads," << "offered_load," << "throughput," << "cpu," << "min,"
      << "mean," << "p50," << "p90," << "p99," << "p999," << "p9999," << "max,"
-     << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q," << "p99_q,"
-     << "server:rx_pps," << "server:tx_pps," << "server:rx_bps," << "server:tx_bps,"
-     << "server:rx_drops_pps," << "server:rx_ooo_pps," << "server:winu_rx_pps,"
+     << "lmin," << "lmean," << "lp50," << "lp90," << "lp99," << "lp999," << "lp9999,"
+     << "lmax," << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q,"
+     << "p99_q," << "server:rx_pps," << "server:tx_pps," << "server:rx_bps,"
+     << "server:tx_bps," << "server:rx_drops_pps," << "server:rx_ooo_pps," << "server:winu_rx_pps,"
      << "server:winu_tx_pps," << "server:win_tx_wps," << "server:req_rx_pps,"
      << "server:resp_tx_pps," << "client:min_tput," << "client:max_tput,"
      << "client:winu_rx_pps," << "client:winu_tx_pps," << "client:resp_rx_pps,"
@@ -723,6 +724,21 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
   double max = w[w.size() - 1].duration_us;
 
   std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
+    return s1.latency_us < s2.latency_us;
+  });
+  double sum_lat = std::accumulate(
+      w.begin(), w.end(), 0.0,
+      [](double s, const work_unit &c) { return s + c.latency_us; });
+  double mean_lat = sum_lat / w.size();
+  double p50_lat = w[count * 0.5].latency_us;
+  double p90_lat = w[count * 0.9].latency_us;
+  double p99_lat = w[count * 0.99].latency_us;
+  double p999_lat = w[count * 0.999].latency_us;
+  double p9999_lat = w[count * 0.9999].latency_us;
+  double min_lat = w[0].latency_us;
+  double max_lat = w[w.size() - 1].latency_us;
+
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
     return s1.window < s2.window;
   });
   double sum_win = std::accumulate(
@@ -750,7 +766,9 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
   std::cout << std::setprecision(4) << std::fixed << threads * total_agents << ","
       << cs->offered_rps << "," << cs->rps << "," << ss->cpu_usage << ","
       << min << "," << mean << "," << p50 << "," << p90 << "," << p99 << ","
-      << p999 << "," << p9999 << "," << max << "," << p1_win << ","
+      << p999 << "," << p9999 << "," << max << "," << min_lat << ","
+      << mean_lat << "," << p50_lat << "," << p90_lat << "," << p99_lat << ","
+      << p999_lat << "," << p9999_lat << "," << max_lat << "," << p1_win << ","
       << mean_win << "," << p99_win << "," << p1_que << "," << mean_que << ","
       << p99_que << "," << ss->rx_pps << "," << ss->tx_pps << ","
       << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
@@ -764,7 +782,9 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
   csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
       << cs->offered_rps << "," << cs->rps << "," << ss->cpu_usage << ","
       << min << "," << mean << "," << p50 << "," << p90 << "," << p99 << ","
-      << p999 << "," << p9999 << "," << max << "," << p1_win << ","
+      << p999 << "," << p9999 << "," << max << "," << min_lat << ","
+      << mean_lat << "," << p50_lat << "," << p90_lat << "," << p99_lat << ","
+      << p999_lat << "," << p9999_lat << "," << max_lat << "," << p1_win << ","
       << mean_win << "," << p99_win << "," << p1_que << "," << mean_que << ","
       << p99_que << "," << ss->rx_pps << "," << ss->tx_pps << ","
       << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
@@ -788,6 +808,14 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 	   << "\"p999\":" << p999 << ","
 	   << "\"p9999\":" << p9999 << ","
 	   << "\"max\":" << max << ","
+	   << "\"lmin\":" << min_lat << ","
+	   << "\"lmean\":" << mean_lat << ","
+	   << "\"lp50\":" << p50_lat << ","
+	   << "\"lp90\":" << p90_lat << ","
+	   << "\"lp99\":" << p99_lat << ","
+	   << "\"lp999\":" << p999_lat << ","
+	   << "\"lp9999\":" << p9999_lat << ","
+	   << "\"lmax\":" << max_lat << ","
 	   << "\"p1_win\":" << p1_win << ","
 	   << "\"mean_win\":" << mean_win << ","
 	   << "\"p99_win\":" << p99_win << ","
