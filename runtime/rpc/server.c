@@ -26,6 +26,9 @@
 /* round trip time in us */
 #define SRPC_RTT_US		10
 
+#define SRPC_TRACK_FLOW		false
+#define SRPC_TRACK_FLOW_ID	0
+
 /* the handler function for each RPC */
 static srpc_fn_t srpc_handler;
 
@@ -48,6 +51,9 @@ static struct srpc_drained_ srpc_drained[NCPU]
 		__attribute__((aligned(CACHE_LINE_SIZE)));
 
 struct srpc_session {
+#if SRPC_TRACK_FLOW
+	int			id;
+#endif
 	tcpconn_t		*c;
 	struct list_node	drained_link;
 	bool			is_drained;
@@ -116,6 +122,12 @@ static int srpc_winupdate(struct srpc_session *s)
 
 	atomic64_inc(&srpc_stat_winu_tx_);
 	atomic64_fetch_and_add(&srpc_stat_win_tx_, shdr.win);
+#if SRPC_TRACK_FLOW
+	if (s->id == SRPC_TRACK_FLOW_ID) {
+		printf("[%lu] <== Winupdate: win = %lu\n",
+		       microtime(), shdr.win);
+	}
+#endif
 	return 0;
 }
 
@@ -227,6 +239,13 @@ again:
 		spin_unlock_np(&s->lock);
 
 		atomic64_inc(&srpc_stat_req_rx_);
+
+#if SRPC_TRACK_FLOW
+		if (s->id == SRPC_TRACK_FLOW_ID) {
+			printf("[%lu] ===> Request: demand=%lu\n",
+			       microtime(), chdr.demand);
+		}
+#endif
 		break;
 
 	case RPC_OP_WINUPDATE:
@@ -250,6 +269,12 @@ again:
 			thread_ready(th);
 
 		atomic64_inc(&srpc_stat_winu_rx_);
+#if SRPC_TRACK_FLOW
+		if (s->id == SRPC_TRACK_FLOW_ID) {
+			printf("[%lu] ===> Winupdate: demand=%lu\n",
+			       microtime(), chdr.demand);
+		}
+#endif
 		goto again;
 	default:
 		log_warn("srpc: got invalid op %d", chdr.op);
@@ -290,6 +315,12 @@ static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 
 	atomic64_inc(&srpc_stat_resp_tx_);
 	atomic64_fetch_and_add(&srpc_stat_win_tx_, shdr.win);
+#if SRPC_TRACK_FLOW
+		if (s->id == SRPC_TRACK_FLOW_ID) {
+			printf("[%lu] <=== Response: win=%lu\n",
+			       microtime(), shdr.win);
+		}
+#endif
 	return 0;
 }
 
@@ -317,6 +348,13 @@ static struct srpc_session *srpc_choose_drained_session(int core_id)
 	ret->is_linked = false;
 	spin_unlock_np(&srpc_drained[core_id].lock);
 	atomic_dec(&srpc_num_drained);
+
+#if SRPC_TRACK_FLOW
+		if (ret->id == SRPC_TRACK_FLOW_ID) {
+			printf("[%lu] Session waken up\n",
+			       microtime());
+		}
+#endif
 
 	return ret;
 }
@@ -440,6 +478,12 @@ static void srpc_sender(void *arg)
 			spin_unlock_np(&srpc_drained[core_id].lock);
 			s->drained_core = core_id;
 			atomic_inc(&srpc_num_drained);
+#if SRPC_TRACK_FLOW
+			if (s->id == SRPC_TRACK_FLOW_ID) {
+				printf("[%lu] Session is drained: win=%lf\n",
+				       microtime(), s->win);
+			}
+#endif
 		}
 
 		/* wake up the session */
@@ -506,11 +550,22 @@ static void srpc_server(void *arg)
 
 	s->c = c;
 	s->drained_core = -1;
+#if SRPC_TRACK_FLOW
+	s->id = atomic_fetch_and_add(&srpc_num_sess, 1);
+#else
+	atomic_inc(&srpc_num_sess);
+#endif
 	bitmap_init(s->avail_slots, SRPC_MAX_WINDOW, true);
 	waitgroup_init(&s->send_waiter);
 	waitgroup_add(&s->send_waiter, 1);
 
-	atomic_inc(&srpc_num_sess);
+#if SRPC_TRACK_FLOW
+	if (s->id == SRPC_TRACK_FLOW_ID) {
+		printf("[%lu] connection established.\n",
+		       microtime());
+	}
+#endif
+
 	ret = thread_spawn(srpc_sender, s);
 	BUG_ON(ret);
 
