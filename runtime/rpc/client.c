@@ -13,9 +13,12 @@
 #include "util.h"
 #include "proto.h"
 
-#define CRPC_MAX_CLIENT_DELAY_US	-1
-#define CRPC_CREDIT_LIFETIME_US		20
+#define CRPC_MAX_CLIENT_DELAY_US	100
+#define CRPC_CREDIT_LIFETIME_US		-1
 #define CRPC_MIN_DEMAND			0
+
+#define CRPC_TRACK_FLOW			false
+#define CRPC_TRACK_FLOW_ID		0
 
 /**
  * crpc_send_winupdate - send WINUPDATE message to update window size
@@ -43,6 +46,12 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	s->last_demand = chdr.demand;
 	s->winu_tx_++;
 
+#if CRPC_TRACK_FLOW
+	if (s->id == CRPC_TRACK_FLOW_ID) {
+		printf("[%lu] <=== winupdate: demand = %lu, win = %u/%u\n",
+		       microtime(), chdr.demand, s->win_used, s->win_avail);
+	}
+#endif
 	return 0;
 }
 
@@ -73,6 +82,12 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 	s->last_demand = chdr.demand;
 	s->req_tx_++;
 
+#if CRPC_TRACK_FLOW
+	if (s->id == CRPC_TRACK_FLOW_ID) {
+		printf("[%lu] <=== request: demand = %lu, win = %u/%u\n",
+		       microtime(), chdr.demand, s->win_used, s->win_avail);
+	}
+#endif
 	return len;
 }
 
@@ -145,6 +160,12 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	if (s->head - s->tail >= CRPC_QLEN) {
 		s->tail++;
 		s->req_dropped_++;
+#if CRPC_TRACK_FLOW
+		if (s->id == CRPC_TRACK_FLOW_ID) {
+			printf("[%lu] queue full. drop the request\n",
+			       microtime());
+		}
+#endif
 	}
 
 	pos = s->head++ % CRPC_QLEN;
@@ -155,6 +176,13 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 
 	if (unlikely(s->head - s->tail < 0))
 		panic("overflow!\n");
+
+#if CRPC_TRACK_FLOW
+		if (s->id == CRPC_TRACK_FLOW_ID) {
+			printf("[%lu] request enqueued.\n",
+			       microtime());
+		}
+#endif
 
 	return true;
 }
@@ -176,14 +204,12 @@ ssize_t crpc_send_one(struct crpc_session *s,
 		      const void *buf, size_t len, uint64_t *cque)
 {
 	ssize_t ret;
-	uint64_t now;
 
 	/* implementation is currently limited to a maximum payload size */
 	if (unlikely(len > SRPC_BUF_SIZE))
 		return -E2BIG;
 
 	mutex_lock(&s->lock);
-	now = microtime();
 
 #if CRPC_CREDIT_LIFETIME_US > 0
 	/* expire stale credits */
@@ -274,6 +300,13 @@ again:
 		mutex_unlock(&s->lock);
 		s->resp_rx_++;
 
+#if CRPC_TRACK_FLOW
+		if (s->id == CRPC_TRACK_FLOW_ID) {
+			printf("[%lu] ===> Response: shdr.win=%lu, win=%u/%u\n",
+			       microtime(), shdr.win, s->win_used, s->win_avail);
+		}
+#endif
+
 		break;
 	case RPC_OP_WINUPDATE:
 		if (unlikely(shdr.len != 0)) {
@@ -293,6 +326,13 @@ again:
 		}
 		mutex_unlock(&s->lock);
 		s->winu_rx_++;
+
+#if CRPC_TRACK_FLOW
+		if (s->id == CRPC_TRACK_FLOW_ID) {
+			printf("[%lu] ===> Winupdate: shdr.win=%lu, win=%u/%u\n",
+			       microtime(), shdr.win, s->win_used, s->win_avail);
+		}
+#endif
 
 		goto again;
 	default:
