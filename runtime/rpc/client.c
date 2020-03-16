@@ -204,6 +204,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 		      const void *buf, size_t len, uint64_t *cque)
 {
 	ssize_t ret;
+	uint64_t now;
 
 	/* implementation is currently limited to a maximum payload size */
 	if (unlikely(len > SRPC_BUF_SIZE))
@@ -213,6 +214,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 
 #if CRPC_CREDIT_LIFETIME_US > 0
 	/* expire stale credits */
+	now = microtime();
 	if (s->win_timestamp > 0 &&
 	    now - s->win_timestamp > CRPC_CREDIT_LIFETIME_US &&
 	    s->win_used < s->win_avail) {
