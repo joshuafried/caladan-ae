@@ -16,6 +16,7 @@
 #define CRPC_MAX_CLIENT_DELAY_US	100
 #define CRPC_CREDIT_LIFETIME_US		-1
 #define CRPC_MIN_DEMAND			0
+#define CRPC_MAX_TIMEOUT		5
 
 #define CRPC_TRACK_FLOW			false
 #define CRPC_TRACK_FLOW_ID		0
@@ -146,11 +147,10 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 			break;
 		s->tail++;
 		s->req_dropped_++;
-
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
-			printf("[%lu] Timeout. Request dropped. qlen = %d\n",
-				microtime(), s->head - s->tail);
+			printf("[%lu] Timeout. Request dropped. qlen = %d, num_timeout = %d\n",
+				microtime(), s->head - s->tail, s->num_timeout);
 		}
 #endif
 	}
@@ -158,6 +158,17 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	if (s->head == s->tail) {
 		s->waiting_winupdate = false;
 		s->win_timestamp = 0;
+		s->num_timeout++;
+	}
+
+	if (s->num_timeout > CRPC_MAX_TIMEOUT) {
+#if CRPC_TRACK_FLOW
+		if (s->id == CRPC_TRACK_FLOW_ID) {
+			printf("[%lu] Timeout exceed 3. abort connection\n",
+			       microtime());
+		}
+#endif
+		return false;
 	}
 #endif
 
@@ -218,6 +229,9 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	/* implementation is currently limited to a maximum payload size */
 	if (unlikely(len > SRPC_BUF_SIZE))
 		return -E2BIG;
+
+	if (s->num_timeout > CRPC_MAX_TIMEOUT)
+		return -ENOBUFS;
 
 	mutex_lock(&s->lock);
 
@@ -297,6 +311,9 @@ again:
 			return ret;
 		assert(ret == shdr.len);
 
+		if (s->num_timeout > CRPC_MAX_TIMEOUT)
+			goto again;
+
 		/* update the window */
 		mutex_lock(&s->lock);
 		assert(s->win_used > 0);
@@ -310,6 +327,11 @@ again:
 		}
 		mutex_unlock(&s->lock);
 		s->resp_rx_++;
+
+#if CRPC_MAX_CLIENT_DELAY_US > 0
+		if (shdr.win > 0)
+			s->num_timeout = 0;
+#endif
 
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
@@ -326,6 +348,9 @@ again:
 		}
 		assert(shdr.len == 0);
 
+		if (s->num_timeout > CRPC_MAX_TIMEOUT)
+			goto again;
+
 		/* update the window */
 		mutex_lock(&s->lock);
 		s->win_avail = shdr.win;
@@ -337,6 +362,11 @@ again:
 		}
 		mutex_unlock(&s->lock);
 		s->winu_rx_++;
+
+#if CRPC_MAX_CLIENT_DELAY_US > 0
+		if (shdr.win > 0)
+			s->num_timeout = 0;
+#endif
 
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
