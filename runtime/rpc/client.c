@@ -96,6 +96,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 {
 	ssize_t ret;
 	int pos;
+	uint64_t now;
 
 	assert_mutex_held(&s->lock);
 
@@ -114,6 +115,30 @@ static void crpc_drain_queue(struct crpc_session *s)
 		s->waiting_winupdate = true;
 		return;
 	}
+
+#if CRPC_MAX_CLIENT_DELAY_US > 0
+       /* Remove old requests */
+       now = microtime();
+       while (s->head != s->tail) {
+               pos = s->tail % CRPC_QLEN;
+               if (now - *s->cques[pos] <= CRPC_MAX_CLIENT_DELAY_US)
+                       break;
+               s->tail++;
+               s->req_dropped_++;
+#if CRPC_TRACK_FLOW
+               if (s->id == CRPC_TRACK_FLOW_ID) {
+                       printf("[%lu] Timeout Request dropped. qlen = %d, num_timeout = %d\n",
+                               microtime(), s->head - s->tail, s->num_timeout);
+               }
+#endif
+       }
+
+       if (s->head == s->tail) {
+               s->waiting_winupdate = false;
+               s->win_timestamp = 0;
+               s->num_timeout++;
+       }
+#endif
 
 	/* try to drain queued requests: FIFO */
 	while (s->head != s->tail) {
