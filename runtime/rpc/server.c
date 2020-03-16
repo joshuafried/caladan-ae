@@ -64,6 +64,7 @@ struct srpc_session {
 	waitgroup_t		send_waiter;
 	double			win;
 	uint64_t		demand;
+	uint64_t		last_demand_timestamp;
 
 	/* shared state between receiver and sender */
 	DEFINE_BITMAP(avail_slots, SRPC_MAX_WINDOW);
@@ -193,6 +194,7 @@ static int srpc_recv_one(struct srpc_session *s)
 	thread_t *th;
 
 again:
+	th = NULL;
 	/* read the client header */
 	ret = tcp_read_full(s->c, &chdr, sizeof(chdr));
 	if (unlikely(ret <= 0)) {
@@ -236,14 +238,16 @@ again:
 		BUG_ON(ret);
 		spin_lock_np(&s->lock);
 		s->demand = chdr.demand;
+		s->last_demand_timestamp = microtime();
 		spin_unlock_np(&s->lock);
 
 		atomic64_inc(&srpc_stat_req_rx_);
 
 #if SRPC_TRACK_FLOW
+		uint64_t now = microtime();
 		if (s->id == SRPC_TRACK_FLOW_ID) {
 			printf("[%lu] ===> Request: demand=%lu\n",
-			       microtime(), chdr.demand);
+			       now, chdr.demand);
 		}
 #endif
 		break;
@@ -256,10 +260,14 @@ again:
 		assert(chdr.len == 0);
 
 		spin_lock_np(&s->lock);
-		th = s->sender_th;
-		s->sender_th = NULL;
-		s->need_winupdate = true;
+		if (s->drained_core == -1) {
+			th = s->sender_th;
+			s->sender_th = NULL;
+			s->need_winupdate = true;
+		}
+
 		s->demand = chdr.demand;
+		s->last_demand_timestamp = microtime();
 		spin_unlock_np(&s->lock);
 
 		if (chdr.demand == 0)
@@ -269,6 +277,7 @@ again:
 			thread_ready(th);
 
 		atomic64_inc(&srpc_stat_winu_rx_);
+
 #if SRPC_TRACK_FLOW
 		if (s->id == SRPC_TRACK_FLOW_ID) {
 			printf("[%lu] ===> Winupdate: demand=%lu\n",
@@ -316,20 +325,24 @@ static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
 	atomic64_inc(&srpc_stat_resp_tx_);
 	atomic64_fetch_and_add(&srpc_stat_win_tx_, shdr.win);
 #if SRPC_TRACK_FLOW
-		if (s->id == SRPC_TRACK_FLOW_ID) {
-			printf("[%lu] <=== Response: win=%lu\n",
-			       microtime(), shdr.win);
-		}
+	if (s->id == SRPC_TRACK_FLOW_ID) {
+		printf("[%lu] <=== Response: win=%lu\n",
+			microtime(), shdr.win);
+	}
 #endif
 	return 0;
 }
 
 static struct srpc_session *srpc_choose_drained_session(int core_id)
 {
-	struct srpc_session *ret = NULL;
+	struct srpc_session *ret;
+	uint64_t now;
 
 	assert(core_id >= 0);
 	assert(core_id < runtime_max_cores());
+
+again:
+	ret = NULL;
 
 	if (list_empty(&srpc_drained[core_id].list))
 		return NULL;
@@ -343,18 +356,24 @@ static struct srpc_session *srpc_choose_drained_session(int core_id)
 	ret = list_pop(&srpc_drained[core_id].list,
 		       struct srpc_session,
 		       drained_link);
-	assert(ret->drained_core == core_id);
 	assert(ret->is_linked);
 	ret->is_linked = false;
 	spin_unlock_np(&srpc_drained[core_id].lock);
 	atomic_dec(&srpc_num_drained);
-
+	now = microtime();
 #if SRPC_TRACK_FLOW
-		if (ret->id == SRPC_TRACK_FLOW_ID) {
-			printf("[%lu] Session waken up\n",
-			       microtime());
-		}
+	if (ret->id == SRPC_TRACK_FLOW_ID) {
+		printf("[%lu] Session waken up: %lu\n",
+			now, now - ret->last_demand_timestamp);
+	}
 #endif
+
+	if (now - ret->last_demand_timestamp > 80) {
+		spin_lock_np(&ret->lock);
+		ret->drained_core = -1;
+		spin_unlock_np(&ret->lock);
+		goto again;
+	}
 
 	return ret;
 }
@@ -372,6 +391,7 @@ static void srpc_sender(void *arg)
 	unsigned int core_id;
 	int num_resp;
 	uint64_t demand;
+	int drained_core;
 
 	while (true) {
 		/* find slots that have completed */
@@ -397,6 +417,7 @@ static void srpc_sender(void *arg)
 		bitmap_init(s->completed_slots, SRPC_MAX_WINDOW, false);
 		s->need_winupdate = false;
 		demand = s->demand;
+		drained_core = s->drained_core;
 		spin_unlock_np(&s->lock);
 		num_resp = bitmap_popcount(tmp, SRPC_MAX_WINDOW);
 		/* initialize the window to zero */
@@ -442,19 +463,21 @@ static void srpc_sender(void *arg)
 			srpc_put_slot(s, i);
 		}
 
-		if (need_winupdate && s->drained_core >= 0) {
-			spin_lock_np(&srpc_drained[s->drained_core].lock);
+		if (need_winupdate && drained_core >= 0) {
+			spin_lock_np(&s->lock);
+			spin_lock_np(&srpc_drained[drained_core].lock);
 			/* Give one window to the session who just got up */
 			if (!s->is_linked) {
 				s->win = 1.0;
 			} else {
-				list_del_from(&srpc_drained[s->drained_core].list,
+				list_del_from(&srpc_drained[drained_core].list,
 					      &s->drained_link);
 				s->is_linked = false;
 				atomic_dec(&srpc_num_drained);
 			}
-			spin_unlock_np(&srpc_drained[s->drained_core].lock);
+			spin_unlock_np(&srpc_drained[drained_core].lock);
 			s->drained_core = -1;
+			spin_unlock_np(&s->lock);
 		}
 
 		/* Send WINUPDATE message */
@@ -467,9 +490,10 @@ static void srpc_sender(void *arg)
 		/* add to the drained list if (1) window becomes zero,
 		 * (2) s is not in the list already,
 		 * (3) it has no outstanding requests */
-		if (s->win < 1.0 && demand > 0 && s->drained_core == -1 &&
+		if (s->win < 1.0 && demand > 0 && drained_core == -1 &&
 		    bitmap_popcount(s->avail_slots, SRPC_MAX_WINDOW) ==
 		    SRPC_MAX_WINDOW) {
+			spin_lock_np(&s->lock);
 			spin_lock_np(&srpc_drained[core_id].lock);
 			assert(!s->is_linked);
 			list_add_tail(&srpc_drained[core_id].list,
@@ -477,11 +501,12 @@ static void srpc_sender(void *arg)
 			s->is_linked = true;
 			spin_unlock_np(&srpc_drained[core_id].lock);
 			s->drained_core = core_id;
+			spin_unlock_np(&s->lock);
 			atomic_inc(&srpc_num_drained);
 #if SRPC_TRACK_FLOW
 			if (s->id == SRPC_TRACK_FLOW_ID) {
-				printf("[%lu] Session is drained: win=%lf\n",
-				       microtime(), s->win);
+				printf("[%lu] Session is drained: win=%lf, drained_core = %d\n",
+				       microtime(), s->win, s->drained_core);
 			}
 #endif
 		}
@@ -512,7 +537,6 @@ close:
 		spin_lock_np(&s->lock);
 		s->sender_th = NULL;
 	}
-	spin_unlock_np(&s->lock);
 
 	/* remove from the drained list */
 	if (s->drained_core >= 0) {
@@ -526,6 +550,7 @@ close:
 		spin_unlock_np(&srpc_drained[s->drained_core].lock);
 		s->drained_core = -1;
 	}
+	spin_unlock_np(&s->lock);
 
 	/* free any left over slots */
 	for (i = 0; i < SRPC_MAX_WINDOW; i++) {
