@@ -95,7 +95,6 @@ static void crpc_drain_queue(struct crpc_session *s)
 {
 	ssize_t ret;
 	int pos;
-	uint64_t now;
 
 	assert_mutex_held(&s->lock);
 
@@ -114,18 +113,6 @@ static void crpc_drain_queue(struct crpc_session *s)
 		s->waiting_winupdate = true;
 		return;
 	}
-
-#if CRPC_MAX_CLIENT_DELAY_US > 0
-	/* Remove old requests */
-	now = microtime();
-	while (s->head != s->tail) {
-		pos = s->tail % CRPC_QLEN;
-		if (now - *s->cques[pos] <= CRPC_MAX_CLIENT_DELAY_US)
-			break;
-		s->tail++;
-		s->req_dropped_++;
-	}
-#endif
 
 	/* try to drain queued requests: FIFO */
 	while (s->head != s->tail) {
@@ -146,8 +133,33 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 			     const void *buf, size_t len, uint64_t *cque)
 {
 	int pos;
+	uint64_t now;
 
 	assert_mutex_held(&s->lock);
+
+#if CRPC_MAX_CLIENT_DELAY_US > 0
+	/* Remove old requests */
+	now = microtime();
+	while (s->head != s->tail) {
+		pos = s->tail % CRPC_QLEN;
+		if (now - *s->cques[pos] <= CRPC_MAX_CLIENT_DELAY_US)
+			break;
+		s->tail++;
+		s->req_dropped_++;
+
+#if CRPC_TRACK_FLOW
+		if (s->id == CRPC_TRACK_FLOW_ID) {
+			printf("[%lu] Timeout. Request dropped. qlen = %d\n",
+				microtime(), s->head - s->tail);
+		}
+#endif
+	}
+
+	if (s->head == s->tail) {
+		s->waiting_winupdate = false;
+		s->win_timestamp = 0;
+	}
+#endif
 
 #if CRPC_MAX_CLIENT_DELAY_US == 0
 	if (s->win_used >= s->win_avail) {
@@ -174,13 +186,10 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	s->lens[pos] = len;
 	s->cques[pos] = cque;
 
-	if (unlikely(s->head - s->tail < 0))
-		panic("overflow!\n");
-
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
-			printf("[%lu] request enqueued.\n",
-			       microtime());
+			printf("[%lu] request enqueued: qlen = %d\n",
+			       microtime(), s->head - s->tail);
 		}
 #endif
 
