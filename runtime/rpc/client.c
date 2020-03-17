@@ -18,7 +18,7 @@
 #define CRPC_MIN_DEMAND			0
 
 #define CRPC_CLIENT_CLOSING		true
-#define CRPC_MAX_TIMEOUT		3
+#define CRPC_MAX_TIMEOUT		5
 
 #define CRPC_TRACK_FLOW			false
 #define CRPC_TRACK_FLOW_ID		0
@@ -476,6 +476,11 @@ fail:
 uint32_t crpc_win_avail(struct crpc_session *s)
 {
 	return s->win_avail;
+}
+
+bool crpc_closed(struct crpc_session *s)
+{
+	return (s->num_timeout > CRPC_MAX_TIMEOUT);
 }
 
 /**

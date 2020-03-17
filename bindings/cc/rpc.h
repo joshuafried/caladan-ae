@@ -73,6 +73,10 @@ class RpcClient {
     return crpc_stat_req_dropped(s_);
   }
 
+  bool IsClosed() {
+    return crpc_closed(s_);
+  }
+
   // Shuts down the RPC connection.
   int Shutdown(int how) { return tcp_shutdown(s_->c, how); }
   // Aborts the RPC connection.

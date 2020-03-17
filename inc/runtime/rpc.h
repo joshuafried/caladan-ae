@@ -78,6 +78,7 @@ extern ssize_t crpc_recv_one(struct crpc_session *s,
 extern int crpc_open(struct netaddr raddr, struct crpc_session **sout);
 extern void crpc_close(struct crpc_session *s);
 extern uint32_t crpc_win_avail(struct crpc_session *s);
+extern bool crpc_closed(struct crpc_session *s);
 
 /* client-side stats */
 static inline uint64_t crpc_stat_winu_rx(struct crpc_session *s)
