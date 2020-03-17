@@ -16,7 +16,9 @@
 #define CRPC_MAX_CLIENT_DELAY_US	100
 #define CRPC_CREDIT_LIFETIME_US		-1
 #define CRPC_MIN_DEMAND			0
-#define CRPC_MAX_TIMEOUT		5
+
+#define CRPC_CLIENT_CLOSING		true
+#define CRPC_MAX_TIMEOUT		3
 
 #define CRPC_TRACK_FLOW			false
 #define CRPC_TRACK_FLOW_ID		0
@@ -186,6 +188,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 		s->num_timeout++;
 	}
 
+#if CRPC_CLIENT_CLOSING
 	if (s->num_timeout > CRPC_MAX_TIMEOUT) {
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
@@ -195,6 +198,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 #endif
 		return false;
 	}
+#endif
 #endif
 
 #if CRPC_MAX_CLIENT_DELAY_US == 0
@@ -255,8 +259,10 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	if (unlikely(len > SRPC_BUF_SIZE))
 		return -E2BIG;
 
+#if CRPC_CLIENT_CLOSING
 	if (s->num_timeout > CRPC_MAX_TIMEOUT)
 		return -ENOBUFS;
+#endif
 
 	mutex_lock(&s->lock);
 
@@ -336,8 +342,10 @@ again:
 			return ret;
 		assert(ret == shdr.len);
 
+#if CRPC_CLIENT_CLOSING
 		if (s->num_timeout > CRPC_MAX_TIMEOUT)
 			goto again;
+#endif
 
 		/* update the window */
 		mutex_lock(&s->lock);
@@ -373,8 +381,10 @@ again:
 		}
 		assert(shdr.len == 0);
 
+#if CRPC_CLIENT_CLOSING
 		if (s->num_timeout > CRPC_MAX_TIMEOUT)
 			goto again;
+#endif
 
 		/* update the window */
 		mutex_lock(&s->lock);
