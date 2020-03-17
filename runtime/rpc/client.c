@@ -196,6 +196,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 			       microtime());
 		}
 #endif
+		s->req_dropped_++;
 		return false;
 	}
 #endif
@@ -260,8 +261,10 @@ ssize_t crpc_send_one(struct crpc_session *s,
 		return -E2BIG;
 
 #if CRPC_CLIENT_CLOSING
-	if (s->num_timeout > CRPC_MAX_TIMEOUT)
+	if (s->num_timeout > CRPC_MAX_TIMEOUT) {
+		s->req_dropped_++;
 		return -ENOBUFS;
+	}
 #endif
 
 	mutex_lock(&s->lock);
