@@ -162,12 +162,6 @@ static void srpc_update_window(struct srpc_session *s)
 	/* now we allow zero window */
 	s->win = MAX(s->win, 0.0);
 	s->win = MIN(s->win, SRPC_MAX_WINDOW - 1);
-
-	/* avoid all the session is drained. */
-	if (s->win < 1.0 &&
-	    atomic_read(&srpc_num_sess) - atomic_read(&srpc_num_drained)
-	    <= runtime_max_cores())
-		s->win = 1.0;
 }
 
 static void srpc_worker(void *arg)
