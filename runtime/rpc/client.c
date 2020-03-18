@@ -18,7 +18,7 @@
 #define CRPC_MIN_DEMAND			0
 
 #define CRPC_CLIENT_CLOSING		true
-#define CRPC_MAX_TIMEOUT		5
+#define CRPC_MAX_TIMEOUT		3
 
 #define CRPC_TRACK_FLOW			false
 #define CRPC_TRACK_FLOW_ID		0
@@ -162,6 +162,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 {
 	int pos;
 	uint64_t now;
+	int num_drops = 0;
 
 	assert_mutex_held(&s->lock);
 
@@ -174,6 +175,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 			break;
 		s->tail++;
 		s->req_dropped_++;
+		num_drops++;
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
 			printf("[%lu] Timeout. Request dropped. qlen = %d, num_timeout = %d\n",
@@ -182,7 +184,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 #endif
 	}
 
-	if (s->head == s->tail) {
+	if (num_drops > 0 && s->head == s->tail) {
 		s->waiting_winupdate = false;
 		s->win_timestamp = 0;
 		s->num_timeout++;
@@ -345,11 +347,6 @@ again:
 			return ret;
 		assert(ret == shdr.len);
 
-#if CRPC_CLIENT_CLOSING
-		if (s->num_timeout > CRPC_MAX_TIMEOUT)
-			goto again;
-#endif
-
 		/* update the window */
 		mutex_lock(&s->lock);
 		assert(s->win_used > 0);
@@ -358,6 +355,11 @@ again:
 		s->win_timestamp = microtime();
 		s->waiting_winupdate = false;
 
+#if CRPC_CLIENT_CLOSING
+		if (s->num_timeout > CRPC_MAX_TIMEOUT)
+			s->win_avail = 0;
+#endif
+
 		if (s->win_avail > 0) {
 			crpc_drain_queue(s);
 		}
@@ -365,7 +367,7 @@ again:
 		s->resp_rx_++;
 
 #if CRPC_MAX_CLIENT_DELAY_US > 0
-		if (shdr.win > 0)
+		if (s->win_avail > 0)
 			s->num_timeout = 0;
 #endif
 
@@ -384,16 +386,16 @@ again:
 		}
 		assert(shdr.len == 0);
 
-#if CRPC_CLIENT_CLOSING
-		if (s->num_timeout > CRPC_MAX_TIMEOUT)
-			goto again;
-#endif
-
 		/* update the window */
 		mutex_lock(&s->lock);
 		s->win_avail = shdr.win;
 		s->win_timestamp = microtime();
 		s->waiting_winupdate = false;
+
+#if CRPC_CLIENT_CLOSING
+		if (s->num_timeout > CRPC_MAX_TIMEOUT)
+			s->win_avail = 0;
+#endif
 
 		if (s->win_avail > 0) {
 			crpc_drain_queue(s);
@@ -402,7 +404,7 @@ again:
 		s->winu_rx_++;
 
 #if CRPC_MAX_CLIENT_DELAY_US > 0
-		if (shdr.win > 0)
+		if (s->win_avail > 0)
 			s->num_timeout = 0;
 #endif
 
