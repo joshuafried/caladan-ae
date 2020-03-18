@@ -99,6 +99,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 	ssize_t ret;
 	int pos;
 	uint64_t now;
+	int num_drops = 0;
 
 	assert_mutex_held(&s->lock);
 
@@ -127,6 +128,7 @@ static void crpc_drain_queue(struct crpc_session *s)
                        break;
                s->tail++;
                s->req_dropped_++;
+	       num_drops++;
 #if CRPC_TRACK_FLOW
                if (s->id == CRPC_TRACK_FLOW_ID) {
                        printf("[%lu] Timeout Request dropped. qlen = %d, num_timeout = %d\n",
@@ -135,7 +137,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 #endif
        }
 
-       if (s->head == s->tail) {
+       if (num_drops > 0 && s->head == s->tail) {
                s->waiting_winupdate = false;
                s->win_timestamp = 0;
                s->num_timeout++;
