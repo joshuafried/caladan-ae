@@ -233,6 +233,16 @@ again:
 		spin_lock_np(&s->lock);
 		s->demand = chdr.demand;
 		s->last_demand_timestamp = microtime();
+		if (s->drained_core >= 0) {
+			spin_lock_np(&srpc_drained[s->drained_core].lock);
+			if (s->is_linked) {
+				list_del_from(&srpc_drained[s->drained_core].list,
+					      &s->drained_link);
+				s->is_linked = false;
+			}
+			spin_unlock_np(&srpc_drained[s->drained_core].lock);
+			s->drained_core = -1;
+		}
 		spin_unlock_np(&s->lock);
 
 		atomic64_inc(&srpc_stat_req_rx_);
