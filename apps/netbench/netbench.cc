@@ -116,7 +116,7 @@ struct cstat_raw {
   uint64_t req_tx;
   uint64_t win_expired;
   uint64_t req_dropped;
-  uint64_t num_close;
+  double sleep_time;
 };
 
 struct cstat {
@@ -130,7 +130,7 @@ struct cstat {
   double req_tx_pps;
   double win_expired_wps;
   double req_dropped_rps;
-  uint64_t num_close;
+  double sleep_time;
 };
 
 struct work_unit {
@@ -220,8 +220,9 @@ class NetBarrier {
 	csr->req_tx += rem_csr.req_tx;
 	csr->win_expired += rem_csr.win_expired;
 	csr->req_dropped += rem_csr.req_dropped;
-	csr->num_close += rem_csr.num_close;
+	csr->sleep_time += rem_csr.sleep_time;
       }
+      csr->sleep_time /= (1 + total_agents);
     } else {
       BUG_ON(conns[0]->WriteFull(csr, sizeof(*csr)) <= 0);
     }
@@ -601,6 +602,8 @@ std::vector<work_unit> RunExperiment(
   // Force the connections to close.
   for (auto &c : conns) c->Abort();
 
+  double elapsed_ = duration_cast<sec>(finish - start).count();
+
   // Aggregate client stats
   if (csr) {
     for (auto &c : conns) {
@@ -610,13 +613,14 @@ std::vector<work_unit> RunExperiment(
       csr->req_tx += c->StatReqTx();
       csr->win_expired += c->StatWinExpired();
       csr->req_dropped += c->StatReqDropped();
-      csr->num_close += (int)(c->IsClosed());
+      csr->sleep_time += c->StatWaitTime();
     }
+    csr->sleep_time /= threads;
+    csr->sleep_time /= elapsed_;
   }
 
   // Aggregate all the samples together.
   std::vector<work_unit> w;
-  double elapsed_ = duration_cast<sec>(finish - start).count();
   double min_throughput = 0.0;
   double max_throughput = 0.0;
   uint64_t offered = 0;
@@ -700,7 +704,7 @@ void PrintHeader(std::ostream& os) {
      << "server:resp_tx_pps," << "client:min_tput," << "client:max_tput,"
      << "client:winu_rx_pps," << "client:winu_tx_pps," << "client:resp_rx_pps,"
      << "client:req_tx_pps," << "client:win_expired_wps," << "client:req_dropped_rps,"
-     << "client:num_closed" << std::endl;
+     << "client:sleep" << std::endl;
 }
 
 void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
@@ -781,7 +785,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << cs->min_percli_tput << "," << cs->max_percli_tput << ","
       << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
       << cs->req_tx_pps << "," << cs->win_expired_wps << ","
-      << cs->req_dropped_rps << "," << cs->num_close << std::endl;
+      << cs->req_dropped_rps << "," << cs->sleep_time << std::endl;
 
   csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
       << cs->offered_rps << "," << cs->rps << "," << ss->cpu_usage << ","
@@ -797,7 +801,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << cs->min_percli_tput << "," << cs->max_percli_tput << ","
       << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
       << cs->req_tx_pps << "," << cs->win_expired_wps << ","
-      << cs->req_dropped_rps << "," << cs->num_close << std::endl << std::flush;
+      << cs->req_dropped_rps << "," << cs->sleep_time << std::endl << std::flush;
 
   json_out << "{"
 	   << "\"num_threads\":" << threads * total_agents << ","
@@ -846,7 +850,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 	   << "\"client:req_tx_pps\":" << cs->req_tx_pps << ","
 	   << "\"client:win_expired_wps\":" << cs->win_expired_wps << ","
 	   << "\"client:req_dropped_rps\":" << cs->req_dropped_rps << ","
-	   << "\"client:num_close\":" << cs->num_close
+	   << "\"client:sleep\":" << cs->sleep_time
 	   << "}," << std::endl << std::flush;
 }
 
@@ -883,7 +887,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
 	     static_cast<double>(csr.req_tx) / elapsed * 1000000,
 	     static_cast<double>(csr.win_expired) / elapsed * 1000000,
 	     static_cast<double>(csr.req_dropped) / elapsed * 1000000,
-             csr.num_close};
+             csr.sleep_time};
 
   // Print the results.
   PrintStatResults(w, &cs, &ss);

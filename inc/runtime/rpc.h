@@ -54,6 +54,7 @@ struct crpc_session {
 	uint32_t		win_used;
 	uint64_t		last_demand;
 	int			num_timeout;
+	uint64_t		next_resume_time;
 
 	/* a queue of pending RPC requests */
 	uint32_t		head;
@@ -69,6 +70,7 @@ struct crpc_session {
 	uint64_t		req_tx_;
 	uint64_t		win_expired_;
 	uint64_t		req_dropped_;
+	uint64_t		wait_time_;
 };
 
 extern ssize_t crpc_send_one(struct crpc_session *s,
@@ -77,8 +79,11 @@ extern ssize_t crpc_recv_one(struct crpc_session *s,
 			     void *buf, size_t len);
 extern int crpc_open(struct netaddr raddr, struct crpc_session **sout);
 extern void crpc_close(struct crpc_session *s);
-extern uint32_t crpc_win_avail(struct crpc_session *s);
-extern bool crpc_closed(struct crpc_session *s);
+
+static inline uint32_t crpc_win_avail(struct crpc_session *s)
+{
+	return s->win_avail;
+}
 
 /* client-side stats */
 static inline uint64_t crpc_stat_winu_rx(struct crpc_session *s)
@@ -109,6 +114,11 @@ static inline uint64_t crpc_stat_win_expired(struct crpc_session *s)
 static inline uint64_t crpc_stat_req_dropped(struct crpc_session *s)
 {
 	return s->req_dropped_;
+}
+
+static inline uint64_t crpc_stat_wait_time(struct crpc_session *s)
+{
+	return s->wait_time_;
 }
 
 /**

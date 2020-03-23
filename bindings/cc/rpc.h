@@ -73,8 +73,8 @@ class RpcClient {
     return crpc_stat_req_dropped(s_);
   }
 
-  bool IsClosed() {
-    return crpc_closed(s_);
+  uint64_t StatWaitTime() {
+    return crpc_stat_wait_time(s_);
   }
 
   // Shuts down the RPC connection.
