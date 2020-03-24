@@ -20,6 +20,10 @@ extern int runtime_init(const char *cfgpath, thread_fn_t main_fn, void *arg);
 
 extern struct congestion_info *runtime_congestion;
 
+extern unsigned int maxks;
+extern unsigned int guaranteedks;
+extern atomic_t runningks;
+
 /**
  * runtime_standing_queue_us - returns the us a queue has been left standing
  */
@@ -34,11 +38,18 @@ static inline uint64_t runtime_standing_queue_us(void)
  */
 static inline uint64_t runtime_queue_us(void)
 {
-	uint64_t now = rdtsc();
-	uint64_t rq_oldest_tsc = ACCESS_ONCE(runtime_congestion->rq_oldest_tsc);
-	uint64_t pkq_oldest_tsc = ACCESS_ONCE(runtime_congestion->pkq_oldest_tsc);
-	uint64_t rq_delay = 0;
-	uint64_t pkq_delay = 0;
+	uint64_t now;
+	uint64_t rq_oldest_tsc, pkq_oldest_tsc;
+	uint64_t rq_delay, pkq_delay;
+
+	if ((unsigned int)atomic_read(&runningks) < maxks)
+		return 0;
+
+	now = rdtsc();
+	rq_oldest_tsc = ACCESS_ONCE(runtime_congestion->rq_oldest_tsc);
+	pkq_oldest_tsc = ACCESS_ONCE(runtime_congestion->pkq_oldest_tsc);
+	rq_delay = 0;
+	pkq_delay = 0;
 
 	if (now > rq_oldest_tsc)
 		rq_delay = now - rq_oldest_tsc;
@@ -56,11 +67,6 @@ static inline float runtime_load(void)
 {
 	return ACCESS_ONCE(runtime_congestion->load);
 }
-
-extern unsigned int maxks;
-extern unsigned int guaranteedks;
-extern atomic_t runningks;
-
 
 /**
  * runtime_active_cores - returns the number of currently active cores
