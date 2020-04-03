@@ -26,8 +26,7 @@ class RpcClient {
   static RpcClient *Dial(netaddr raddr, int id) {
     crpc_session *s;
     raddr.port = SRPC_PORT;
-    int ret = crpc_open(raddr, &s);
-    s->id = id;
+    int ret = crpc_open(raddr, &s, id);
     if (ret) return nullptr;
     return new RpcClient(s);
   }

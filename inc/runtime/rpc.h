@@ -55,6 +55,8 @@ struct crpc_session {
 	uint64_t		last_demand;
 	int			num_timeout;
 	uint64_t		next_resume_time;
+	condvar_t		timer_cv;
+	bool			running;
 
 	/* a queue of pending RPC requests */
 	uint32_t		head;
@@ -77,7 +79,7 @@ extern ssize_t crpc_send_one(struct crpc_session *s,
 			     const void *buf, size_t len, uint64_t *cque);
 extern ssize_t crpc_recv_one(struct crpc_session *s,
 			     void *buf, size_t len);
-extern int crpc_open(struct netaddr raddr, struct crpc_session **sout);
+extern int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id);
 extern void crpc_close(struct crpc_session *s);
 
 static inline uint32_t crpc_win_avail(struct crpc_session *s)
