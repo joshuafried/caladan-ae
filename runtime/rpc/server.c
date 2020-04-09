@@ -271,6 +271,7 @@ static void srpc_update_window(struct srpc_session *s)
 	int guaranteed_win;
 	int old_win = s->win;
 	int win_diff;
+	int open_window;
 
 	assert_spin_lock_held(&s->lock);
 
@@ -286,7 +287,8 @@ static void srpc_update_window(struct srpc_session *s)
 	s->win = MAX(s->win, guaranteed_win);
 
 	if (win_used < win_avail) {
-		s->win++;
+		open_window = win_avail - win_used;
+		s->win = MIN(s->num_pending + s->demand, s->win + open_window);
 	}
 
 	if (s->wake_up || num_active <= runtime_max_cores())
