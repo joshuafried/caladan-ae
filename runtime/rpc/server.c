@@ -21,6 +21,7 @@
 #include "proto.h"
 
 /* the maximum supported window size */
+#define SRPC_MAX_WINDOW_EXP	6
 #define SRPC_MAX_WINDOW		64
 /* the minimum runtime queuing delay */
 #define SRPC_MIN_DELAY_US	20
@@ -35,6 +36,9 @@
 #define BUFFER_SIZE_EXP		15
 #define BUFFER_SIZE		(1 << BUFFER_SIZE_EXP)
 #define BUFFER_MASK		(BUFFER_SIZE - 1)
+
+BUILD_ASSERT((1 << SRPC_MAX_WINDOW_EXP) == SRPC_MAX_WINDOW);
+
 int nextIndex = 0;
 FILE *signal_out = NULL;
 
@@ -204,6 +208,58 @@ static int srpc_winupdate(struct srpc_session *s)
 	}
 #endif
 
+	return 0;
+}
+
+static int srpc_send_completion_vector(struct srpc_session *s,
+				       unsigned long *slots)
+{
+	struct srpc_hdr shdr[SRPC_MAX_WINDOW];
+	struct iovec v[SRPC_MAX_WINDOW * 2];
+	int nriov = 0;
+	int nrhdr = 0;
+	int i;
+	ssize_t ret;
+
+	bitmap_for_each_set(slots, SRPC_MAX_WINDOW, i) {
+		struct srpc_ctx *c = s->slots[i];
+
+		shdr[nrhdr].magic = RPC_RESP_MAGIC;
+		shdr[nrhdr].op = RPC_OP_CALL;
+		shdr[nrhdr].len = c->resp_len;
+		shdr[nrhdr].win = (uint64_t)s->win;
+
+		v[nriov].iov_base = &shdr[nrhdr];
+		v[nriov].iov_len = sizeof(struct srpc_hdr);
+		nrhdr++;
+		nriov++;
+
+		BUG_ON(c->resp_len == 0);
+
+		v[nriov].iov_base = c->resp_buf;
+		v[nriov++].iov_len = c->resp_len;
+	}
+
+	if (nriov == 0)
+		return 0;
+
+	/* send the completion(s) */
+	ret = tcp_writev_full(s->c, v, nriov);
+	bitmap_for_each_set(slots, SRPC_MAX_WINDOW, i)
+		srpc_put_slot(s, i);
+
+#if SRPC_TRACK_FLOW
+	if (s->id == SRPC_TRACK_FLOW_ID) {
+		printf("[%lu] <=== Response (%d): win=%lu\n",
+			microtime(), nrhdr, shdr.win);
+	}
+#endif
+	atomic_sub_and_fetch(&srpc_num_pending, nrhdr);
+	atomic64_fetch_and_add(&srpc_stat_resp_tx_, nrhdr);
+	atomic64_fetch_and_add(&srpc_stat_win_tx_, s->win * nrhdr);
+
+	if (unlikely(ret < 0))
+		return ret;
 	return 0;
 }
 
@@ -397,17 +453,17 @@ again:
 		s->demand = chdr.demand;
 		s->last_demand_timestamp = microtime();
 		srpc_remove_from_drained_list(s);
-		num_pending = s->num_pending++;
+		if (s->num_pending + old_demand == 0)
+			atomic_inc(&srpc_num_active);
+		s->num_pending++;
 		/* adjust window if demand changed */
 		if (s->win > s->num_pending + s->demand) {
-			win_diff = s->win - s->num_pending + s->demand;
+			win_diff = s->win - (s->num_pending + s->demand);
 			s->win = s->num_pending + s->demand;
 			atomic_sub_and_fetch(&srpc_win_used, win_diff);
 		}
 		spin_unlock_np(&s->lock);
 
-		if (num_pending == 0 && old_demand == 0)
-			atomic_inc(&srpc_num_active);
 		atomic_inc(&srpc_num_pending);
 		ret = thread_spawn(srpc_worker, s->slots[idx]);
 		BUG_ON(ret);
@@ -450,16 +506,15 @@ again:
 
 		/* adjust window if demand changed */
 		if (s->win > s->num_pending + s->demand) {
-			win_diff = s->win - s->num_pending + s->demand;
+			win_diff = s->win - (s->num_pending + s->demand);
 			s->win = s->num_pending + s->demand;
 			atomic_sub_and_fetch(&srpc_win_used, win_diff);
 		}
-		spin_unlock_np(&s->lock);
-
 		if (old_active == 0 && new_active > 0)
 			atomic_inc(&srpc_num_active);
 		else if (old_active > 0 && new_active == 0)
 			atomic_dec(&srpc_num_active);
+		spin_unlock_np(&s->lock);
 
 		if (th)
 			thread_ready(th);
@@ -478,48 +533,6 @@ again:
 	}
 
 	return ret;
-}
-
-static int srpc_send_one(struct srpc_session *s, struct srpc_ctx *c)
-{
-	struct iovec vec[2];
-	struct srpc_hdr shdr;
-	int ret;
-
-	/* must have a response payload */
-	if (unlikely(c->resp_len == 0))
-		return -EINVAL;
-
-	/* craft the response header */
-	shdr.magic = RPC_RESP_MAGIC;
-	shdr.op = RPC_OP_CALL;
-	shdr.len = c->resp_len;
-	shdr.win = (uint64_t)s->win;
-
-	/* initialize the SG vector */
-	vec[0].iov_base = &shdr;
-	vec[0].iov_len = sizeof(shdr);
-	vec[1].iov_base = c->resp_buf;
-	vec[1].iov_len = c->resp_len;
-
-	/* send the packet */
-	ret = tcp_writev_full(s->c, vec, 2);
-	if (unlikely(ret < 0))
-		return ret;
-
-	assert(ret == sizeof(shdr) + c->resp_len);
-
-	atomic_dec(&srpc_num_pending);
-
-	atomic64_inc(&srpc_stat_resp_tx_);
-	atomic64_fetch_and_add(&srpc_stat_win_tx_, shdr.win);
-#if SRPC_TRACK_FLOW
-	if (s->id == SRPC_TRACK_FLOW_ID) {
-		printf("[%lu] <=== Response: win=%lu\n",
-			microtime(), shdr.win);
-	}
-#endif
-	return 0;
 }
 
 static void srpc_sender(void *arg)
@@ -583,10 +596,9 @@ static void srpc_sender(void *arg)
 
 		if (send_winupdate)
 			s->last_winupdate_timestamp = microtime();
-		spin_unlock_np(&s->lock);
-
-		if (num_resp > 0 && num_pending == 0 && demand == 0)
+		if (num_resp > 0 && s->num_pending + s->demand == 0)
 			atomic_dec(&srpc_num_active);
+		spin_unlock_np(&s->lock);
 
 		/* Send WINUPDATE message */
 		if (send_winupdate) {
@@ -597,16 +609,7 @@ static void srpc_sender(void *arg)
 		}
 
 		/* send a response for each completed slot */
-		bitmap_for_each_set(tmp, SRPC_MAX_WINDOW, i) {
-			ret = srpc_send_one(s, s->slots[i]);
-			if (unlikely(ret)) {
-				bitmap_atomic_or(s->avail_slots, tmp,
-						 SRPC_MAX_WINDOW);
-				goto close;
-			}
-			srpc_put_slot(s, i);
-		}
-
+		ret = srpc_send_completion_vector(s, tmp);
 		core_id = get_current_affinity();
 
 		/* add to the drained list if (1) window becomes zero,
@@ -707,6 +710,7 @@ static void srpc_server(void *arg)
 	atomic_sub_and_fetch(&srpc_win_used, s->win);
 	atomic_sub_and_fetch(&srpc_num_pending, s->num_pending);
 	s->num_pending = 0;
+	s->demand = 0;
 	s->win = 0;
 	spin_unlock_np(&s->lock);
 
@@ -755,6 +759,9 @@ static void srpc_cc_worker(void *arg)
 			new_win++;
 		}
 
+		new_win = MAX(new_win, max_cores);
+		new_win = MIN(new_win, atomic_read(&srpc_num_active) << SRPC_MAX_WINDOW_EXP);
+
 		// Wake up threads from drained list
 		win_used = atomic_read(&srpc_win_used);
 		win_open = new_win - win_used;
@@ -773,17 +780,20 @@ static void srpc_cc_worker(void *arg)
 				break;
 
 			spin_lock_np(&ds->lock);
+			BUG_ON(ds->win > 0);
 			th = ds->sender_th;
 			ds->sender_th = NULL;
 			ds->wake_up = true;
+			ds->win = 1;
 			spin_unlock_np(&ds->lock);
+
+			atomic_inc(&srpc_win_used);
 
 			if (th)
 				thread_ready(th);
 			win_open--;
 		}
 
-		new_win = MAX(new_win, max_cores);
 		atomic_write(&srpc_win_avail, new_win);
 
 		//record(new_win, us);
