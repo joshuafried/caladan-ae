@@ -40,6 +40,7 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	/* construct the client header */
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_WINUPDATE;
+	chdr.id = 0;
 	chdr.len = 0;
 	chdr.demand = MAX(CRPC_MIN_DEMAND, s->head - s->tail);
 
@@ -63,7 +64,8 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 }
 
 static ssize_t crpc_send_raw(struct crpc_session *s,
-			     const void *buf, size_t len)
+			     const void *buf, size_t len,
+			     uint64_t id)
 {
 	struct iovec vec[2];
 	struct crpc_hdr chdr;
@@ -72,6 +74,7 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 	/* initialize the header */
 	chdr.magic = RPC_REQ_MAGIC;
 	chdr.op = RPC_OP_CALL;
+	chdr.id = id;
 	chdr.len = len;
 	chdr.demand = MAX(CRPC_MIN_DEMAND, s->head - s->tail);
 
@@ -91,8 +94,8 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 
 #if CRPC_TRACK_FLOW
 	if (s->id == CRPC_TRACK_FLOW_ID) {
-		printf("[%lu] <=== request: demand = %lu, win = %u/%u\n",
-		       microtime(), chdr.demand, s->win_used, s->win_avail);
+		printf("[%lu] <=== request: id=%lu, demand = %lu, win = %u/%u\n",
+		       microtime(), chdr.id, chdr.demand, s->win_used, s->win_avail);
 	}
 #endif
 	return len;
@@ -102,6 +105,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 {
 	ssize_t ret;
 	int pos;
+	struct crpc_ctx *c;
 	uint64_t now = microtime();
 	int num_drops = 0;
 
@@ -133,7 +137,8 @@ static void crpc_drain_queue(struct crpc_session *s)
        /* Remove old requests */
        while (s->head != s->tail) {
                pos = s->tail % CRPC_QLEN;
-               if (now - *s->cques[pos] <= CRPC_MAX_CLIENT_DELAY_US)
+	       c = s->qreq[pos];
+               if (now - *c->cque <= CRPC_MAX_CLIENT_DELAY_US)
                        break;
                s->tail++;
                s->req_dropped_++;
@@ -167,11 +172,12 @@ static void crpc_drain_queue(struct crpc_session *s)
 			break;
 
 		pos = s->tail++ % CRPC_QLEN;
-		*s->cques[pos] = now - *s->cques[pos];
-		ret = crpc_send_raw(s, s->bufs[pos], s->lens[pos]);
+		c = s->qreq[pos];
+		*c->cque = now - *c->cque;
+		ret = crpc_send_raw(s, c->buf, c->len, c->id);
 		if (ret < 0)
 			break;
-		assert(ret == s->lens[pos]);
+		assert(ret == c->len);
 		s->win_used++;
 	}
 }
@@ -180,6 +186,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 			     const void *buf, size_t len, uint64_t *cque)
 {
 	int pos;
+	struct crpc_ctx *c;
 	uint64_t now = microtime();
 	int num_drops = 0;
 
@@ -189,7 +196,8 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	/* Remove old requests */
 	while (s->head != s->tail) {
 		pos = s->tail % CRPC_QLEN;
-		if (now - *s->cques[pos] <= CRPC_MAX_CLIENT_DELAY_US)
+		c = s->qreq[pos];
+		if (now - *c->cque <= CRPC_MAX_CLIENT_DELAY_US)
 			break;
 		s->tail++;
 		s->req_dropped_++;
@@ -238,15 +246,17 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	}
 
 	pos = s->head++ % CRPC_QLEN;
+	c = s->qreq[pos];
 	*cque = now;
-	memcpy(s->bufs[pos], buf, len);
-	s->lens[pos] = len;
-	s->cques[pos] = cque;
+	memcpy(c->buf, buf, len);
+	c->id = s->req_id++;
+	c->len = len;
+	c->cque = cque;
 
 #if CRPC_TRACK_FLOW
 	if (s->id == CRPC_TRACK_FLOW_ID) {
-		printf("[%lu] request enqueued: qlen = %d, waiting_winupdate=%d\n",
-		       now, s->head - s->tail, s->waiting_winupdate);
+		printf("[%lu] request enqueued: id=%lu, qlen = %d, waiting_winupdate=%d\n",
+		       now, c->id, s->head - s->tail, s->waiting_winupdate);
 	}
 #endif
 	// Queue becomes non-empty
@@ -311,7 +321,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	if (s->win_used < s->win_avail && s->head == s->tail) {
 		s->win_used++;
 		*cque = 0;
-		ret = crpc_send_raw(s, buf, len);
+		ret = crpc_send_raw(s, buf, len, s->req_id++);
 		mutex_unlock(&s->lock);
 		return ret;
 	}
@@ -381,8 +391,8 @@ again:
 
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
-			printf("[%lu] ===> Response: shdr.win=%lu, win=%u/%u\n",
-			       now, shdr.win, s->win_used, s->win_avail);
+			printf("[%lu] ===> response: id=%lu, shdr.win=%lu, win=%u/%u\n",
+			       now, shdr.id, shdr.win, s->win_used, s->win_avail);
 		}
 #endif
 
@@ -451,6 +461,7 @@ static void crpc_timer(void *arg)
 	struct crpc_session *s = (struct crpc_session *)arg;
 	uint64_t now;
 	int pos;
+	struct crpc_ctx *c;
 	int num_drops;
 
 #if CRPC_TRACK_FLOW
@@ -474,7 +485,8 @@ static void crpc_timer(void *arg)
 		// Drop requests if expired
 		while (s->head != s->tail) {
 			pos = s->tail % CRPC_QLEN;
-			if (now - *s->cques[pos] <= CRPC_MAX_CLIENT_DELAY_US)
+			c = s->qreq[pos];
+			if (now - *c->cque <= CRPC_MAX_CLIENT_DELAY_US)
 				break;
 			s->tail++;
 			s->req_dropped_++;
@@ -512,14 +524,15 @@ static void crpc_timer(void *arg)
 
 		// calculate next wake up time
 		pos = (s->head - 1) % CRPC_QLEN;
+		c = s->qreq[pos];
 		mutex_unlock(&s->lock);
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
 			printf("[%lu] Timer: Sleep until %lu\n",
-			       now, *s->cques[pos] + CRPC_MAX_CLIENT_DELAY_US);
+			       now, *c->cque + CRPC_MAX_CLIENT_DELAY_US);
 		}
 #endif
-		timer_sleep_until(*s->cques[pos] + CRPC_MAX_CLIENT_DELAY_US);
+		timer_sleep_until(*c->cque + CRPC_MAX_CLIENT_DELAY_US);
 		mutex_lock(&s->lock);
 	}
 }
@@ -560,8 +573,8 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 	memset(s, 0, sizeof(*s));
 
 	for (i = 0; i < CRPC_QLEN; ++i) {
-		s->bufs[i] = smalloc(SRPC_BUF_SIZE);
-		if (!s->bufs[i])
+		s->qreq[i] = smalloc(sizeof(struct crpc_ctx));
+		if (!s->qreq[i])
 			goto fail;
 	}
 
@@ -571,6 +584,7 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 	s->running = true;
 	if (id != -1)
 		s->id = id;
+	s->req_id = 1;
 	*sout = s;
 
 #if CRPC_MAX_CLIENT_DELAY_US > 0
@@ -583,7 +597,7 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 fail:
 	tcp_close(c);
 	for (i = i - 1; i >= 0; i--)
-		sfree(s->bufs[i]);
+		sfree(s->qreq[i]);
 	sfree(s);
 	return -ENOMEM;
 }
@@ -602,6 +616,6 @@ void crpc_close(struct crpc_session *s)
 	condvar_signal(&s->timer_cv);
 	tcp_close(s->c);
 	for(i = 0; i < CRPC_QLEN; ++i)
-		sfree(s->bufs[i]);
+		sfree(s->qreq[i]);
 	sfree(s);
 }

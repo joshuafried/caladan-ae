@@ -44,8 +44,16 @@ extern uint64_t srpc_stat_resp_tx();
 
 #define CRPC_QLEN		16
 
+struct crpc_ctx {
+	size_t			len;
+	uint64_t		id;
+	uint64_t		*cque;
+	char			buf[SRPC_BUF_SIZE];
+};
+
 struct crpc_session {
 	uint64_t		id;
+	uint64_t		req_id;
 	tcpconn_t		*c;
 	mutex_t			lock;
 	bool			waiting_winupdate;
@@ -61,9 +69,7 @@ struct crpc_session {
 	/* a queue of pending RPC requests */
 	uint32_t		head;
 	uint32_t		tail;
-	void			*bufs[CRPC_QLEN];
-	size_t			lens[CRPC_QLEN];
-	uint64_t		*cques[CRPC_QLEN];
+	struct crpc_ctx		*qreq[CRPC_QLEN];
 
 	/* client-side stats */
 	uint64_t		winu_rx_;
