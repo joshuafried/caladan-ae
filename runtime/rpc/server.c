@@ -37,6 +37,8 @@
 #define BUFFER_SIZE		(1 << BUFFER_SIZE_EXP)
 #define BUFFER_MASK		(BUFFER_SIZE - 1)
 
+#define EWMA_WEIGHT		0.1f
+
 BUILD_ASSERT((1 << SRPC_MAX_WINDOW_EXP) == SRPC_MAX_WINDOW);
 
 int nextIndex = 0;
@@ -72,7 +74,11 @@ atomic_t srpc_win_avail;
 /* global window used */
 atomic_t srpc_win_used;
 
+/* the number of pending requests */
 atomic_t srpc_num_pending;
+
+/* average service time in us */
+int srpc_avg_st;
 
 /* drained session list */
 struct srpc_drained_ {
@@ -385,9 +391,14 @@ static void srpc_worker(void *arg)
 {
 	struct srpc_ctx *c = (struct srpc_ctx *)arg;
 	struct srpc_session *s = c->s;
+	uint64_t st;
 	thread_t *th;
 
+	st = microtime();
 	srpc_handler(c);
+	st = microtime() - st;
+
+	srpc_avg_st = (int)((1 - EWMA_WEIGHT) * srpc_avg_st + EWMA_WEIGHT * st);
 
 	spin_lock_np(&s->lock);
 	bitmap_set(s->completed_slots, c->idx);
@@ -824,6 +835,7 @@ static void srpc_listener(void *arg)
 	atomic_write(&srpc_win_avail, runtime_max_cores());
 	atomic_write(&srpc_win_used, 0);
 	atomic_write(&srpc_num_pending, 0);
+	srpc_avg_st = 0;
 
 	/* init stats */
 	atomic64_write(&srpc_stat_winu_rx_, 0);
