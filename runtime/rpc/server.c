@@ -227,6 +227,7 @@ static int srpc_send_completion_vector(struct srpc_session *s,
 		shdr[nrhdr].magic = RPC_RESP_MAGIC;
 		shdr[nrhdr].op = RPC_OP_CALL;
 		shdr[nrhdr].len = c->resp_len;
+		shdr[nrhdr].id = c->id;
 		shdr[nrhdr].win = (uint64_t)s->win;
 
 		v[nriov].iov_base = &shdr[nrhdr];
@@ -449,6 +450,7 @@ again:
 		}
 		s->slots[idx]->req_len = chdr.len;
 		s->slots[idx]->resp_len = 0;
+		s->slots[idx]->id = chdr.id;
 
 		spin_lock_np(&s->lock);
 		old_demand = s->demand;
@@ -474,8 +476,8 @@ again:
 #if SRPC_TRACK_FLOW
 		uint64_t now = microtime();
 		if (s->id == SRPC_TRACK_FLOW_ID) {
-			printf("[%lu] ===> Request: demand=%lu, delay=%lu\n",
-			       now, chdr.demand, now - s->last_winupdate_timestamp);
+			printf("[%lu] ===> Request: id=%lu, demand=%lu, delay=%lu\n",
+			       now, chdr.id, chdr.demand, now - s->last_winupdate_timestamp);
 		}
 #endif
 		break;
