@@ -27,6 +27,7 @@ struct srpc_ctx {
 	size_t			resp_len;
 	char			req_buf[SRPC_BUF_SIZE];
 	char			resp_buf[SRPC_BUF_SIZE];
+	bool			drop;
 };
 
 typedef void (*srpc_fn_t)(struct srpc_ctx *ctx);
@@ -61,9 +62,6 @@ struct crpc_session {
 	uint32_t		win_avail;
 	uint32_t		win_used;
 	uint64_t		last_demand;
-	int			num_timeout;
-	uint64_t		next_resume_time;
-	condvar_t		timer_cv;
 	bool			running;
 
 	/* a queue of pending RPC requests */

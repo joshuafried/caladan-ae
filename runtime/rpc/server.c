@@ -24,11 +24,12 @@
 #define SRPC_MAX_WINDOW_EXP	6
 #define SRPC_MAX_WINDOW		64
 /* the minimum runtime queuing delay */
-#define SRPC_MIN_DELAY_US	20
+#define SRPC_MIN_DELAY_US	400
 /* the maximum runtime queuing delay */
-#define SRPC_MAX_DELAY_US	60
+#define SRPC_MAX_DELAY_US	1200
 /* round trip time in us */
 #define SRPC_RTT_US		10
+#define SRPC_AI			10
 
 #define SRPC_TRACK_FLOW		false
 #define SRPC_TRACK_FLOW_ID	1
@@ -108,7 +109,6 @@ struct srpc_session {
 	int			num_pending;
 	bool			need_winupdate;
 	uint64_t		demand;
-	uint64_t		last_demand_timestamp;
 	uint64_t		last_winupdate_timestamp;
 
 	/* shared state between receiver and sender */
@@ -225,7 +225,8 @@ static int srpc_send_completion_vector(struct srpc_session *s,
 	int nriov = 0;
 	int nrhdr = 0;
 	int i;
-	ssize_t ret;
+	ssize_t ret = 0;
+	int num_drop = 0;
 
 	bitmap_for_each_set(slots, SRPC_MAX_WINDOW, i) {
 		struct srpc_ctx *c = s->slots[i];
@@ -241,24 +242,23 @@ static int srpc_send_completion_vector(struct srpc_session *s,
 		nrhdr++;
 		nriov++;
 
-		BUG_ON(c->resp_len == 0);
-
-		v[nriov].iov_base = c->resp_buf;
-		v[nriov++].iov_len = c->resp_len;
+		if (c->resp_len > 0) {
+			v[nriov].iov_base = c->resp_buf;
+			v[nriov++].iov_len = c->resp_len;
+		}
 	}
 
+	/* send the completion(s) */
 	if (nriov == 0)
 		return 0;
-
-	/* send the completion(s) */
 	ret = tcp_writev_full(s->c, v, nriov);
 	bitmap_for_each_set(slots, SRPC_MAX_WINDOW, i)
 		srpc_put_slot(s, i);
 
 #if SRPC_TRACK_FLOW
 	if (s->id == SRPC_TRACK_FLOW_ID) {
-		printf("[%lu] <=== Response (%d): win=%lu\n",
-			microtime(), nrhdr, shdr.win);
+		printf("[%lu] <=== Response (%d): win=%d\n",
+			microtime(), nrhdr, s->win);
 	}
 #endif
 	atomic_sub_and_fetch(&srpc_num_pending, nrhdr);
@@ -274,7 +274,7 @@ static void srpc_update_window(struct srpc_session *s)
 {
 	int win_avail = atomic_read(&srpc_win_avail);
 	int win_used = atomic_read(&srpc_win_used);
-	int num_active = atomic_read(&srpc_num_active);
+	int num_sess = atomic_read(&srpc_num_sess);
 	int guaranteed_win;
 	int old_win = s->win;
 	int win_diff;
@@ -282,13 +282,7 @@ static void srpc_update_window(struct srpc_session *s)
 
 	assert_spin_lock_held(&s->lock);
 
-	if (s->num_pending + s->demand == 0){
-		s->win = 0;
-		goto finish;
-	}
-
-	assert(num_active > 0);
-	guaranteed_win = win_avail / num_active;
+	guaranteed_win = win_avail / num_sess;
 
 	// Start with guaranteed win
 	s->win = MAX(s->win, guaranteed_win);
@@ -298,22 +292,22 @@ static void srpc_update_window(struct srpc_session *s)
 		s->win = MIN(s->num_pending + s->demand, s->win + open_window);
 	}
 
-	if (s->wake_up || num_active <= runtime_max_cores())
+	if (s->wake_up || num_sess <= runtime_max_cores())
 		s->win = MAX(s->win, 1);
 
 	/* clamp to supported values */
 	/* now we allow zero window */
 	s->win = MAX(s->win, s->num_pending);
 	s->win = MIN(s->win, SRPC_MAX_WINDOW - 1);
-	s->win = MIN(s->win, s->num_pending + s->demand);
+	s->win = MIN(s->win, MAX(s->num_pending + s->demand, 1));
 
 finish:
 	win_diff = s->win - old_win;
 	atomic_fetch_and_add(&srpc_win_used, win_diff);
 #if SRPC_TRACK_FLOW
 	if (s->id == SRPC_TRACK_FLOW_ID) {
-		printf("[%lu] window update: win_avail = %d, win_used = %d, num_pending = %d, demand = %d, num_active = %d, guaranteed_win = %d, old_win = %d, new_win = %d\n",
-		       microtime(), win_avail, win_used, s->num_pending, s->demand, num_active, guaranteed_win, old_win, s->win);
+		printf("[%lu] window update: win_avail = %d, win_used = %d, num_pending = %d, demand = %d, num_sess = %d, guaranteed_win = %d, old_win = %d, new_win = %d\n",
+		       microtime(), win_avail, win_used, s->num_pending, s->demand, num_sess, guaranteed_win, old_win, s->win);
 	}
 #endif
 }
@@ -351,14 +345,9 @@ again:
 	now = microtime();
 #if SRPC_TRACK_FLOW
 	if (ret->id == SRPC_TRACK_FLOW_ID) {
-		printf("[%lu] Session waken up: %lu\n",
-			now, now - ret->last_demand_timestamp);
+		printf("[%lu] Session waken up\n", now);
 	}
 #endif
-
-	if (now - ret->last_demand_timestamp > 80) {
-		goto again;
-	}
 
 	return ret;
 }
@@ -394,12 +383,18 @@ static void srpc_worker(void *arg)
 	uint64_t st;
 	thread_t *th;
 
-	st = microtime();
+	if (runtime_queue_us() >= SRPC_MAX_DELAY_US) {
+		c->resp_len = 0;
+		c->drop = true;
+		goto done;
+	}
+
+	c->drop = false;
 	srpc_handler(c);
 	st = microtime() - st;
 
 	srpc_avg_st = (int)((1 - EWMA_WEIGHT) * srpc_avg_st + EWMA_WEIGHT * st);
-
+done:
 	spin_lock_np(&s->lock);
 	bitmap_set(s->completed_slots, c->idx);
 	th = s->sender_th;
@@ -459,6 +454,7 @@ again:
 				return -EIO;
 			return ret;
 		}
+
 		s->slots[idx]->req_len = chdr.len;
 		s->slots[idx]->resp_len = 0;
 		s->slots[idx]->id = chdr.id;
@@ -466,10 +462,7 @@ again:
 		spin_lock_np(&s->lock);
 		old_demand = s->demand;
 		s->demand = chdr.demand;
-		s->last_demand_timestamp = microtime();
 		srpc_remove_from_drained_list(s);
-		if (s->num_pending + old_demand == 0)
-			atomic_inc(&srpc_num_active);
 		s->num_pending++;
 		/* adjust window if demand changed */
 		if (s->win > s->num_pending + s->demand) {
@@ -502,7 +495,6 @@ again:
 		spin_lock_np(&s->lock);
 		old_demand = s->demand;
 		s->demand = chdr.demand;
-		s->last_demand_timestamp = microtime();
 
 		if (old_demand > 0 && s->demand == 0) {
 			srpc_remove_from_drained_list(s);
@@ -525,10 +517,6 @@ again:
 			s->win = s->num_pending + s->demand;
 			atomic_sub_and_fetch(&srpc_win_used, win_diff);
 		}
-		if (old_active == 0 && new_active > 0)
-			atomic_inc(&srpc_num_active);
-		else if (old_active > 0 && new_active == 0)
-			atomic_dec(&srpc_num_active);
 		spin_unlock_np(&s->lock);
 
 		if (th)
@@ -600,8 +588,8 @@ static void srpc_sender(void *arg)
 
 		num_pending = s->num_pending;
 
-		send_winupdate = s->need_winupdate && num_resp == 0 &&
-			s->advertised_win < s->win;
+		send_winupdate = (s->need_winupdate || s->wake_up) &&
+			num_resp == 0 && s->advertised_win < s->win;
 
 		if (num_resp > 0 || send_winupdate)
 			s->advertised_win = s->win;
@@ -611,8 +599,6 @@ static void srpc_sender(void *arg)
 
 		if (send_winupdate)
 			s->last_winupdate_timestamp = microtime();
-		if (num_resp > 0 && s->num_pending + s->demand == 0)
-			atomic_dec(&srpc_num_active);
 		spin_unlock_np(&s->lock);
 
 		/* Send WINUPDATE message */
@@ -630,7 +616,7 @@ static void srpc_sender(void *arg)
 		/* add to the drained list if (1) window becomes zero,
 		 * (2) s is not in the list already,
 		 * (3) it has no outstanding requests */
-		if (win == 0 && demand > 0 && drained_core == -1 &&
+		if (win == 0 && drained_core == -1 &&
 		    bitmap_popcount(s->avail_slots, SRPC_MAX_WINDOW) ==
 		    SRPC_MAX_WINDOW) {
 			spin_lock_np(&s->lock);
@@ -718,8 +704,6 @@ static void srpc_server(void *arg)
 	th = s->sender_th;
 	s->sender_th = NULL;
 	s->closed = true;
-	if (s->num_pending + s->demand > 0)
-		atomic_dec(&srpc_num_active);
 	if (s->is_linked)
 		srpc_remove_from_drained_list(s);
 	atomic_sub_and_fetch(&srpc_win_used, s->win);
@@ -739,7 +723,6 @@ static void srpc_server(void *arg)
 
 	/* initialize windows */
 	if (atomic_read(&srpc_num_sess) == 0) {
-		assert(atomic_read(&srpc_num_active) == 0);
 		assert(atomic_read(&srpc_win_used) == 0);
 		assert(atomic_read(&srpc_num_drained) == 0);
 		atomic_write(&srpc_win_used, 0);
@@ -771,11 +754,11 @@ static void srpc_cc_worker(void *arg)
 				(float)(SRPC_MAX_DELAY_US - SRPC_MIN_DELAY_US);
 			new_win = (int)(new_win * (1.0 - alpha / 2.0));
 		} else {
-			new_win++;
+			new_win += SRPC_AI;
 		}
 
 		new_win = MAX(new_win, max_cores);
-		new_win = MIN(new_win, atomic_read(&srpc_num_active) << SRPC_MAX_WINDOW_EXP);
+		new_win = MIN(new_win, atomic_read(&srpc_num_sess) << SRPC_MAX_WINDOW_EXP);
 
 		// Wake up threads from drained list
 		win_used = atomic_read(&srpc_win_used);
@@ -830,7 +813,6 @@ static void srpc_listener(void *arg)
 
 	atomic_write(&srpc_num_sess, 0);
 	atomic_write(&srpc_num_drained, 0);
-	atomic_write(&srpc_num_active, 0);
 
 	atomic_write(&srpc_win_avail, runtime_max_cores());
 	atomic_write(&srpc_win_used, 0);

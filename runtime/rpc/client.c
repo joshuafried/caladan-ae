@@ -15,11 +15,6 @@
 #include "proto.h"
 
 #define CRPC_MAX_CLIENT_DELAY_US	100
-#define CRPC_CREDIT_LIFETIME_US		-1
-#define CRPC_MIN_DEMAND			0
-
-#define CRPC_EXP_BACK_OFF		true
-#define CRPC_BACK_OFF_TIME		100
 
 #define CRPC_TRACK_FLOW			false
 #define CRPC_TRACK_FLOW_ID		1
@@ -42,7 +37,7 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	chdr.op = RPC_OP_WINUPDATE;
 	chdr.id = 0;
 	chdr.len = 0;
-	chdr.demand = MAX(CRPC_MIN_DEMAND, s->head - s->tail);
+	chdr.demand = s->head - s->tail;
 
 	/* send the request */
 	ret = tcp_write_full(s->c, &chdr, sizeof(chdr));
@@ -50,7 +45,6 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 		return ret;
 
 	assert(ret == sizeof(chdr));
-	s->waiting_winupdate = (chdr.demand > 0);
 	s->last_demand = chdr.demand;
 	s->winu_tx_++;
 
@@ -76,7 +70,7 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 	chdr.op = RPC_OP_CALL;
 	chdr.id = id;
 	chdr.len = len;
-	chdr.demand = MAX(CRPC_MIN_DEMAND, s->head - s->tail);
+	chdr.demand = s->head - s->tail;
 
 	/* initialize the SG vector */
 	vec[0].iov_base = &chdr;
@@ -107,31 +101,11 @@ static void crpc_drain_queue(struct crpc_session *s)
 	int pos;
 	struct crpc_ctx *c;
 	uint64_t now = microtime();
-	int num_drops = 0;
 
 	assert_mutex_held(&s->lock);
 
-	if (s->waiting_winupdate) {
-		return;
-	}
-
-	if (s->win_avail > 0 && s->head == s->tail) {
-		s->win_timestamp = 0;
-		s->win_avail = 0;
-		crpc_send_winupdate(s);
-		return;
-	}
-
-#if CRPC_MIN_DEMAND == 0
 	if (s->head == s->tail)
 		return;
-#endif
-
-	/* initialize the window */
-	if (s->win_timestamp == 0 || s->last_demand == 0) {
-		crpc_send_winupdate(s);
-		return;
-	}
 
 #if CRPC_MAX_CLIENT_DELAY_US > 0
        /* Remove old requests */
@@ -142,27 +116,6 @@ static void crpc_drain_queue(struct crpc_session *s)
                        break;
                s->tail++;
                s->req_dropped_++;
-	       num_drops++;
-       }
-
-       if (num_drops > 0 && s->head == s->tail) {
-		s->win_timestamp = 0;
-		s->num_timeout++;
-#if CRPC_EXP_BACK_OFF
-		uint64_t wait_us = CRPC_BACK_OFF_TIME << (s->num_timeout - 1);
-		s->next_resume_time = now + wait_us;
-		s->req_dropped_++;
-		s->wait_time_ += wait_us;
-#if CRPC_TRACK_FLOW
-		if (s->id == CRPC_TRACK_FLOW_ID) {
-			printf("[%lu] Timeout. Waiting %lu us...\n",
-			       now, wait_us);
-		}
-#endif
-#endif
-		s->win_avail = 0;
-		crpc_send_winupdate(s);
-		return;
        }
 #endif
 
@@ -188,7 +141,6 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	int pos;
 	struct crpc_ctx *c;
 	uint64_t now = microtime();
-	int num_drops = 0;
 
 	assert_mutex_held(&s->lock);
 
@@ -201,29 +153,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 			break;
 		s->tail++;
 		s->req_dropped_++;
-		num_drops++;
 	}
-
-	if (num_drops > 0 && s->head == s->tail) {
-		s->win_timestamp = 0;
-		s->num_timeout++;
-#if CRPC_EXP_BACK_OFF
-		uint64_t wait_us = CRPC_BACK_OFF_TIME << (s->num_timeout - 1);
-		s->next_resume_time = now + wait_us;
-		s->req_dropped_++;
-		s->wait_time_ += wait_us;
-#if CRPC_TRACK_FLOW
-		if (s->id == CRPC_TRACK_FLOW_ID) {
-			printf("[%lu] Timeout. Waiting %lu us...\n",
-			       now, wait_us);
-		}
-#endif
-#endif
-		s->win_avail = 0;
-		crpc_send_winupdate(s);
-		return false;
-	}
-
 #endif
 
 #if CRPC_MAX_CLIENT_DELAY_US == 0
@@ -259,9 +189,10 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 		       now, c->id, s->head - s->tail, s->waiting_winupdate);
 	}
 #endif
-	// Queue becomes non-empty
-	if (s->head - s->tail == 1) {
-		condvar_signal(&s->timer_cv);
+
+	if (!s->waiting_winupdate) {
+		crpc_send_winupdate(s);
+		s->waiting_winupdate = true;
 	}
 
 	return true;
@@ -290,32 +221,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	if (unlikely(len > SRPC_BUF_SIZE))
 		return -E2BIG;
 
-#if CRPC_EXP_BACK_OFF
-	if (now < s->next_resume_time) {
-		s->req_dropped_++;
-#if CRPC_TRACK_FLOW
-		if (s->id == CRPC_TRACK_FLOW_ID) {
-			printf("[%lu] Request Drop. I'm sleeping.\n",
-			       now);
-		}
-#endif
-		return -ENOBUFS;
-	}
-#endif
-
 	mutex_lock(&s->lock);
-
-#if CRPC_CREDIT_LIFETIME_US > 0
-	/* expire stale credits */
-	if (s->win_timestamp > 0 &&
-	    now - s->win_timestamp > CRPC_CREDIT_LIFETIME_US &&
-	    s->win_used < s->win_avail) {
-		s->win_expired_ += (s->win_avail - s->win_used);
-		s->win_avail = s->win_used;
-		if (s->win_used == 0)
-			s->win_timestamp = 0;
-	}
-#endif
 
 	/* hot path, just send */
 	if (s->win_used < s->win_avail && s->head == s->tail) {
@@ -376,10 +282,13 @@ again:
 	switch (shdr.op) {
 	case RPC_OP_CALL:
 		/* read the payload */
-		ret = tcp_read_full(s->c, buf, shdr.len);
-		if (unlikely(ret <= 0))
-			return ret;
-		assert(ret == shdr.len);
+		if (shdr.len > 0) {
+			ret = tcp_read_full(s->c, buf, shdr.len);
+			if (unlikely(ret <= 0))
+				return ret;
+			assert(ret == shdr.len);
+			s->resp_rx_++;
+		}
 
 		/* update the window */
 		mutex_lock(&s->lock);
@@ -387,7 +296,6 @@ again:
 		s->win_used--;
 		s->win_avail = shdr.win;
 		s->win_timestamp = now;
-		s->waiting_winupdate = false;
 
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
@@ -397,18 +305,12 @@ again:
 #endif
 
 		if (s->win_avail > 0) {
-#if CRPC_EXP_BACK_OFF
-			if (now < s->next_resume_time) {
-				s->next_resume_time = 0;
-			}
-#endif
-#if CRPC_MAX_CLIENT_DELAY_US > 0
-			s->num_timeout = 0;
-#endif
 			crpc_drain_queue(s);
 		}
 		mutex_unlock(&s->lock);
-		s->resp_rx_++;
+
+		if (shdr.len == 0)
+			goto again;
 
 		break;
 	case RPC_OP_WINUPDATE:
@@ -422,7 +324,6 @@ again:
 		mutex_lock(&s->lock);
 		s->win_avail = shdr.win;
 		s->win_timestamp = now;
-		s->waiting_winupdate = false;
 
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
@@ -432,19 +333,10 @@ again:
 #endif
 
 		if (s->win_avail > 0) {
-#if CRPC_EXP_BACK_OFF
-			if (now < s->next_resume_time) {
-				s->next_resume_time = 0;
-			}
-#endif
-#if CRPC_MAX_CLIENT_DELAY_US > 0
-			s->num_timeout = 0;
-#endif
 			crpc_drain_queue(s);
 		}
 		mutex_unlock(&s->lock);
 		s->winu_rx_++;
-
 
 		goto again;
 	default:
@@ -454,89 +346,6 @@ again:
 
 	return shdr.len;
 }
-
-#if CRPC_MAX_CLIENT_DELAY_US > 0
-static void crpc_timer(void *arg)
-{
-	struct crpc_session *s = (struct crpc_session *)arg;
-	uint64_t now;
-	int pos;
-	struct crpc_ctx *c;
-	int num_drops;
-
-#if CRPC_TRACK_FLOW
-	if (s->id == CRPC_TRACK_FLOW_ID) {
-		printf("Timer: Start\n");
-	}
-#endif
-	mutex_lock(&s->lock);
-	while (true) {
-		while (s->head == s->tail) {
-			condvar_wait(&s->timer_cv, &s->lock);
-			if (!s->running) {
-				mutex_unlock(&s->lock);
-				return;
-			}
-		}
-
-		num_drops = 0;
-		now = microtime();
-
-		// Drop requests if expired
-		while (s->head != s->tail) {
-			pos = s->tail % CRPC_QLEN;
-			c = s->qreq[pos];
-			if (now - *c->cque <= CRPC_MAX_CLIENT_DELAY_US)
-				break;
-			s->tail++;
-			s->req_dropped_++;
-			num_drops++;
-#if CRPC_TRACK_FLOW
-			if (s->id == CRPC_TRACK_FLOW_ID) {
-				printf("[%lu] Timer: Request Dropped qlen = %d\n",
-				       now, s->head - s->tail);
-			}
-#endif
-		}
-
-		// If queue becomes empty
-		if (s->head == s->tail) {
-			s->win_avail = 0;
-			s->win_timestamp = 0;
-			s->num_timeout++;
-			if (num_drops = 0) {
-				printf("num_drops is zero\n");
-			}
-#if CRPC_EXP_BACK_OFF
-			uint64_t wait_us = CRPC_BACK_OFF_TIME << (s->num_timeout - 1);
-			s->next_resume_time = now + wait_us;
-			s->wait_time_ += wait_us;
-#if CRPC_TRACK_FLOW
-		if (s->id == CRPC_TRACK_FLOW_ID) {
-			printf("[%lu] Timeout. Waiting %lu us...\n",
-			       now, wait_us);
-		}
-#endif
-#endif
-			crpc_send_winupdate(s);
-			continue;
-		}
-
-		// calculate next wake up time
-		pos = (s->head - 1) % CRPC_QLEN;
-		c = s->qreq[pos];
-		mutex_unlock(&s->lock);
-#if CRPC_TRACK_FLOW
-		if (s->id == CRPC_TRACK_FLOW_ID) {
-			printf("[%lu] Timer: Sleep until %lu\n",
-			       now, *c->cque + CRPC_MAX_CLIENT_DELAY_US);
-		}
-#endif
-		timer_sleep_until(*c->cque + CRPC_MAX_CLIENT_DELAY_US);
-		mutex_lock(&s->lock);
-	}
-}
-#endif
 
 /**
  * crpc_open - creates an RPC session
@@ -580,17 +389,11 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 
 	s->c = c;
 	mutex_init(&s->lock);
-	condvar_init(&s->timer_cv);
 	s->running = true;
 	if (id != -1)
 		s->id = id;
 	s->req_id = 1;
 	*sout = s;
-
-#if CRPC_MAX_CLIENT_DELAY_US > 0
-	ret = thread_spawn(crpc_timer, s);
-	BUG_ON(ret);
-#endif
 
 	return 0;
 
@@ -613,7 +416,6 @@ void crpc_close(struct crpc_session *s)
 	int i;
 
 	s->running = false;
-	condvar_signal(&s->timer_cv);
 	tcp_close(s->c);
 	for(i = 0; i < CRPC_QLEN; ++i)
 		sfree(s->qreq[i]);
