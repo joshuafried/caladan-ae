@@ -35,6 +35,10 @@ uint64_t RpcServerStatReqRx() {
   return srpc_stat_req_rx();
 }
 
+uint64_t RpcServerStatReqDropped() {
+  return srpc_stat_req_dropped();
+}
+
 uint64_t RpcServerStatRespTx() {
   return srpc_stat_resp_tx();
 }

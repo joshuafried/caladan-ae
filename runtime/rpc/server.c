@@ -129,6 +129,7 @@ atomic64_t srpc_stat_winu_rx_;
 atomic64_t srpc_stat_winu_tx_;
 atomic64_t srpc_stat_win_tx_;
 atomic64_t srpc_stat_req_rx_;
+atomic64_t srpc_stat_req_dropped_;
 atomic64_t srpc_stat_resp_tx_;
 
 static void printRecord()
@@ -386,6 +387,7 @@ static void srpc_worker(void *arg)
 	if (runtime_queue_us() >= SRPC_MAX_DELAY_US) {
 		c->resp_len = 0;
 		c->drop = true;
+		atomic64_inc(&srpc_stat_req_dropped_);
 		goto done;
 	}
 
@@ -885,6 +887,11 @@ uint64_t srpc_stat_win_tx()
 uint64_t srpc_stat_req_rx()
 {
 	return atomic64_read(&srpc_stat_req_rx_);
+}
+
+uint64_t srpc_stat_req_dropped()
+{
+	return atomic64_read(&srpc_stat_req_dropped_);
 }
 
 uint64_t srpc_stat_resp_tx()
