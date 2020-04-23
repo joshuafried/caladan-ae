@@ -24,12 +24,12 @@
 #define SRPC_MAX_WINDOW_EXP	6
 #define SRPC_MAX_WINDOW		64
 /* the minimum runtime queuing delay */
-#define SRPC_MIN_DELAY_US	400
+#define SRPC_MIN_DELAY_US	100
 /* the maximum runtime queuing delay */
-#define SRPC_MAX_DELAY_US	1200
+#define SRPC_MAX_DELAY_US	200
 /* round trip time in us */
 #define SRPC_RTT_US		10
-#define SRPC_AI			10
+#define SRPC_AI			1
 
 #define SRPC_TRACK_FLOW		false
 #define SRPC_TRACK_FLOW_ID	1
@@ -286,7 +286,7 @@ static void srpc_update_window(struct srpc_session *s)
 	guaranteed_win = win_avail / num_sess;
 
 	// Start with guaranteed win
-	s->win = MAX(s->win, guaranteed_win);
+	s->win = MIN(s->win, guaranteed_win);
 
 	if (win_used < win_avail) {
 		open_window = win_avail - win_used;
@@ -383,10 +383,17 @@ static void srpc_worker(void *arg)
 	struct srpc_session *s = c->s;
 	uint64_t st;
 	thread_t *th;
+	uint64_t us = runtime_queue_us();
 
-	if (runtime_queue_us() >= SRPC_MAX_DELAY_US) {
+	if (us >= SRPC_MAX_DELAY_US) {
 		c->resp_len = 0;
 		c->drop = true;
+#if SRPC_TRACK_FLOW
+		if (s->id == SRPC_TRACK_FLOW_ID) {
+			printf("[%lu] Request dropped: delay = %lu\n",
+			       microtime(), us);
+		}
+#endif
 		atomic64_inc(&srpc_stat_req_dropped_);
 		goto done;
 	}
