@@ -24,12 +24,12 @@
 #define SRPC_MAX_WINDOW_EXP	6
 #define SRPC_MAX_WINDOW		64
 /* the minimum runtime queuing delay */
-#define SRPC_MIN_DELAY_US	100
+#define SRPC_MIN_DELAY_US	50
 /* the maximum runtime queuing delay */
-#define SRPC_MAX_DELAY_US	200
+#define SRPC_MAX_DELAY_US	100
 /* round trip time in us */
 #define SRPC_RTT_US		10
-#define SRPC_AI			1
+#define SRPC_AI			20
 
 #define SRPC_TRACK_FLOW		false
 #define SRPC_TRACK_FLOW_ID	1
@@ -271,30 +271,30 @@ static int srpc_send_completion_vector(struct srpc_session *s,
 	return 0;
 }
 
-static void srpc_update_window(struct srpc_session *s)
+static void srpc_update_window(struct srpc_session *s, bool req_dropped)
 {
 	int win_avail = atomic_read(&srpc_win_avail);
 	int win_used = atomic_read(&srpc_win_used);
 	int num_sess = atomic_read(&srpc_num_sess);
-	int guaranteed_win;
 	int old_win = s->win;
 	int win_diff;
 	int open_window;
 
 	assert_spin_lock_held(&s->lock);
 
-	guaranteed_win = win_avail / num_sess;
-
-	// Start with guaranteed win
-	s->win = MIN(s->win, guaranteed_win);
-
 	if (win_used < win_avail) {
 		open_window = win_avail - win_used;
 		s->win = MIN(s->num_pending + s->demand, s->win + open_window);
+	} else if (win_used > win_avail) {
+		s->win--;
 	}
 
 	if (s->wake_up || num_sess <= runtime_max_cores())
 		s->win = MAX(s->win, 1);
+
+	// prioritize the session
+	if (old_win > 0 && s->win == 0 && !req_dropped)
+		s->win = 1;
 
 	/* clamp to supported values */
 	/* now we allow zero window */
@@ -561,6 +561,7 @@ static void srpc_sender(void *arg)
 	int drained_core;
 	int win;
 	int num_pending;
+	bool req_dropped;
 
 	while (true) {
 		/* find slots that have completed */
@@ -581,9 +582,18 @@ static void srpc_sender(void *arg)
 			spin_unlock_np(&s->lock);
 			break;
 		}
+		req_dropped = false;
 		memcpy(tmp, s->completed_slots, sizeof(tmp));
 		bitmap_init(s->completed_slots, SRPC_MAX_WINDOW, false);
 		demand = s->demand;
+
+		bitmap_for_each_set(tmp, SRPC_MAX_WINDOW, i) {
+			struct srpc_ctx *c = s->slots[i];
+			if (c->drop) {
+				req_dropped = true;
+				break;
+			}
+		}
 
 		if (s->wake_up)
 			srpc_remove_from_drained_list(s);
@@ -591,7 +601,7 @@ static void srpc_sender(void *arg)
 		drained_core = s->drained_core;
 		num_resp = bitmap_popcount(tmp, SRPC_MAX_WINDOW);
 		s->num_pending -= num_resp;
-		srpc_update_window(s);
+		srpc_update_window(s, req_dropped);
 
 		win = s->win;
 
