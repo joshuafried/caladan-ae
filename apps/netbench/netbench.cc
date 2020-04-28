@@ -550,6 +550,9 @@ std::vector<work_unit> RunExperiment(
     std::function<std::vector<work_unit>()> wf) {
   // Create one TCP connection per thread.
   std::vector<std::unique_ptr<rt::RpcClient>> conns;
+  sstat_raw s1, s2;
+  shstat_raw sh1, sh2;
+
   for (int i = 0; i < threads; ++i) {
     std::unique_ptr<rt::RpcClient> outc(rt::RpcClient::Dial(raddr, i+1));
     if (unlikely(outc == nullptr)) panic("couldn't connect to raddr.");
@@ -569,6 +572,11 @@ std::vector<work_unit> RunExperiment(
     }));
   }
 
+  if (!b || b->IsLeader()) {
+    s1 = ReadRPCSStat();
+    sh1 = ReadShenangoStat();
+  }
+
   // Give the workers time to initialize, then start recording.
   starter.Wait();
   if (b && !b->StartExperiment()) {
@@ -581,13 +589,6 @@ std::vector<work_unit> RunExperiment(
   timex = std::time(nullptr);
   auto start = steady_clock::now();
   barrier();
-  sstat_raw s1, s2;
-  shstat_raw sh1, sh2;
-
-  if (!b || b->IsLeader()) {
-    s1 = ReadRPCSStat();
-    sh1 = ReadShenangoStat();
-  }
 
   // Wait for the workers to finish.
   for (auto &t : th) t.Join();
