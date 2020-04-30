@@ -22,6 +22,7 @@ struct crpc_hdr {
 	size_t		len;   /* length of request in bytes */
 	uint64_t	id;    /* Request / Response ID */
 	uint64_t	demand;/* the demanded window size */
+	bool		sync;
 };
 
 /* header used for SERVER -> CLIENT */
