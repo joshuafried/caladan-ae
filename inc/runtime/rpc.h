@@ -59,11 +59,12 @@ struct crpc_session {
 	tcpconn_t		*c;
 	mutex_t			lock;
 	bool			waiting_winupdate;
-	uint64_t		win_timestamp;
 	uint32_t		win_avail;
 	uint32_t		win_used;
-	uint64_t		last_demand;
 	bool			running;
+	bool			demand_sync;
+	condvar_t		timer_cv;
+	bool			init;
 
 	/* a queue of pending RPC requests */
 	uint32_t		head;
