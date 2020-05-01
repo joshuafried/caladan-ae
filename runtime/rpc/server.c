@@ -692,27 +692,28 @@ static void srpc_sender(void *arg)
 		 * (2) s is not in the list already,
 		 * (3) it has no outstanding requests */
 		if (win == 0 && drained_core == -1 &&
-		    (!s->demand_sync || s->demand > 0) &&
 		    bitmap_popcount(s->avail_slots, SRPC_MAX_WINDOW) ==
 		    SRPC_MAX_WINDOW) {
 			spin_lock_np(&s->lock);
-			spin_lock_np(&srpc_drained[core_id].lock);
-			assert(!s->is_linked);
-			BUG_ON(s->win > 0);
-			if (!s->demand_sync) {
-				list_add_tail(&srpc_drained[core_id].list_u,
-					      &s->drained_link);
-			} else if (s->demand > 0) {
-				list_add_tail(&srpc_drained[core_id].list_p,
-					      &s->drained_link);
-			} else {
-				printf("oops!\n");
+			if (!s->demand_sync || s->demand > 0) {
+				spin_lock_np(&srpc_drained[core_id].lock);
+				assert(!s->is_linked);
+				BUG_ON(s->win > 0);
+				if (!s->demand_sync) {
+					list_add_tail(&srpc_drained[core_id].list_u,
+						      &s->drained_link);
+				} else if (s->demand > 0) {
+					list_add_tail(&srpc_drained[core_id].list_p,
+						      &s->drained_link);
+				} else {
+					printf("oops!\n");
+				}
+				s->is_linked = true;
+				spin_unlock_np(&srpc_drained[core_id].lock);
+				s->drained_core = core_id;
+				atomic_inc(&srpc_num_drained);
 			}
-			s->is_linked = true;
-			spin_unlock_np(&srpc_drained[core_id].lock);
-			s->drained_core = core_id;
 			spin_unlock_np(&s->lock);
-			atomic_inc(&srpc_num_drained);
 #if SRPC_TRACK_FLOW
 			if (s->id == SRPC_TRACK_FLOW_ID) {
 				printf("[%lu] Session is drained: win=%d, drained_core = %d\n",
