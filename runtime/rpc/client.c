@@ -434,7 +434,7 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 	mutex_init(&s->lock);
 	condvar_init(&s->timer_cv);
 	s->running = true;
-	s->demand_sync = true;
+	s->demand_sync = false;
 	if (id != -1)
 		s->id = id;
 	s->req_id = 1;

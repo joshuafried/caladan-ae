@@ -72,10 +72,6 @@ class RpcClient {
     return crpc_stat_req_dropped(s_);
   }
 
-  uint64_t StatWaitTime() {
-    return crpc_stat_wait_time(s_);
-  }
-
   // Shuts down the RPC connection.
   int Shutdown(int how) { return tcp_shutdown(s_->c, how); }
   // Aborts the RPC connection.

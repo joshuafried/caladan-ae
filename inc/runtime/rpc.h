@@ -78,7 +78,6 @@ struct crpc_session {
 	uint64_t		req_tx_;
 	uint64_t		win_expired_;
 	uint64_t		req_dropped_;
-	uint64_t		wait_time_;
 };
 
 extern ssize_t crpc_send_one(struct crpc_session *s,
@@ -122,11 +121,6 @@ static inline uint64_t crpc_stat_win_expired(struct crpc_session *s)
 static inline uint64_t crpc_stat_req_dropped(struct crpc_session *s)
 {
 	return s->req_dropped_;
-}
-
-static inline uint64_t crpc_stat_wait_time(struct crpc_session *s)
-{
-	return s->wait_time_;
 }
 
 /**

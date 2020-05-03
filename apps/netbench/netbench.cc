@@ -118,7 +118,6 @@ struct cstat_raw {
   uint64_t req_tx;
   uint64_t win_expired;
   uint64_t req_dropped;
-  double sleep_time;
 };
 
 struct cstat {
@@ -132,7 +131,6 @@ struct cstat {
   double req_tx_pps;
   double win_expired_wps;
   double req_dropped_rps;
-  double sleep_time;
 };
 
 struct work_unit {
@@ -222,9 +220,7 @@ class NetBarrier {
 	csr->req_tx += rem_csr.req_tx;
 	csr->win_expired += rem_csr.win_expired;
 	csr->req_dropped += rem_csr.req_dropped;
-	csr->sleep_time += rem_csr.sleep_time;
       }
-      csr->sleep_time /= (1 + total_agents);
     } else {
       BUG_ON(conns[0]->WriteFull(csr, sizeof(*csr)) <= 0);
     }
@@ -617,10 +613,7 @@ std::vector<work_unit> RunExperiment(
       csr->req_tx += c->StatReqTx();
       csr->win_expired += c->StatWinExpired();
       csr->req_dropped += c->StatReqDropped();
-      csr->sleep_time += c->StatWaitTime();
     }
-    csr->sleep_time /= threads;
-    csr->sleep_time /= elapsed_;
   }
 
   // Aggregate all the samples together.
@@ -792,7 +785,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << cs->min_percli_tput << "," << cs->max_percli_tput << ","
       << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
       << cs->req_tx_pps << "," << cs->win_expired_wps << ","
-      << cs->req_dropped_rps << "," << cs->sleep_time << std::endl;
+      << cs->req_dropped_rps << std::endl;
 
   csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
       << cs->offered_rps << "," << cs->rps << "," << ss->cpu_usage << ","
@@ -809,7 +802,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << cs->min_percli_tput << "," << cs->max_percli_tput << ","
       << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
       << cs->req_tx_pps << "," << cs->win_expired_wps << ","
-      << cs->req_dropped_rps << "," << cs->sleep_time << std::endl << std::flush;
+      << cs->req_dropped_rps << std::endl << std::flush;
 
   json_out << "{"
 	   << "\"num_threads\":" << threads * total_agents << ","
@@ -858,8 +851,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 	   << "\"client:resp_rx_pps\":" << cs->resp_rx_pps << ","
 	   << "\"client:req_tx_pps\":" << cs->req_tx_pps << ","
 	   << "\"client:win_expired_wps\":" << cs->win_expired_wps << ","
-	   << "\"client:req_dropped_rps\":" << cs->req_dropped_rps << ","
-	   << "\"client:sleep\":" << cs->sleep_time
+	   << "\"client:req_dropped_rps\":" << cs->req_dropped_rps
 	   << "}," << std::endl << std::flush;
 }
 
@@ -895,8 +887,7 @@ void SteadyStateExperiment(int threads, double offered_rps,
 	     static_cast<double>(csr.resp_rx) / elapsed * 1000000,
 	     static_cast<double>(csr.req_tx) / elapsed * 1000000,
 	     static_cast<double>(csr.win_expired) / elapsed * 1000000,
-	     static_cast<double>(csr.req_dropped) / elapsed * 1000000,
-             csr.sleep_time};
+	     static_cast<double>(csr.req_dropped) / elapsed * 1000000};
 
   // Print the results.
   PrintStatResults(w, &cs, &ss);
