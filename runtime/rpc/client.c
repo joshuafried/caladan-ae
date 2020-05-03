@@ -470,3 +470,39 @@ void crpc_close(struct crpc_session *s)
 		sfree(s->qreq[i]);
 	sfree(s);
 }
+
+/* client-side stats */
+uint32_t crpc_win_avail(struct crpc_session *s)
+{
+	return s->win_avail;
+}
+
+uint64_t crpc_stat_win_expired(struct crpc_session *s)
+{
+	return s->win_expired_;
+}
+
+uint64_t crpc_stat_winu_rx(struct crpc_session *s)
+{
+	return s->winu_rx_;
+}
+
+uint64_t crpc_stat_winu_tx(struct crpc_session *s)
+{
+	return s->winu_tx_;
+}
+
+uint64_t crpc_stat_resp_rx(struct crpc_session *s)
+{
+	return s->resp_rx_;
+}
+
+uint64_t crpc_stat_req_tx(struct crpc_session *s)
+{
+	return s->req_tx_;
+}
+
+uint64_t crpc_stat_req_dropped(struct crpc_session *s)
+{
+	return s->req_dropped_;
+}

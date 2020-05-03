@@ -87,41 +87,14 @@ extern ssize_t crpc_recv_one(struct crpc_session *s,
 extern int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id);
 extern void crpc_close(struct crpc_session *s);
 
-static inline uint32_t crpc_win_avail(struct crpc_session *s)
-{
-	return s->win_avail;
-}
-
 /* client-side stats */
-static inline uint64_t crpc_stat_winu_rx(struct crpc_session *s)
-{
-	return s->winu_rx_;
-}
-
-static inline uint64_t crpc_stat_winu_tx(struct crpc_session *s)
-{
-	return s->winu_tx_;
-}
-
-static inline uint64_t crpc_stat_resp_rx(struct crpc_session *s)
-{
-	return s->resp_rx_;
-}
-
-static inline uint64_t crpc_stat_req_tx(struct crpc_session *s)
-{
-	return s->req_tx_;
-}
-
-static inline uint64_t crpc_stat_win_expired(struct crpc_session *s)
-{
-	return s->win_expired_;
-}
-
-static inline uint64_t crpc_stat_req_dropped(struct crpc_session *s)
-{
-	return s->req_dropped_;
-}
+extern uint32_t crpc_win_avail(struct crpc_session *s);
+extern uint64_t crpc_stat_winu_rx(struct crpc_session *s);
+extern uint64_t crpc_stat_win_expired(struct crpc_session *s);
+extern uint64_t crpc_stat_winu_tx(struct crpc_session *s);
+extern uint64_t crpc_stat_resp_rx(struct crpc_session *s);
+extern uint64_t crpc_stat_req_tx(struct crpc_session *s);
+extern uint64_t crpc_stat_req_dropped(struct crpc_session *s);
 
 /**
  * crpc_is_busy - is the session busy (unable to accept requests right now)
