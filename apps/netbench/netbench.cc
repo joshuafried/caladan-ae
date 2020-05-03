@@ -703,7 +703,7 @@ void PrintHeader(std::ostream& os) {
      << "server:req_drop_rate," << "server:resp_tx_pps," << "client:min_tput,"
      << "client:max_tput," << "client:winu_rx_pps," << "client:winu_tx_pps,"
      << "client:resp_rx_pps," << "client:req_tx_pps," << "client:win_expired_wps,"
-     << "client:req_dropped_rps," << "client:sleep" << std::endl;
+     << "client:req_dropped_rps" << std::endl;
 }
 
 void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
@@ -957,6 +957,7 @@ void ClientHandler(void *arg) {
 
   for (double i : offered_loads) {
     SteadyStateExperiment(threads, i, st);
+    rt::Sleep(1000000);
   }
 
   pos = json_out.tellp();
