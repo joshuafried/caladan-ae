@@ -27,6 +27,7 @@
 #define SRPC_MIN_DELAY_US	100
 /* the maximum runtime queuing delay */
 #define SRPC_MAX_DELAY_US	200
+#define SRPC_DROP_THRESH	200
 /* round trip time in us */
 #define SRPC_RTT_US		10
 #define SRPC_AI			20
@@ -435,7 +436,7 @@ static void srpc_worker(void *arg)
 	thread_t *th;
 	uint64_t us = runtime_queue_us();
 
-	if (us >= SRPC_MAX_DELAY_US) {
+	if (us >= SRPC_DROP_THRESH) {
 		c->resp_len = 0;
 		c->drop = true;
 #if SRPC_TRACK_FLOW
