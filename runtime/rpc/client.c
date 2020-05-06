@@ -359,13 +359,11 @@ static void crpc_timer(void *arg)
 
 	mutex_lock(&s->lock);
 	while(true) {
-		while (s->head == s->tail) {
+		while (s->running && s->head == s->tail)
 			condvar_wait(&s->timer_cv, &s->lock);
-			if (!s->running) {
-				mutex_unlock(&s->lock);
-				return;
-			}
-		}
+
+		if (!s->running)
+			goto done;
 
 		num_drops = 0;
 		now = microtime();
@@ -404,6 +402,9 @@ static void crpc_timer(void *arg)
 		timer_sleep_until(*c->cque + CRPC_MAX_CLIENT_DELAY_US);
 		mutex_lock(&s->lock);
 	}
+done:
+	mutex_unlock(&s->lock);
+	waitgroup_done(&s->timer_waiter);
 }
 
 /**
@@ -449,6 +450,8 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 	s->c = c;
 	mutex_init(&s->lock);
 	condvar_init(&s->timer_cv);
+	waitgroup_init(&s->timer_waiter);
+	waitgroup_add(&s->timer_waiter, 1);
 	s->running = true;
 	s->demand_sync = false;
 	if (id != -1)
@@ -479,8 +482,13 @@ void crpc_close(struct crpc_session *s)
 {
 	int i;
 
+	mutex_lock(&s->lock);
 	s->running = false;
 	condvar_signal(&s->timer_cv);
+	mutex_unlock(&s->lock);
+
+	waitgroup_wait(&s->timer_waiter);
+
 	tcp_close(s->c);
 	for(i = 0; i < CRPC_QLEN; ++i)
 		sfree(s->qreq[i]);
