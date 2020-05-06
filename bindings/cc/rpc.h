@@ -16,8 +16,6 @@ class RpcClient {
   // The maximum size of an RPC request payload.
   static constexpr size_t kMaxPayloadSize = SRPC_BUF_SIZE;
 
-  ~RpcClient() { crpc_close(s_); }
-
   // Disable move and copy.
   RpcClient(const RpcClient&) = delete;
   RpcClient& operator=(const RpcClient&) = delete;
@@ -76,6 +74,8 @@ class RpcClient {
   int Shutdown(int how) { return tcp_shutdown(s_->c, how); }
   // Aborts the RPC connection.
   void Abort() { return tcp_abort(s_->c); }
+
+  void Close() { crpc_close(s_); }
 
  private:
   RpcClient(struct crpc_session *s) : s_(s) { }

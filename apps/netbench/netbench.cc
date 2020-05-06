@@ -617,6 +617,7 @@ std::vector<work_unit> RunExperiment(
       csr->req_tx += c->StatReqTx();
       csr->win_expired += c->StatWinExpired();
       csr->req_dropped += c->StatReqDropped();
+      c->Close();
     }
   }
 
