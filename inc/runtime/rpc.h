@@ -58,6 +58,7 @@ struct crpc_session {
 	uint64_t		req_id;
 	tcpconn_t		*c;
 	mutex_t			lock;
+	waitgroup_t		timer_waiter;
 	bool			waiting_winupdate;
 	uint32_t		win_avail;
 	uint32_t		win_used;
