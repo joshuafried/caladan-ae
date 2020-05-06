@@ -117,6 +117,22 @@ static void crpc_drain_queue(struct crpc_session *s)
 		return;
 	}
 
+	while (s->head != s->tail) {
+		pos = s->tail % CRPC_QLEN;
+		c = s->qreq[pos];
+		if (now - *c->cque <= CRPC_MAX_CLIENT_DELAY_US)
+			break;
+
+		s->tail++;
+		s->req_dropped_++;
+#if CRPC_TRACK_FLOW
+		if (s->id == CRPC_TRACK_FLOW_ID) {
+			printf("[%lu] request dropped: id=%lu, qlen = %d\n",
+			       now, c->id, s->head - s->tail);
+		}
+#endif
+	}
+
 	/* try to drain queued requests: FIFO */
 	while (s->head != s->tail) {
 		if (s->win_used >= s->win_avail)
