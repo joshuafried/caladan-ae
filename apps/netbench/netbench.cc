@@ -142,6 +142,7 @@ struct work_unit {
   uint64_t tsc;
   uint32_t cpu;
   uint64_t server_queue;
+  uint64_t server_time;
   uint64_t client_queue;
 };
 
@@ -501,6 +502,7 @@ std::vector<work_unit> ClientWorker(
       w[idx].tsc = ntoh64(rp.tsc_end);
       w[idx].cpu = ntoh32(rp.cpu);
       w[idx].server_queue = ntoh64(rp.server_queue);
+      w[idx].server_time = w[idx].work_us + w[idx].server_queue;
     }
   });
 
@@ -708,13 +710,13 @@ void PrintHeader(std::ostream& os) {
      << "min," << "mean," << "p50," << "p90," << "p99," << "p999," << "p9999,"
      << "max," << "lmin," << "lmean," << "lp50," << "lp90," << "lp99," << "lp999,"
      << "lp9999," << "lmax," << "p1_win," << "mean_win," << "p99_win," << "p1_q,"
-     << "mean_q," << "p99_q," << "server:rx_pps," << "server:tx_pps," << "server:rx_bps,"
-     << "server:tx_bps," << "server:rx_drops_pps," << "server:rx_ooo_pps," << "server:winu_rx_pps,"
-     << "server:winu_tx_pps," << "server:win_tx_wps," << "server:req_rx_pps,"
-     << "server:req_drop_rate," << "server:resp_tx_pps," << "client:min_tput,"
-     << "client:max_tput," << "client:winu_rx_pps," << "client:winu_tx_pps,"
-     << "client:resp_rx_pps," << "client:req_tx_pps," << "client:win_expired_wps,"
-     << "client:req_dropped_rps" << std::endl;
+     << "mean_q," << "p99_q," << "mean_stime," << "p99_stime," << "server:rx_pps,"
+     << "server:tx_pps," << "server:rx_bps," << "server:tx_bps," << "server:rx_drops_pps,"
+     << "server:rx_ooo_pps," << "server:winu_rx_pps," << "server:winu_tx_pps,"
+     << "server:win_tx_wps," << "server:req_rx_pps," << "server:req_drop_rate,"
+     << "server:resp_tx_pps," << "client:min_tput," << "client:max_tput," << "client:winu_rx_pps,"
+     << "client:winu_tx_pps," << "client:resp_rx_pps," << "client:req_tx_pps,"
+     << "client:win_expired_wps," << "client:req_dropped_rps" << std::endl;
 }
 
 void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
@@ -776,6 +778,15 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
   double p1_que = w[count * 0.01].server_queue;
   double p99_que = w[count * 0.99].server_queue;
 
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
+    return s1.server_time < s2.server_time;
+  });
+  double sum_stime = std::accumulate(
+      w.begin(), w.end(), 0.0,
+      [](double s, const work_unit &c) { return s + c.server_time; });
+  double mean_stime = sum_stime / w.size();
+  double p99_stime = w[count * 0.99].server_time;
+
   double sum_cque = std::accumulate(
       w.begin(), w.end(), 0.0,
       [](double s, const work_unit &c) {return s + c.client_queue; });
@@ -788,8 +799,9 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << min_lat << "," << mean_lat << "," << p50_lat << "," << p90_lat << ","
       << p99_lat << "," << p999_lat << "," << p9999_lat << "," << max_lat << ","
       << p1_win << "," << mean_win << "," << p99_win << "," << p1_que << ","
-      << mean_que << "," << p99_que << "," << ss->rx_pps << ","
-      << ss->tx_pps << "," << ss->rx_bps << "," << ss->tx_bps << ","
+      << mean_que << "," << p99_que << "," << mean_stime << ","
+      << p99_stime << "," << ss->rx_pps << "," << ss->tx_pps << ","
+      << ss->rx_bps << "," << ss->tx_bps << ","
       << ss->rx_drops_pps << "," << ss->rx_ooo_pps << ","
       << ss->winu_rx_pps << "," << ss->winu_tx_pps << ","
       << ss->win_tx_wps << "," << ss->req_rx_pps << ","
@@ -806,10 +818,10 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << min_lat << "," << mean_lat << "," << p50_lat << "," << p90_lat << ","
       << p99_lat << "," << p999_lat << "," << p9999_lat << "," << max_lat << ","
       << p1_win << "," << mean_win << "," << p99_win << "," << p1_que << ","
-      << mean_que << "," << p99_que << "," << ss->rx_pps << ","
-      << ss->tx_pps << "," << ss->rx_bps << "," << ss->tx_bps << ","
-      << ss->rx_drops_pps << "," << ss->rx_ooo_pps << ","
-      << ss->winu_rx_pps << "," << ss->winu_tx_pps << ","
+      << mean_que << "," << p99_que << "," << mean_stime << ","
+      << p99_stime << "," << ss->rx_pps << "," << ss->tx_pps << ","
+      << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
+      << ss->rx_ooo_pps << "," << ss->winu_rx_pps << "," << ss->winu_tx_pps << ","
       << ss->win_tx_wps << "," << ss->req_rx_pps << ","
       << ss->req_drop_rate << "," << ss->resp_tx_pps << ","
       << cs->min_percli_tput << "," << cs->max_percli_tput << ","
@@ -845,6 +857,8 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 	   << "\"p1_q\":" << p1_que << ","
 	   << "\"mean_q\":" << mean_que << ","
 	   << "\"p99_q\":" << p99_que << ","
+	   << "\"mean_stime\":" << mean_stime << ","
+	   << "\"p99_stime\":" << p99_stime << ","
 	   << "\"server:rx_pps\":" << ss->rx_pps << ","
 	   << "\"server:tx_pps\":" << ss->tx_pps << ","
 	   << "\"server:rx_bps\":" << ss->rx_bps << ","
