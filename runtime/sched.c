@@ -538,6 +538,7 @@ void thread_ready(thread_t *th)
 	th->state = THREAD_STATE_RUNNABLE;
 
 	k = getk();
+	spin_lock(&k->lock);
 	if (cores_have_affinity(th->last_cpu, k->curr_cpu))
 		STAT(LOCAL_WAKES)++;
 	else
@@ -547,7 +548,6 @@ void thread_ready(thread_t *th)
 	th->ready_tsc = rdtsc();
 	if (unlikely(k->rq_head - rq_tail >= RUNTIME_RQ_SIZE)) {
 		assert(k->rq_head - rq_tail == RUNTIME_RQ_SIZE);
-		spin_lock(&k->lock);
 		list_add_tail(&k->rq_overflow, &th->link);
 		spin_unlock(&k->lock);
 		putk();
@@ -557,8 +557,12 @@ void thread_ready(thread_t *th)
 
 	if (k->rq_head == rq_tail)
 		ACCESS_ONCE(k->q_ptrs->oldest_tsc) = th->ready_tsc;
+
 	k->rq[k->rq_head % RUNTIME_RQ_SIZE] = th;
+	BUG_ON(ACCESS_ONCE(k->q_ptrs->oldest_tsc) !=
+	       k->rq[rq_tail % RUNTIME_RQ_SIZE]->ready_tsc);
 	store_release(&k->rq_head, k->rq_head + 1);
+	spin_unlock(&k->lock);
 	putk();
 }
 
