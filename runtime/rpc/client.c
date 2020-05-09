@@ -65,27 +65,20 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s)
 	int nrhdr = 0;
 	ssize_t ret;
 	uint64_t now = microtime();
-	int num_req;
-	int qlen;
 
 	assert_mutex_held(&s->lock);
 
-	num_req = MIN(s->head - s->tail, s->win_avail - s->win_used);
-	num_req = MAX(num_req, 0);
-	qlen = (s->head - s->tail) - num_req;
-	BUG_ON(qlen < 0);
-
-	if (num_req == 0)
+	if (s->head == s->tail || s->win_used > s->win_avail)
 		return 0;
 
-	while (num_req > 0) {
+	while (s->head != s->tail && s->win_used < s->win_avail) {
 		struct crpc_ctx *c = s->qreq[s->tail++ % CRPC_QLEN];
 
 		chdr[nrhdr].magic = RPC_REQ_MAGIC;
 		chdr[nrhdr].op = RPC_OP_CALL;
 		chdr[nrhdr].id = c->id;
 		chdr[nrhdr].len = c->len;
-		chdr[nrhdr].demand = qlen;
+		chdr[nrhdr].demand = s->head - s->tail;
 		chdr[nrhdr].sync = s->demand_sync;
 
 		v[nriov].iov_base = &chdr[nrhdr];
@@ -100,7 +93,6 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s)
 		*c->cque = now - *c->cque;
 
 		s->win_used++;
-		num_req--;
 	}
 
 	if (s->head == s->tail) {
