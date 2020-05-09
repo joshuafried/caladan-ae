@@ -26,7 +26,7 @@
 /* the minimum runtime queuing delay */
 #define SRPC_MIN_DELAY_US	100
 /* the maximum runtime queuing delay */
-#define SRPC_MAX_DELAY_US	200
+#define SRPC_MAX_DELAY_US	1600
 #define SRPC_DROP_THRESH	200
 /* round trip time in us */
 #define SRPC_RTT_US		10
@@ -317,8 +317,8 @@ finish:
 	atomic_fetch_and_add(&srpc_win_used, win_diff);
 #if SRPC_TRACK_FLOW
 	if (s->id == SRPC_TRACK_FLOW_ID) {
-		printf("[%lu] window update: win_avail = %d, win_used = %d, num_pending = %d, demand = %d, num_sess = %d, old_win = %d, new_win = %d\n",
-		       microtime(), win_avail, win_used, s->num_pending, s->demand, num_sess, old_win, s->win);
+		printf("[%lu] window update: win_avail = %d, win_used = %d, req_dropped = %d, num_pending = %d, demand = %d, num_sess = %d, old_win = %d, new_win = %d\n",
+		       microtime(), win_avail, win_used, req_dropped, s->num_pending, s->demand, num_sess, old_win, s->win);
 	}
 #endif
 }
@@ -434,6 +434,7 @@ static void srpc_worker(void *arg)
 	struct srpc_session *s = c->s;
 	uint64_t st;
 	thread_t *th;
+/*
 	uint64_t us = runtime_queue_us();
 
 	if (us >= SRPC_DROP_THRESH) {
@@ -448,7 +449,7 @@ static void srpc_worker(void *arg)
 		atomic64_inc(&srpc_stat_req_dropped_);
 		goto done;
 	}
-
+*/
 	c->drop = false;
 	srpc_handler(c);
 	st = microtime() - st;
@@ -475,6 +476,7 @@ static int srpc_recv_one(struct srpc_session *s)
 	int num_pending;
 	int win_diff;
 	unsigned int core_id;
+	char buf_tmp[SRPC_BUF_SIZE];
 
 again:
 	th = NULL;
@@ -499,12 +501,13 @@ again:
 
 	switch (chdr.op) {
 	case RPC_OP_CALL:
+		atomic64_inc(&srpc_stat_req_rx_);
 		/* reserve a slot */
 		idx = srpc_get_slot(s);
 		if (unlikely(idx < 0)) {
-			log_warn("srpc: client tried to use more than %d slots",
-				 SRPC_MAX_WINDOW);
-			return -ENOENT;
+			tcp_read_full(s->c, buf_tmp, chdr.len);
+			atomic64_inc(&srpc_stat_req_dropped_);
+			return 0;
 		}
 
 		/* retrieve the payload */
@@ -532,13 +535,28 @@ again:
 			s->win = s->num_pending + s->demand;
 			atomic_sub_and_fetch(&srpc_win_used, win_diff);
 		}
-		spin_unlock_np(&s->lock);
 
 		atomic_inc(&srpc_num_pending);
+
+		if (runtime_queue_us() >= SRPC_DROP_THRESH) {
+			thread_t *th;
+
+			s->slots[idx]->drop = true;
+			bitmap_set(s->completed_slots, idx);
+			th = s->sender_th;
+			s->sender_th = NULL;
+			spin_unlock_np(&s->lock);
+			if (th)
+				thread_ready(th);
+			atomic64_inc(&srpc_stat_req_dropped_);
+			goto again;
+		}
+
+		spin_unlock_np(&s->lock);
+
 		ret = thread_spawn(srpc_worker, s->slots[idx]);
 		BUG_ON(ret);
 
-		atomic64_inc(&srpc_stat_req_rx_);
 #if SRPC_TRACK_FLOW
 		uint64_t now = microtime();
 		if (s->id == SRPC_TRACK_FLOW_ID) {
@@ -843,6 +861,7 @@ static void srpc_cc_worker(void *arg)
 				(float)(SRPC_MAX_DELAY_US - SRPC_MIN_DELAY_US);
 			new_win = (int)(new_win * (1.0 - alpha / 2.0));
 		} else {
+			/*
 			have_p = false;
 			for(i = 0; i < max_cores; ++i) {
 				if (!list_empty(&srpc_drained[i].list_p)) {
@@ -854,6 +873,8 @@ static void srpc_cc_worker(void *arg)
 				new_win += 1;
 			else
 				new_win += MAX((int)(num_sess / 500), 1);
+			*/
+			new_win += MAX((int)(num_sess / 500), 1);
 		}
 
 		new_win = MAX(new_win, max_cores);
@@ -865,6 +886,7 @@ static void srpc_cc_worker(void *arg)
 		core_id = get_current_affinity();
 
 		while (win_open > 0) {
+/*
 			ds = srpc_choose_drained_session_p(core_id);
 
 			i = (core_id + 1) % max_cores;
@@ -876,6 +898,8 @@ static void srpc_cc_worker(void *arg)
 			if (!ds) {
 				ds = srpc_choose_drained_session_u(core_id);
 			}
+*/
+			ds = srpc_choose_drained_session_u(core_id);
 
 			i = (core_id + 1) % max_cores;
 			while (!ds && i != core_id) {
