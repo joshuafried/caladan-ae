@@ -932,19 +932,66 @@ int StringToAddr(const char *str, uint32_t *addr) {
 }
 
 void calculate_rates() {
-  double start, max, incr;
-  max = 10.0 * 1000000.0 / (st + 0.5);
-  incr = max / 40.0;
-  start = incr;
-
   if (offered_load > 0.0) {
     offered_loads.push_back(offered_load / (double)total_agents);
-  } else  {
-    for (double l = start; l <= max; l += incr)
-      offered_loads.push_back(l / (double)total_agents);
-
-    for (double l = max + incr; l <= 10 * max; l += max)
-      offered_loads.push_back(l / (double)total_agents);
+  } else {
+    if (st == 1.0) {
+      offered_loads.push_back(200000 / (double)total_agents);
+      offered_loads.push_back(400000 / (double)total_agents);
+      offered_loads.push_back(600000 / (double)total_agents);
+      offered_loads.push_back(800000 / (double)total_agents);
+      offered_loads.push_back(1000000 / (double)total_agents);
+      offered_loads.push_back(2000000 / (double)total_agents);
+      offered_loads.push_back(3000000 / (double)total_agents);
+      offered_loads.push_back(4000000 / (double)total_agents);
+      offered_loads.push_back(5000000 / (double)total_agents);
+      offered_loads.push_back(6000000 / (double)total_agents);
+      offered_loads.push_back(7000000 / (double)total_agents);
+      offered_loads.push_back(8000000 / (double)total_agents);
+      offered_loads.push_back(9000000 / (double)total_agents);
+      offered_loads.push_back(10000000 / (double)total_agents);
+      offered_loads.push_back(20000000 / (double)total_agents);
+    } else if (st == 10.0) {
+      offered_loads.push_back(100000 / (double)total_agents);
+      offered_loads.push_back(200000 / (double)total_agents);
+      offered_loads.push_back(300000 / (double)total_agents);
+      offered_loads.push_back(400000 / (double)total_agents);
+      offered_loads.push_back(500000 / (double)total_agents);
+      offered_loads.push_back(600000 / (double)total_agents);
+      offered_loads.push_back(700000 / (double)total_agents);
+      offered_loads.push_back(800000 / (double)total_agents);
+      offered_loads.push_back(900000 / (double)total_agents);
+      offered_loads.push_back(1000000 / (double)total_agents);
+      offered_loads.push_back(1100000 / (double)total_agents);
+      offered_loads.push_back(1200000 / (double)total_agents);
+      offered_loads.push_back(1300000 / (double)total_agents);
+      offered_loads.push_back(2000000 / (double)total_agents);
+      offered_loads.push_back(3000000 / (double)total_agents);
+      offered_loads.push_back(4000000 / (double)total_agents);
+    } else if (st == 100.0) {
+      offered_loads.push_back(10000 / (double)total_agents);
+      offered_loads.push_back(20000 / (double)total_agents);
+      offered_loads.push_back(30000 / (double)total_agents);
+      offered_loads.push_back(40000 / (double)total_agents);
+      offered_loads.push_back(50000 / (double)total_agents);
+      offered_loads.push_back(60000 / (double)total_agents);
+      offered_loads.push_back(70000 / (double)total_agents);
+      offered_loads.push_back(80000 / (double)total_agents);
+      offered_loads.push_back(90000 / (double)total_agents);
+      offered_loads.push_back(100000 / (double)total_agents);
+      offered_loads.push_back(110000 / (double)total_agents);
+      offered_loads.push_back(120000 / (double)total_agents);
+      offered_loads.push_back(130000 / (double)total_agents);
+      offered_loads.push_back(140000 / (double)total_agents);
+      offered_loads.push_back(150000 / (double)total_agents);
+      offered_loads.push_back(160000 / (double)total_agents);
+      offered_loads.push_back(170000 / (double)total_agents);
+      offered_loads.push_back(180000 / (double)total_agents);
+      offered_loads.push_back(190000 / (double)total_agents);
+      offered_loads.push_back(200000 / (double)total_agents);
+      offered_loads.push_back(300000 / (double)total_agents);
+      offered_loads.push_back(400000 / (double)total_agents);
+    }
   }
 }
 
