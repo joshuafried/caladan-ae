@@ -57,6 +57,66 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	return 0;
 }
 
+static ssize_t crpc_send_request_vector(struct crpc_session *s)
+{
+	struct crpc_hdr chdr[CRPC_QLEN];
+	struct iovec v[CRPC_QLEN * 2];
+	int nriov = 0;
+	int nrhdr = 0;
+	ssize_t ret;
+	uint64_t now = microtime();
+	int num_req;
+	int qlen;
+
+	assert_mutex_held(&s->lock);
+
+	num_req = MIN(s->head - s->tail, s->win_avail - s->win_used);
+	num_req = MAX(num_req, 0);
+	qlen = (s->head - s->tail) - num_req;
+	BUG_ON(qlen < 0);
+
+	if (num_req == 0)
+		return 0;
+
+	while (num_req > 0) {
+		struct crpc_ctx *c = s->qreq[s->tail++ % CRPC_QLEN];
+
+		chdr[nrhdr].magic = RPC_REQ_MAGIC;
+		chdr[nrhdr].op = RPC_OP_CALL;
+		chdr[nrhdr].id = c->id;
+		chdr[nrhdr].len = c->len;
+		chdr[nrhdr].demand = qlen;
+		chdr[nrhdr].sync = s->demand_sync;
+
+		v[nriov].iov_base = &chdr[nrhdr];
+		v[nriov].iov_len = sizeof(struct crpc_hdr);
+		nrhdr++;
+		nriov++;
+
+		if (c->len > 0) {
+			v[nriov].iov_base = c->buf;
+			v[nriov++].iov_len = c->len;
+		}
+		*c->cque = now - *c->cque;
+
+		s->win_used++;
+		num_req--;
+	}
+
+	if (s->head == s->tail) {
+		s->head = 0;
+		s->tail = 0;
+	}
+
+	ret = tcp_writev_full(s->c, v, nriov);
+
+	s->req_tx_ += nrhdr;
+
+	if (unlikely(ret < 0))
+		return ret;
+	return 0;
+}
+
 static ssize_t crpc_send_raw(struct crpc_session *s,
 			     const void *buf, size_t len,
 			     uint64_t id)
@@ -133,20 +193,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 #endif
 	}
 
-	/* try to drain queued requests: FIFO */
-	while (s->head != s->tail) {
-		if (s->win_used >= s->win_avail)
-			break;
-
-		pos = s->tail++ % CRPC_QLEN;
-		c = s->qreq[pos];
-		*c->cque = now - *c->cque;
-		ret = crpc_send_raw(s, c->buf, c->len, c->id);
-		if (ret < 0)
-			break;
-		assert(ret == c->len);
-		s->win_used++;
-	}
+	crpc_send_request_vector(s);
 }
 
 static bool crpc_enqueue_one(struct crpc_session *s,
