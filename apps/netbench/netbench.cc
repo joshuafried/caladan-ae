@@ -54,7 +54,8 @@ int total_agents = 1;
 // number of iterations required for 1us on target server
 constexpr uint64_t kIterationsPerUS = 69;  // 83
 // Total duration of the experiment in us
-constexpr uint64_t kExperimentTime = 2000000;
+constexpr uint64_t kWarmUpTime = 2000000;
+constexpr uint64_t kExperimentTime = 4000000;
 // RTT
 constexpr uint64_t kRTT = 10;
 constexpr int STRICT_SLO = 300;
@@ -609,6 +610,7 @@ std::vector<work_unit> RunExperiment(
   for (auto &c : conns) c->Abort();
 
   double elapsed_ = duration_cast<sec>(finish - start).count();
+  elapsed_ -= kWarmUpTime;
 
   // Aggregate client stats
   if (csr) {
@@ -638,7 +640,8 @@ std::vector<work_unit> RunExperiment(
     offered += v.size();
     // Remove requests that did not complete.
     v.erase(std::remove_if(v.begin(), v.end(),
-			   [](const work_unit &s) {return s.duration_us == 0;}),
+			   [](const work_unit &s) {
+			   return (s.duration_us == 0 || s.start_us < kWarmUpTime);}),
 	    v.end());
     slo_success = std::count_if(v.begin(), v.end(), [](const work_unit &s) {
 				return s.duration_us < STRICT_SLO;});
