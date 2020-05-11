@@ -662,6 +662,7 @@ std::vector<work_unit> RunExperiment(
   // Report results.
   if (csr) {
     csr->offered_rps = static_cast<double>(offered) / elapsed_ * 1000000;
+    csr->offered_rps *= static_cast<double>(kExperimentTime - kWarmUpTime) / kExperimentTime;
     csr->rps = static_cast<double>(w.size()) / elapsed_ * 1000000;
     csr->goodput = static_cast<double>(good_resps) / elapsed_ * 1000000;
     csr->min_percli_tput = min_throughput;
