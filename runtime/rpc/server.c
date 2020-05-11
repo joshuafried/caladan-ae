@@ -24,13 +24,15 @@
 #define SRPC_MAX_WINDOW_EXP	6
 #define SRPC_MAX_WINDOW		64
 /* the minimum runtime queuing delay */
-#define SRPC_MIN_DELAY_US	100
-/* the maximum runtime queuing delay */
-#define SRPC_MAX_DELAY_US	1600
-#define SRPC_DROP_THRESH	200
+#define SRPC_MIN_DELAY_US	80
+#define SRPC_DROP_THRESH	160
 /* round trip time in us */
 #define SRPC_RTT_US		10
-#define SRPC_AI			20
+
+#define SRPC_OP_WIN		2
+
+#define SRPC_AI			0.002
+#define SRPC_MD			0.2
 
 #define SRPC_TRACK_FLOW		false
 #define SRPC_TRACK_FLOW_ID	1
@@ -288,29 +290,31 @@ static void srpc_update_window(struct srpc_session *s, bool req_dropped)
 	if (s->drained_core != -1)
 		return;
 
+	open_window = win_avail - win_used;
 	if (win_used < win_avail) {
-		open_window = win_avail - win_used;
-		s->win = MIN(s->num_pending + s->demand, s->win + open_window);
+		s->win = MIN(s->num_pending + s->demand + SRPC_OP_WIN,
+			     s->win + open_window);
 	} else if (win_used > win_avail) {
 		s->win--;
 	}
 
 	if (s->wake_up || num_sess <= runtime_max_cores())
-		s->win = MAX(s->win, 1);
+		s->win = MAX(s->win, SRPC_OP_WIN);
 
 	// prioritize the session
 	if (old_win > 0 && s->win == 0 && !req_dropped && !s->demand_sync)
-		s->win = 1;
+		s->win = SRPC_OP_WIN;
 
 	/* clamp to supported values */
 	/* now we allow zero window */
 	s->win = MAX(s->win, s->num_pending);
 	s->win = MIN(s->win, SRPC_MAX_WINDOW - 1);
 
+	/*
 	if (s->demand_sync)
 		s->win = MIN(s->win, s->num_pending + s->demand);
-	else
-		s->win = MIN(s->win, MAX(s->num_pending + s->demand, 1));
+	else*/
+	s->win = MIN(s->win, s->num_pending + s->demand + SRPC_OP_WIN);
 
 finish:
 	win_diff = s->win - old_win;
@@ -856,10 +860,11 @@ static void srpc_cc_worker(void *arg)
 		num_sess = atomic_read(&srpc_num_sess);
 
 		if (us >= SRPC_MIN_DELAY_US) {
-			us = MIN(SRPC_MAX_DELAY_US, us);
-			alpha = (float)(us - SRPC_MIN_DELAY_US) /
-				(float)(SRPC_MAX_DELAY_US - SRPC_MIN_DELAY_US);
-			new_win = (int)(new_win * (1.0 - alpha / 2.0));
+			alpha = (us - SRPC_MIN_DELAY_US) / (float)SRPC_MIN_DELAY_US;
+			alpha = alpha * SRPC_MD;
+			alpha = MAX(1.0 - alpha, 0.5);
+
+			new_win = (int)(new_win * alpha);
 		} else {
 			/*
 			have_p = false;
@@ -874,7 +879,7 @@ static void srpc_cc_worker(void *arg)
 			else
 				new_win += MAX((int)(num_sess / 500), 1);
 			*/
-			new_win += MAX((int)(num_sess / 500), 1);
+			new_win += MAX((int)(num_sess * SRPC_AI), 1);
 		}
 
 		new_win = MAX(new_win, max_cores);
