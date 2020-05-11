@@ -29,8 +29,6 @@
 /* round trip time in us */
 #define SRPC_RTT_US		10
 
-#define SRPC_OP_WIN		2
-
 #define SRPC_AI			0.002
 #define SRPC_MD			0.2
 
@@ -284,6 +282,7 @@ static void srpc_update_window(struct srpc_session *s, bool req_dropped)
 	int old_win = s->win;
 	int win_diff;
 	int open_window;
+	int max_overprovision;
 
 	assert_spin_lock_held(&s->lock);
 
@@ -291,19 +290,20 @@ static void srpc_update_window(struct srpc_session *s, bool req_dropped)
 		return;
 
 	open_window = win_avail - win_used;
+	max_overprovision = ((int)(open_window / num_sess), 1);
 	if (win_used < win_avail) {
-		s->win = MIN(s->num_pending + s->demand + SRPC_OP_WIN,
+		s->win = MIN(s->num_pending + s->demand + max_overprovision,
 			     s->win + open_window);
 	} else if (win_used > win_avail) {
 		s->win--;
 	}
 
 	if (s->wake_up || num_sess <= runtime_max_cores())
-		s->win = MAX(s->win, SRPC_OP_WIN);
+		s->win = MAX(s->win, max_overprovision);
 
 	// prioritize the session
 	if (old_win > 0 && s->win == 0 && !req_dropped && !s->demand_sync)
-		s->win = SRPC_OP_WIN;
+		s->win = max_overprovision;
 
 	/* clamp to supported values */
 	/* now we allow zero window */
@@ -314,7 +314,7 @@ static void srpc_update_window(struct srpc_session *s, bool req_dropped)
 	if (s->demand_sync)
 		s->win = MIN(s->win, s->num_pending + s->demand);
 	else*/
-	s->win = MIN(s->win, s->num_pending + s->demand + SRPC_OP_WIN);
+	s->win = MIN(s->win, s->num_pending + s->demand + max_overprovision);
 
 finish:
 	win_diff = s->win - old_win;
