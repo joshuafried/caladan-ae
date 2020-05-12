@@ -68,7 +68,7 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s)
 
 	assert_mutex_held(&s->lock);
 
-	if (s->head == s->tail || s->win_used > s->win_avail)
+	if (s->head == s->tail || s->win_used >= s->win_avail)
 		return 0;
 
 	while (s->head != s->tail && s->win_used < s->win_avail) {
@@ -103,6 +103,13 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s)
 	ret = tcp_writev_full(s->c, v, nriov);
 
 	s->req_tx_ += nrhdr;
+
+#if CRPC_TRACK_FLOW
+	if (s->id == CRPC_TRACK_FLOW_ID) {
+		printf("[%lu] <=== request (%d): qlen=%d win=%d/%d\n",
+		       microtime(), nrhdr, s->head-s->tail, s->win_used, s->win_avail);
+	}
+#endif
 
 	if (unlikely(ret < 0))
 		return ret;
@@ -156,12 +163,8 @@ static void crpc_drain_queue(struct crpc_session *s)
 
 	assert_mutex_held(&s->lock);
 
-	if (s->head == s->tail)
+	if (s->head == s->tail || s->waiting_winupdate)
 		return;
-
-	if (s->waiting_winupdate) {
-		return;
-	}
 
 	if (s->win_avail == 0 && s->demand_sync) {
 		s->waiting_winupdate = true;
