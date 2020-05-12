@@ -641,7 +641,8 @@ std::vector<work_unit> RunExperiment(
     // Remove requests that did not complete.
     v.erase(std::remove_if(v.begin(), v.end(),
 			   [](const work_unit &s) {
-			   return (s.duration_us == 0 || s.start_us < kWarmUpTime);}),
+			   return (s.duration_us == 0 ||
+				   s.start_us < kWarmUpTime);}),
 	    v.end());
     slo_success = std::count_if(v.begin(), v.end(), [](const work_unit &s) {
 				return s.duration_us < STRICT_SLO;});
@@ -954,6 +955,8 @@ void calculate_rates() {
       offered_loads.push_back(8000000 / (double)total_agents);
       offered_loads.push_back(9000000 / (double)total_agents);
       offered_loads.push_back(10000000 / (double)total_agents);
+      offered_loads.push_back(12000000 / (double)total_agents);
+      offered_loads.push_back(16000000 / (double)total_agents);
       offered_loads.push_back(20000000 / (double)total_agents);
     } else if (st == 10.0) {
       offered_loads.push_back(100000 / (double)total_agents);
