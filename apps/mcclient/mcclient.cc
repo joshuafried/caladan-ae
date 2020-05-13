@@ -52,9 +52,11 @@ std::ofstream csv_out;
 
 int total_agents = 1;
 // Total duration of the experiment in us
-constexpr uint64_t kExperimentTime = 2000000;
+constexpr uint64_t kWarmUpTime = 2000000;
+constexpr uint64_t kExperimentTime = 4000000;
 // RTT
 constexpr uint64_t kRTT = 10;
+constexpr int STRICT_SLO = 165;
 
 std::vector<double> offered_loads;
 double offered_load;
@@ -104,6 +106,7 @@ struct sstat {
 struct cstat_raw {
   double offered_rps;
   double rps;
+  double goodput;
   double min_percli_tput;
   double max_percli_tput;
   uint64_t winu_rx;
@@ -117,6 +120,7 @@ struct cstat_raw {
 struct cstat {
   double offered_rps;
   double rps;
+  double goodput;
   double min_percli_tput;
   double max_percli_tput;
   double winu_rx_pps;
@@ -204,6 +208,7 @@ class NetBarrier {
 	BUG_ON(c->ReadFull(&rem_csr, sizeof(rem_csr)) <= 0);
 	csr->offered_rps += rem_csr.offered_rps;
 	csr->rps += rem_csr.rps;
+	csr->goodput += rem_csr.goodput;
 	csr->min_percli_tput = MIN(rem_csr.min_percli_tput,
 				   csr->min_percli_tput);
 	csr->max_percli_tput = MAX(rem_csr.max_percli_tput,
@@ -423,12 +428,18 @@ std::vector<work_unit> ClientWorker(
 
     timings[i] = microtime();
     std::string key = std::to_string(rand() % 100000);
+    std::string value = std::string("abcdef");
     if (wtype == 1) { // SET
-      std::string value = std::string("abcdef");
       buflen = ConstructMemcachedSetReq(buf, 4096, i, key.c_str(), key.length(),
 					value.c_str(), value.length());
     } else if (wtype == 2) { // GET
       buflen = ConstructMemcachedGetReq(buf, 4096, i, key.c_str(), key.length());
+    } else if (wtype == 3) {
+      if (rand() % 1000 < 998)
+        buflen = ConstructMemcachedGetReq(buf, 4096, i, key.c_str(), key.length());
+      else
+        buflen = ConstructMemcachedSetReq(buf, 4096, i, key.c_str(), key.length(),
+					  value.c_str(), value.length());
     } else {
       panic("unsupported workload type\n");
     }
@@ -509,6 +520,9 @@ std::vector<work_unit> RunExperiment(
   // Force the connections to close.
   for (auto &c : conns) c->Abort();
 
+  double elapsed_ = duration_cast<sec>(finish - start).count();
+  elapsed_ -= kWarmUpTime;
+
   // Aggregate client stats
   if (csr) {
     for (auto &c : conns) {
@@ -518,27 +532,33 @@ std::vector<work_unit> RunExperiment(
       csr->req_tx += c->StatReqTx();
       csr->win_expired += c->StatWinExpired();
       csr->req_dropped += c->StatReqDropped();
+      c->Close();
     }
   }
 
   // Aggregate all the samples together.
   std::vector<work_unit> w;
-  double elapsed_ = duration_cast<sec>(finish - start).count();
   double min_throughput = 0.0;
   double max_throughput = 0.0;
+  uint64_t good_resps = 0;
   uint64_t offered = 0;
 
   for (int i = 0; i < threads; ++i) {
     auto &v = *samples[i];
     double throughput;
+    int slo_success;
 
     offered += v.size();
     // Remove requests that did not complete.
     v.erase(std::remove_if(v.begin(), v.end(),
-			   [](const work_unit &s) {return s.duration_us == 0;}),
+			   [](const work_unit &s) {return (s.duration_us == 0 ||
+						s.start_us < kWarmUpTime);}),
 	    v.end());
+    slo_success = std::count_if(v.begin(), v.end(), [](const work_unit &s) {
+				return s.duration_us < STRICT_SLO;});
     throughput = static_cast<double>(v.size()) / elapsed_ * 1000000;
 
+    good_resps += slo_success;
     if (i == 0) {
       min_throughput = throughput;
       max_throughput = throughput;
@@ -553,7 +573,9 @@ std::vector<work_unit> RunExperiment(
   // Report results.
   if (csr) {
     csr->offered_rps = static_cast<double>(offered) / elapsed_ * 1000000;
+    csr->offered_rps = static_cast<double>(kExperimentTime - kWarmUpTime) / kExperimentTime;
     csr->rps = static_cast<double>(w.size()) / elapsed_ * 1000000;
+    csr->goodput = static_cast<double>(good_resps) / elapsed_ * 1000000;
     csr->min_percli_tput = min_throughput;
     csr->max_percli_tput = max_throughput;
   }
@@ -598,7 +620,7 @@ std::vector<work_unit> RunExperiment(
 }
 
 void PrintHeader(std::ostream& os) {
-  os << "num_threads," << "offered_load," << "throughput," << "cpu," << "min,"
+  os << "num_threads," << "offered_load," << "throughput," << "goodput," << "cpu," << "min,"
      << "mean," << "p50," << "p90," << "p99," << "p999," << "p9999," << "max,"
      << "lmin," << "lmean," << "lp50," << "lp90," << "lp99," << "lp999," << "lp9999,"
      << "lmax," << "p1_win," << "mean_win," << "p99_win," << "p1_q," << "mean_q,"
@@ -676,7 +698,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
   double mean_cque = sum_cque / w.size();
 
   std::cout << std::setprecision(4) << std::fixed << threads * total_agents << ","
-      << cs->offered_rps << "," << cs->rps << "," << ss->cpu_usage << ","
+      << cs->offered_rps << "," << cs->rps << "," << cs->goodput << "," << ss->cpu_usage << ","
       << min << "," << mean << "," << p50 << "," << p90 << "," << p99 << ","
       << p999 << "," << p9999 << "," << max << "," << lmin << "," << lmean << ","
       << lp50 << "," << lp90 << "," << lp99 << "," << lp999 << ","
@@ -692,7 +714,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << cs->req_dropped_rps << std::endl;
 
   csv_out << std::setprecision(4) << std::fixed << threads * total_agents << ","
-      << cs->offered_rps << "," << cs->rps << "," << ss->cpu_usage << ","
+      << cs->offered_rps << "," << cs->rps << "," << cs->goodput << "," << ss->cpu_usage << ","
       << min << "," << mean << "," << p50 << "," << p90 << "," << p99 << ","
       << p999 << "," << p9999 << "," << max << "," << lmin << "," << lmean << ","
       << lp50 << "," << lp90 << "," << lp99 << "," << lp999 << ","
@@ -711,6 +733,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 	   << "\"num_threads\":" << threads * total_agents << ","
 	   << "\"offered_load\":" << cs->offered_rps << ","
 	   << "\"throughput\":" << cs->rps << ","
+	   << "\"goodput\":" << cs->goodput << ","
 	   << "\"cpu\":" << ss->cpu_usage << ","
 	   << "\"min\":" << min << ","
 	   << "\"mean\":" << mean << ","
@@ -779,6 +802,7 @@ void SteadyStateExperiment(int threads, double offered_rps) {
 
   cs = cstat{csr.offered_rps,
 	     csr.rps,
+	     csr.goodput,
 	     csr.min_percli_tput,
 	     csr.max_percli_tput,
 	     static_cast<double>(csr.winu_rx) / elapsed * 1000000,
@@ -802,19 +826,27 @@ int StringToAddr(const char *str, uint32_t *addr) {
 }
 
 void calculate_rates() {
-  double start, max, incr;
-  max = 10.0 * 1000000.0 / 1.5;
-  incr = max / 40.0;
-  start = incr;
 
   if (offered_load > 0.0) {
     offered_loads.push_back(offered_load / (double)total_agents);
-  } else  {
-    for (double l = start; l <= max; l += incr)
-      offered_loads.push_back(l / (double)total_agents);
-
-    for (double l = max + incr; l <= 10 * max; l += max)
-      offered_loads.push_back(l / (double)total_agents);
+  } else {
+    offered_loads.push_back(200000 / (double)total_agents);
+    offered_loads.push_back(400000 / (double)total_agents);
+    offered_loads.push_back(600000 / (double)total_agents);
+    offered_loads.push_back(800000 / (double)total_agents);
+    offered_loads.push_back(1000000 / (double)total_agents);
+    offered_loads.push_back(2000000 / (double)total_agents);
+    offered_loads.push_back(3000000 / (double)total_agents);
+    offered_loads.push_back(4000000 / (double)total_agents);
+    offered_loads.push_back(5000000 / (double)total_agents);
+    offered_loads.push_back(6000000 / (double)total_agents);
+    offered_loads.push_back(7000000 / (double)total_agents);
+    offered_loads.push_back(8000000 / (double)total_agents);
+    offered_loads.push_back(9000000 / (double)total_agents);
+    offered_loads.push_back(10000000 / (double)total_agents);
+    offered_loads.push_back(12000000 / (double)total_agents);
+    offered_loads.push_back(16000000 / (double)total_agents);
+    offered_loads.push_back(20000000 / (double)total_agents);
   }
 }
 
@@ -845,6 +877,8 @@ void ClientHandler(void *arg) {
     wname = std::string("set");
   else if (wtype == 2)
     wname = std::string("get");
+  else if (wtype == 3)
+    wname = std::string("usr");
   else
     wname = std::string("unknown");
 
@@ -920,6 +954,8 @@ int main(int argc, char *argv[]) {
     wtype = 1;
   else if (wtype_.compare("GET") == 0)
     wtype = 2;
+  else if (wtype_.compare("USR") == 0)
+    wtype = 3;
   else {
     std::cerr << "invalid workload type: " << wtype_ << std::endl;
     return -EINVAL;
