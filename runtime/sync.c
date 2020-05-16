@@ -30,6 +30,9 @@ void __mutex_lock(mutex_t *m)
 	}
 
 	myth = thread_self();
+	myth->ready_tsc = rdtsc();
+	if (list_empty(&m->waiters))
+		m->oldest_tsc = myth->ready_tsc;
 	list_add_tail(&m->waiters, &myth->link);
 	thread_park_and_unlock_np(&m->waiter_lock);
 }
@@ -43,10 +46,19 @@ void __mutex_unlock(mutex_t *m)
 
 	waketh = list_pop(&m->waiters, thread_t, link);
 	if (!waketh) {
+		m->oldest_tsc = UINT64_MAX;
 		atomic_write(&m->held, 0);
 		spin_unlock_np(&m->waiter_lock);
 		return;
 	}
+
+	if (list_empty(&m->waiters))
+		m->oldest_tsc = UINT64_MAX;
+	else
+		m->oldest_tsc =
+			((thread_t *)(list_top(&m->waiters, thread_t, link)))
+			->ready_tsc;
+
 	spin_unlock_np(&m->waiter_lock);
 	thread_ready(waketh);
 }
@@ -60,6 +72,7 @@ void mutex_init(mutex_t *m)
 	atomic_write(&m->held, 0);
 	spin_lock_init(&m->waiter_lock);
 	list_head_init(&m->waiters);
+	m->oldest_tsc = UINT64_MAX;
 }
 
 /*

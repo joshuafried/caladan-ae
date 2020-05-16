@@ -7,6 +7,7 @@
 #include <base/stddef.h>
 #include <base/list.h>
 #include <base/lock.h>
+#include <base/time.h>
 #include <runtime/thread.h>
 #include <runtime/preempt.h>
 
@@ -18,6 +19,7 @@
 struct mutex {
 	atomic_t		held;
 	spinlock_t		waiter_lock;
+	uint64_t		oldest_tsc;
 	struct list_head	waiters;
 };
 
@@ -77,6 +79,21 @@ static inline bool mutex_held(mutex_t *m)
 static inline void assert_mutex_held(mutex_t *m)
 {
 	assert(mutex_held(m));
+}
+
+/**
+ * mutex_queue_queue_us - returns queueing delay of mutex
+ * @m: the mutex to return queueing delay
+ */
+
+static inline uint64_t mutex_queue_us(mutex_t *m)
+{
+	uint64_t now = rdtsc();
+
+	if (m->oldest_tsc > now)
+		return 0;
+	else
+		return (now - m->oldest_tsc) / cycles_per_us;
 }
 
 
