@@ -24,13 +24,13 @@
 #define SRPC_MAX_WINDOW_EXP	6
 #define SRPC_MAX_WINDOW		64
 /* the minimum runtime queuing delay */
-#define SRPC_MIN_DELAY_US	80
-#define SRPC_DROP_THRESH	160
+#define SRPC_MIN_DELAY_US	100
+#define SRPC_DROP_THRESH	200
 /* round trip time in us */
 #define SRPC_RTT_US		10
 
 #define SRPC_AI			0.002
-#define SRPC_MD			0.2
+#define SRPC_MD			0.008
 
 #define SRPC_TRACK_FLOW		false
 #define SRPC_TRACK_FLOW_ID	1
@@ -290,7 +290,7 @@ static void srpc_update_window(struct srpc_session *s, bool req_dropped)
 		return;
 
 	open_window = win_avail - win_used;
-	max_overprovision = ((int)(open_window / num_sess), 1);
+	max_overprovision = MAX((int)(open_window / num_sess), 1);
 	if (win_used < win_avail) {
 		s->win = MIN(s->num_pending + s->demand + max_overprovision,
 			     s->win + open_window);
