@@ -27,6 +27,9 @@ extern "C" {
 #include <utility>
 #include <vector>
 
+#define REPORT_TIME_SERIES 0
+#define TIME_SERIES_GRAN 10000
+
 #include <ctime>
 std::time_t timex;
 
@@ -49,6 +52,9 @@ double st;
 
 std::ofstream json_out;
 std::ofstream csv_out;
+#if REPORT_TIME_SERIES
+std::ofstream tseries_out;
+#endif
 
 int total_agents = 1;
 // number of iterations required for 1us on target server
@@ -731,6 +737,75 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
     << "," << cs->offered_rps << "," << "-" << std::endl;
     return;
   }
+#if REPORT_TIME_SERIES
+  // Sort by start time
+  std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
+    return s1.start_us < s2.start_us;
+  });
+
+  double wallclock = 10000.0;
+  std::vector<work_unit> w_;
+
+  for (const work_unit& u : w) {
+    if (u.start_us > kWarmUpTime + wallclock) {
+      // compute throughput
+      double wcount = static_cast<double>(w_.size());
+      if (wcount > 0.0) {
+        double throughput = wcount / ((double)TIME_SERIES_GRAN / 1000000.0);
+
+        // compute goodput
+        double slo_success = static_cast<double>(std::count_if(w_.begin(), w_.end(), [](const work_unit &s) {
+          return s.duration_us < STRICT_SLO;
+        }));
+        double goodput = slo_success / ((double)TIME_SERIES_GRAN / 1000000.0);
+
+        // compute response time
+        std::sort(w_.begin(), w_.end(), [](const work_unit &s1, const work_unit &s2) {
+          return s1.duration_us < s2.duration_us;
+        });
+        double p50 = w_[wcount * 0.5].duration_us;
+        double p99 = w_[wcount * 0.99].duration_us;
+
+        // Report output
+        tseries_out << std::setprecision(4) << std::fixed << wallclock/1000000.0 << ","
+          << throughput << "," << goodput << "," << p50 << "," << p99
+	  << std::endl;
+      } else {
+        tseries_out << std::setprecision(4) << std::fixed << wallclock/1000000.0 << ","
+          << 0 << "," << 0 << "," << 0 << "," << 0
+	  << std::endl;
+      }
+      // Update Wallclock
+      wallclock += (double)TIME_SERIES_GRAN;
+      // Clear vector
+      w_.clear();
+    }
+    w_.push_back(u);
+  }
+
+  double wcount = static_cast<double>(w_.size());
+  if (wcount > 0.0) {
+    double throughput = wcount / ((double)TIME_SERIES_GRAN / 1000000.0);
+
+    // compute goodput
+    double slo_success = static_cast<double>(std::count_if(w_.begin(), w_.end(), [](const work_unit &s) {
+      return s.duration_us < STRICT_SLO;
+    }));
+    double goodput = slo_success / ((double)TIME_SERIES_GRAN / 1000000.0);
+
+    // compute response time
+    std::sort(w_.begin(), w_.end(), [](const work_unit &s1, const work_unit &s2) {
+      return s1.duration_us < s2.duration_us;
+    });
+    double p50 = w_[wcount * 0.5].duration_us;
+    double p99 = w_[wcount * 0.99].duration_us;
+
+    // Report output
+    tseries_out << std::setprecision(4) << std::fixed << wallclock/1000000.0 << ","
+      << throughput << "," << goodput << "," << p50 << "," << p99
+      << std::endl;
+  }
+#endif
 
   std::sort(w.begin(), w.end(), [](const work_unit &s1, const work_unit &s2) {
     return s1.duration_us < s2.duration_us;
@@ -1032,6 +1107,12 @@ void ClientHandler(void *arg) {
 	  std::to_string((int)(threads * total_agents)) + std::string(".csv");
   json_out.open(json_fname);
   csv_out.open(csv_fname);
+#if REPORT_TIME_SERIES
+  std::string tseries_fname = std::string("outputs/tseries_dist_exp_st_") +
+	  std::to_string((int)st) + std::string("_nconn_") +
+	  std::to_string((int)(threads * total_agents)) + std::string(".csv");
+  tseries_out.open(tseries_fname);
+#endif
   json_out << "[";
 
   /* Print Header */
@@ -1048,6 +1129,9 @@ void ClientHandler(void *arg) {
   json_out << "]";
   json_out.close();
   csv_out.close();
+#if REPORT_TIME_SERIES
+  tseries_out.close();
+#endif
 }
 
 }  // anonymous namespace
