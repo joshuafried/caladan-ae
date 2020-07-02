@@ -46,9 +46,11 @@ using sec = duration<double, std::micro>;
 // the number of worker threads to spawn.
 int threads;
 // the remote UDP address of the server.
-netaddr raddr, master;
+std::vector<netaddr> raddrs;
+netaddr master;
 // the mean service time in us.
 double st;
+int num_remote;
 
 std::ofstream json_out;
 std::ofstream csv_out;
@@ -170,7 +172,10 @@ class NetBarrier {
       conns.emplace_back(c);
       BUG_ON(c->WriteFull(&threads, sizeof(threads)) <= 0);
       BUG_ON(c->WriteFull(&st, sizeof(st)) <= 0);
-      BUG_ON(c->WriteFull(&raddr, sizeof(raddr)) <= 0);
+      BUG_ON(c->WriteFull(&num_remote, sizeof(num_remote)) <= 0);
+      for (int j = 0; j <= num_remote; ++j) {
+        BUG_ON(c->WriteFull(&raddrs[j], sizeof(raddrs[j])) <= 0);
+      }
       BUG_ON(c->WriteFull(&total_agents, sizeof(total_agents)) <= 0);
       for (size_t j = 0; j < npara; j++) {
         rt::TcpConn *c = aggregator_->Accept();
@@ -187,7 +192,12 @@ class NetBarrier {
     is_leader_ = false;
     BUG_ON(c->ReadFull(&threads, sizeof(threads)) <= 0);
     BUG_ON(c->ReadFull(&st, sizeof(st)) <= 0);
-    BUG_ON(c->ReadFull(&raddr, sizeof(raddr)) <= 0);
+    BUG_ON(c->ReadFull(&num_remote, sizeof(num_remote)) <= 0);
+    for(int i = 0; i < num_remote; ++i) {
+      netaddr raddr;
+      BUG_ON(c->ReadFull(&raddr, sizeof(raddr)) <= 0);
+      raddrs.push_back(raddr);
+    }
     BUG_ON(c->ReadFull(&total_agents, sizeof(total_agents)) <= 0);
     for (size_t i = 0; i < npara; i++) {
       auto c = rt::TcpConn::Dial({0, 0}, {master.ip, kBarrierPort + 1});
@@ -356,7 +366,7 @@ void RPCSStatServer() {
 
 sstat_raw ReadRPCSStat() {
   std::unique_ptr<rt::TcpConn> c(
-      rt::TcpConn::Dial({0, 0}, {raddr.ip, kRPCSStatPort}));
+      rt::TcpConn::Dial({0, 0}, {raddrs[0].ip, kRPCSStatPort}));
   uint64_t magic = hton64(kRPCSStatMagic);
   ssize_t ret = c->WriteFull(&magic, sizeof(magic));
   if (ret != static_cast<ssize_t>(sizeof(magic)))
@@ -374,7 +384,7 @@ shstat_raw ReadShenangoStat() {
   std::string buf;
   std::map<std::string, uint64_t> smap;
   std::unique_ptr<rt::TcpConn> c(
-      rt::TcpConn::Dial({0,0}, {raddr.ip, kShenangoStatPort}));
+      rt::TcpConn::Dial({0,0}, {raddrs[0].ip, kShenangoStatPort}));
   uint64_t magic = hton64(kShenangoStatMagic);
   ssize_t ret = c->WriteFull(&magic, sizeof(magic));
   if (ret != static_cast<ssize_t>(sizeof(magic)))
@@ -489,29 +499,32 @@ std::vector<work_unit> ClientWorker(
   std::vector<work_unit> w(wf());
   std::vector<uint64_t> timings;
   timings.reserve(w.size());
+  std::vector<rt::Thread> th;
 
   // Start the receiver thread.
-  auto th = rt::Thread([&] {
-    payload rp;
+  for(int i = 0; i < num_remote; ++i) {
+      th.emplace_back(rt::Thread([&, i] {
+      payload rp;
 
-    while (true) {
-      ssize_t ret = c->Recv(0, &rp, sizeof(rp));
-      if (ret != static_cast<ssize_t>(sizeof(rp))) {
-        if (ret == 0 || ret < 0) break;
-        panic("read failed, ret = %ld", ret);
+      while (true) {
+        ssize_t ret = c->Recv(i, &rp, sizeof(rp));
+        if (ret != static_cast<ssize_t>(sizeof(rp))) {
+          if (ret == 0 || ret < 0) break;
+          panic("read failed, ret = %ld", ret);
+        }
+
+        uint64_t now = microtime();
+        uint64_t idx = ntoh64(rp.index);
+        w[idx].duration_us = now - timings[idx];
+        w[idx].latency_us = w[idx].duration_us - w[idx].client_queue;
+        w[idx].window = c->WinAvail();
+        w[idx].tsc = ntoh64(rp.tsc_end);
+        w[idx].cpu = ntoh32(rp.cpu);
+        w[idx].server_queue = ntoh64(rp.server_queue);
+        w[idx].server_time = w[idx].work_us + w[idx].server_queue;
       }
-
-      uint64_t now = microtime();
-      uint64_t idx = ntoh64(rp.index);
-      w[idx].duration_us = now - timings[idx];
-      w[idx].latency_us = w[idx].duration_us - w[idx].client_queue;
-      w[idx].window = c->WinAvail();
-      w[idx].tsc = ntoh64(rp.tsc_end);
-      w[idx].cpu = ntoh32(rp.cpu);
-      w[idx].server_queue = ntoh64(rp.server_queue);
-      w[idx].server_time = w[idx].work_us + w[idx].server_queue;
-    }
-  });
+    }));
+  }
 
   // Synchronized start of load generation.
   starter->Done();
@@ -549,7 +562,8 @@ std::vector<work_unit> ClientWorker(
   // rt::Sleep(1 * rt::kSeconds);
   rt::Sleep((int)(kRTT + 2*st));
   BUG_ON(c->Shutdown(SHUT_RDWR));
-  th.Join();
+  for (auto& t: th)
+    t.Join();
 
   return w;
 }
@@ -563,9 +577,13 @@ std::vector<work_unit> RunExperiment(
   shstat_raw sh1, sh2;
 
   for (int i = 0; i < threads; ++i) {
-    std::unique_ptr<rt::RpcClient> outc(rt::RpcClient::Dial(raddr, i+1));
+    std::unique_ptr<rt::RpcClient> outc(rt::RpcClient::Dial(raddrs[0], i+1));
     if (unlikely(outc == nullptr)) panic("couldn't connect to raddr.");
-    conns.emplace_back(std::move(outc));
+    for (int j = 1; j < num_remote; ++j) {
+      outc->AddConnection(raddrs[j]);
+      printf("One more connection added.\n");
+    }
+    conns.push_back(std::move(outc));
   }
 
   // Launch a worker thread for each connection.
@@ -1138,6 +1156,7 @@ void ClientHandler(void *arg) {
 
 int main(int argc, char *argv[]) {
   int ret;
+  int i;
 
   if (argc < 3) {
     std::cerr << "usage: [cfg_file] [cmd] ..." << std::endl;
@@ -1169,23 +1188,29 @@ int main(int argc, char *argv[]) {
     return -EINVAL;
   }
 
-  if (argc < 6) {
-    std::cerr << "usage: [cfg_file] client [#threads] [remote_ip] [service_us] "
-                 "[npeers]"
+  if (argc < 8) {
+    std::cerr << "usage: [cfg_file] client [#threads] [service_us] "
+                 "[npeers] [num_remote] [remote IP #1] [remote IP ...] "
               << std::endl;
     return -EINVAL;
   }
 
   threads = std::stoi(argv[3], nullptr, 0);
 
-  ret = StringToAddr(argv[4], &raddr.ip);
-  if (ret) return -EINVAL;
-  raddr.port = kNetbenchPort;
+  st = std::stod(argv[4], nullptr);
+  total_agents += std::stoi(argv[5], nullptr, 0);
+  num_remote = std::stoi(argv[6], nullptr, 0);
 
-  st = std::stod(argv[5], nullptr);
+  for(i = 0; i < num_remote; ++i) {
+    netaddr raddr;
+    ret = StringToAddr(argv[7 + i], &raddr.ip);
+    if (ret) return -EINVAL;
+    raddr.port = kNetbenchPort;
+    raddrs.push_back(raddr);
+  }
 
-  if (argc > 6) total_agents += std::stoi(argv[6], nullptr, 0);
-  if (argc > 7) offered_load = std::stod(argv[7], nullptr);
+  if (argc > 7 + num_remote)
+    offered_load = std::stod(argv[7 + num_remote], nullptr);
 
   ret = runtime_init(argv[1], ClientHandler, NULL);
   if (ret) {

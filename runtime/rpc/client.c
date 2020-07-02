@@ -600,7 +600,14 @@ int crpc_add_conn(struct netaddr raddr, struct crpc_session *s)
 	cc->c = c;
 
 	/* add connection to session*/
-	s->c[s->num_conns++] = cc;
+	mutex_lock(&s->lock);
+	if (s->num_conns < CRPC_MAX_REPLICA) {
+		s->c[s->num_conns++] = cc;
+	} else {
+		tcp_close(c);
+		sfree(cc);
+	}
+	mutex_unlock(&s->lock);
 
 	return 0;
 }

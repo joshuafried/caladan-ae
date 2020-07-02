@@ -104,7 +104,7 @@ extern ssize_t crpc_recv_one(struct crpc_session *s, struct crpc_conn *cc,
 			     void *buf, size_t len);
 
 extern int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id);
-extern int crpc_add_replica(struct netaddr raddr, struct crpc_session *s);
+extern int crpc_add_conn(struct netaddr raddr, struct crpc_session *s);
 extern void crpc_close(struct crpc_session *s);
 
 /* client-side stats */

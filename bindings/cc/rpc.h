@@ -28,8 +28,9 @@ class RpcClient {
     return new RpcClient(s);
   }
 
-  int AddReplica(netaddr raddr) {
-    return crpc_add_replica(raddr, s_);
+  int AddConnection(netaddr raddr) {
+    raddr.port = SRPC_PORT;
+    return crpc_add_conn(raddr, s_);
   }
 
   // Sends an RPC request.
