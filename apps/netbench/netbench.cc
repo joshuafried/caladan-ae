@@ -173,10 +173,11 @@ class NetBarrier {
       BUG_ON(c->WriteFull(&threads, sizeof(threads)) <= 0);
       BUG_ON(c->WriteFull(&st, sizeof(st)) <= 0);
       BUG_ON(c->WriteFull(&num_remote, sizeof(num_remote)) <= 0);
-      for (int j = 0; j <= num_remote; ++j) {
+      for (int j = 0; j < num_remote; ++j) {
         BUG_ON(c->WriteFull(&raddrs[j], sizeof(raddrs[j])) <= 0);
       }
       BUG_ON(c->WriteFull(&total_agents, sizeof(total_agents)) <= 0);
+
       for (size_t j = 0; j < npara; j++) {
         rt::TcpConn *c = aggregator_->Accept();
         if (c == nullptr) panic("couldn't accept a connection");
