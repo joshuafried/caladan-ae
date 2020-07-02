@@ -66,7 +66,7 @@ constexpr uint64_t kWarmUpTime = 2000000;
 constexpr uint64_t kExperimentTime = 4000000;
 // RTT
 constexpr uint64_t kRTT = 10;
-constexpr int STRICT_SLO = 300;
+constexpr int STRICT_SLO = 200;
 
 std::vector<double> offered_loads;
 double offered_load;
@@ -582,7 +582,6 @@ std::vector<work_unit> RunExperiment(
     if (unlikely(outc == nullptr)) panic("couldn't connect to raddr.");
     for (int j = 1; j < num_remote; ++j) {
       outc->AddConnection(raddrs[j]);
-      printf("One more connection added.\n");
     }
     conns.push_back(std::move(outc));
   }
