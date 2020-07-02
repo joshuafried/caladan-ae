@@ -495,7 +495,7 @@ std::vector<work_unit> ClientWorker(
     payload rp;
 
     while (true) {
-      ssize_t ret = c->Recv(&rp, sizeof(rp));
+      ssize_t ret = c->Recv(0, &rp, sizeof(rp));
       if (ret != static_cast<ssize_t>(sizeof(rp))) {
         if (ret == 0 || ret < 0) break;
         panic("read failed, ret = %ld", ret);

@@ -10,7 +10,6 @@ extern "C" {
 #include <functional>
 
 namespace rt {
-
 class RpcClient {
  public:
   // The maximum size of an RPC request payload.
@@ -29,8 +28,9 @@ class RpcClient {
     return new RpcClient(s);
   }
 
-  // Is the session currently busy (will the next RPC be rejected)?
-  bool IsBusy() const { return crpc_is_busy(s_); }
+  int AddReplica(netaddr raddr) {
+    return crpc_add_replica(raddr, s_);
+  }
 
   // Sends an RPC request.
   ssize_t Send(const void *buf, size_t len, uint64_t *cque = nullptr) {
@@ -38,8 +38,8 @@ class RpcClient {
   }
 
   // Receives an RPC request.
-  ssize_t Recv(void *buf, size_t len) {
-    return crpc_recv_one(s_, buf, len);
+  ssize_t Recv(int conn_id, void *buf, size_t len) {
+    return crpc_recv_one(s_, s_->c[conn_id], buf, len);
   }
 
   uint32_t WinAvail() {
@@ -71,9 +71,24 @@ class RpcClient {
   }
 
   // Shuts down the RPC connection.
-  int Shutdown(int how) { return tcp_shutdown(s_->c, how); }
+  int Shutdown(int how) {
+    int i, ret;
+
+    for(i = 0; i < s_->num_conns; ++i) {
+      ret = tcp_shutdown(s_->c[i]->c, how);
+      if (ret)
+        return ret;
+    }
+
+    return 0;
+  }
   // Aborts the RPC connection.
-  void Abort() { return tcp_abort(s_->c); }
+  void Abort() {
+    int i;
+
+    for(i = 0; i < s_->num_conns; ++i)
+      tcp_abort(s_->c[i]->c);
+  }
 
   void Close() { crpc_close(s_); }
 

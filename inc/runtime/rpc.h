@@ -45,6 +45,7 @@ extern uint64_t srpc_stat_resp_tx();
  */
 
 #define CRPC_QLEN		16
+#define CRPC_MAX_REPLICA	4
 
 struct crpc_ctx {
 	size_t			len;
@@ -53,24 +54,12 @@ struct crpc_ctx {
 	char			buf[SRPC_BUF_SIZE];
 };
 
-struct crpc_session {
-	uint64_t		id;
-	uint64_t		req_id;
+struct crpc_conn {
 	tcpconn_t		*c;
-	mutex_t			lock;
-	waitgroup_t		timer_waiter;
-	bool			waiting_winupdate;
 	uint32_t		win_avail;
 	uint32_t		win_used;
-	bool			running;
-	bool			demand_sync;
-	condvar_t		timer_cv;
-	bool			init;
-
-	/* a queue of pending RPC requests */
-	uint32_t		head;
-	uint32_t		tail;
-	struct crpc_ctx		*qreq[CRPC_QLEN];
+	bool			waiting_winupdate;
+	mutex_t			lock;
 
 	/* client-side stats */
 	uint64_t		winu_rx_;
@@ -78,14 +67,44 @@ struct crpc_session {
 	uint64_t		resp_rx_;
 	uint64_t		req_tx_;
 	uint64_t		win_expired_;
+};
+
+struct crpc_session {
+	uint64_t		id;
+	uint64_t		req_id;
+	struct crpc_conn	*c[CRPC_MAX_REPLICA];
+	int			num_conns;
+	mutex_t			lock;
+	waitgroup_t		timer_waiter;
+//	bool			waiting_winupdate;
+//	uint32_t		win_avail;
+//	uint32_t		win_used;
+	bool			running;
+	bool			demand_sync;
+	condvar_t		timer_cv;
+	bool			init;
+
+	/* a queue of pending RPC requests */
+	uint64_t		head;
+	uint64_t		tail;
+	struct crpc_ctx		*qreq[CRPC_QLEN];
+
+	/* client-side stats */
+//	uint64_t		winu_rx_;
+//	uint64_t		winu_tx_;
+//	uint64_t		resp_rx_;
+//	uint64_t		req_tx_;
+//	uint64_t		win_expired_;
 	uint64_t		req_dropped_;
 };
 
 extern ssize_t crpc_send_one(struct crpc_session *s,
 			     const void *buf, size_t len, uint64_t *cque);
-extern ssize_t crpc_recv_one(struct crpc_session *s,
+extern ssize_t crpc_recv_one(struct crpc_session *s, struct crpc_conn *cc,
 			     void *buf, size_t len);
+
 extern int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id);
+extern int crpc_add_replica(struct netaddr raddr, struct crpc_session *s);
 extern void crpc_close(struct crpc_session *s);
 
 /* client-side stats */
@@ -96,12 +115,3 @@ extern uint64_t crpc_stat_winu_tx(struct crpc_session *s);
 extern uint64_t crpc_stat_resp_rx(struct crpc_session *s);
 extern uint64_t crpc_stat_req_tx(struct crpc_session *s);
 extern uint64_t crpc_stat_req_dropped(struct crpc_session *s);
-
-/**
- * crpc_is_busy - is the session busy (unable to accept requests right now)
- * @s: the session to check
- */
-static inline bool crpc_is_busy(struct crpc_session *s)
-{
-	return s->win_avail <= s->win_used;
-}

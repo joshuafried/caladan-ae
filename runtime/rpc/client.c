@@ -25,11 +25,12 @@
  *
  * On success, returns 0. On failure returns standard socket errors (< 0)
  */
-ssize_t crpc_send_winupdate(struct crpc_session *s)
+ssize_t crpc_send_winupdate(struct crpc_session *s, struct crpc_conn *cc)
 {
         struct crpc_hdr chdr;
         ssize_t ret;
 
+	assert_mutex_held(&cc->lock);
 	assert_mutex_held(&s->lock);
 
 	/* construct the client header */
@@ -41,23 +42,23 @@ ssize_t crpc_send_winupdate(struct crpc_session *s)
 	chdr.sync = s->demand_sync;
 
 	/* send the request */
-	ret = tcp_write_full(s->c, &chdr, sizeof(chdr));
+	ret = tcp_write_full(cc->c, &chdr, sizeof(chdr));
 	if (unlikely(ret < 0))
 		return ret;
 
 	assert(ret == sizeof(chdr));
-	s->winu_tx_++;
+	cc->winu_tx_++;
 
 #if CRPC_TRACK_FLOW
 	if (s->id == CRPC_TRACK_FLOW_ID) {
 		printf("[%lu] <=== winupdate: demand = %lu, win = %u/%u\n",
-		       microtime(), chdr.demand, s->win_used, s->win_avail);
+		       microtime(), chdr.demand, cc->win_used, cc->win_avail);
 	}
 #endif
 	return 0;
 }
 
-static ssize_t crpc_send_request_vector(struct crpc_session *s)
+static ssize_t crpc_send_request_vector(struct crpc_session *s, struct crpc_conn *cc)
 {
 	struct crpc_hdr chdr[CRPC_QLEN];
 	struct iovec v[CRPC_QLEN * 2];
@@ -66,12 +67,13 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s)
 	ssize_t ret;
 	uint64_t now = microtime();
 
+	assert_mutex_held(&cc->lock);
 	assert_mutex_held(&s->lock);
 
-	if (s->head == s->tail || s->win_used >= s->win_avail)
+	if (s->head == s->tail || cc->win_used >= cc->win_avail)
 		return 0;
 
-	while (s->head != s->tail && s->win_used < s->win_avail) {
+	while (s->head != s->tail && cc->win_used < cc->win_avail) {
 		struct crpc_ctx *c = s->qreq[s->tail++ % CRPC_QLEN];
 
 		chdr[nrhdr].magic = RPC_REQ_MAGIC;
@@ -92,7 +94,7 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s)
 		}
 		*c->cque = now - *c->cque;
 
-		s->win_used++;
+		cc->win_used++;
 	}
 
 	if (s->head == s->tail) {
@@ -100,14 +102,14 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s)
 		s->tail = 0;
 	}
 
-	ret = tcp_writev_full(s->c, v, nriov);
+	ret = tcp_writev_full(cc->c, v, nriov);
 
-	s->req_tx_ += nrhdr;
+	cc->req_tx_ += nrhdr;
 
 #if CRPC_TRACK_FLOW
 	if (s->id == CRPC_TRACK_FLOW_ID) {
 		printf("[%lu] <=== request (%d): qlen=%d win=%d/%d\n",
-		       microtime(), nrhdr, s->head-s->tail, s->win_used, s->win_avail);
+		       microtime(), nrhdr, s->head-s->tail, cc->win_used, cc->win_avail);
 	}
 #endif
 
@@ -116,7 +118,7 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s)
 	return 0;
 }
 
-static ssize_t crpc_send_raw(struct crpc_session *s,
+static ssize_t crpc_send_raw(struct crpc_session *s, struct crpc_conn *cc,
 			     const void *buf, size_t len,
 			     uint64_t id)
 {
@@ -139,39 +141,41 @@ static ssize_t crpc_send_raw(struct crpc_session *s,
 	vec[1].iov_len = len;
 
 	/* send the request */
-	ret = tcp_writev_full(s->c, vec, 2);
+	ret = tcp_writev_full(cc->c, vec, 2);
 	if (unlikely(ret < 0))
 		return ret;
 	assert(ret == sizeof(chdr) + len);
-	s->req_tx_++;
+	cc->req_tx_++;
 
 #if CRPC_TRACK_FLOW
 	if (s->id == CRPC_TRACK_FLOW_ID) {
 		printf("[%lu] <=== request: id=%lu, demand = %lu, win = %u/%u\n",
-		       microtime(), chdr.id, chdr.demand, s->win_used, s->win_avail);
+		       microtime(), chdr.id, chdr.demand, cc->win_used, cc->win_avail);
 	}
 #endif
 	return len;
 }
 
-static void crpc_drain_queue(struct crpc_session *s)
+static void crpc_drain_queue(struct crpc_session *s, struct crpc_conn *cc)
 {
 	ssize_t ret;
 	int pos;
 	struct crpc_ctx *c;
 	uint64_t now = microtime();
 
+	assert_mutex_held(&cc->lock);
 	assert_mutex_held(&s->lock);
 
-	if (s->head == s->tail || s->waiting_winupdate)
+	if (s->head == s->tail || cc->waiting_winupdate)
 		return;
-
+/*
 	if (s->win_avail == 0 && s->demand_sync) {
 		s->waiting_winupdate = true;
 		crpc_send_winupdate(s);
 		return;
 	}
-
+*/
+	s->req_dropped_++;
 	while (s->head != s->tail) {
 		pos = s->tail % CRPC_QLEN;
 		c = s->qreq[pos];
@@ -179,7 +183,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 			break;
 
 		s->tail++;
-		s->req_dropped_++;
+
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
 			printf("[%lu] request dropped: id=%lu, qlen = %d\n",
@@ -188,7 +192,7 @@ static void crpc_drain_queue(struct crpc_session *s)
 #endif
 	}
 
-	crpc_send_request_vector(s);
+	crpc_send_request_vector(s, cc);
 }
 
 static bool crpc_enqueue_one(struct crpc_session *s,
@@ -198,11 +202,12 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	struct crpc_ctx *c;
 	uint64_t now = microtime();
 	int num_drops = 0;
+	int i;
 
 	assert_mutex_held(&s->lock);
 
 	/* if the queue is full, drop tail */
-	if (s->head - s->tail >= CRPC_QLEN) {
+	if (s->head >= s->tail + CRPC_QLEN) {
 		s->tail++;
 		s->req_dropped_++;
 #if CRPC_TRACK_FLOW
@@ -223,15 +228,20 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 
 #if CRPC_TRACK_FLOW
 	if (s->id == CRPC_TRACK_FLOW_ID) {
-		printf("[%lu] request enqueued: id=%lu, qlen = %d, waiting_winupdate=%d\n",
-		       now, c->id, s->head - s->tail, s->waiting_winupdate);
+		printf("[%lu] request enqueued: id=%lu, qlen = %d\n",
+		       now, c->id, s->head - s->tail);
 	}
 #endif
 
 	// very first message
 	if (!s->init) {
-		crpc_send_winupdate(s);
-		s->waiting_winupdate = true;
+		for(i = 0; i < s->num_conns; ++i) {
+			struct crpc_conn *cc = s->c[i];
+			mutex_lock(&cc->lock);
+			crpc_send_winupdate(s, cc);
+			cc->waiting_winupdate = true;
+			mutex_unlock(&cc->lock);
+		}
 		s->init = true;
 	}
 
@@ -260,29 +270,39 @@ ssize_t crpc_send_one(struct crpc_session *s,
 {
 	ssize_t ret;
 	uint64_t now = microtime();
+	int i;
+	struct crpc_conn *cc;
 
 	/* implementation is currently limited to a maximum payload size */
 	if (unlikely(len > SRPC_BUF_SIZE))
 		return -E2BIG;
 
 	mutex_lock(&s->lock);
-
 	/* hot path, just send */
-	if (s->win_used < s->win_avail && s->head == s->tail) {
-		s->win_used++;
-		*cque = 0;
-		ret = crpc_send_raw(s, buf, len, s->req_id++);
-		mutex_unlock(&s->lock);
-		return ret;
+	if (s->head == s->tail) {
+		for(i = 0; i < s->num_conns; ++i) {
+			cc = s->c[i];
+			mutex_lock(&cc->lock);
+			if (cc->win_used < cc->win_avail) {
+				cc->win_used++;
+				*cque = 0;
+				ret = crpc_send_raw(s, cc, buf, len, s->req_id++);
+				mutex_unlock(&cc->lock);
+				mutex_unlock(&s->lock);
+				return ret;
+			}
+			mutex_unlock(&cc->lock);
+		}
 	}
 
 	/* cold path, enqueue request and drain the queue */
-	if (!crpc_enqueue_one(s, buf, len, cque)) {
-		crpc_drain_queue(s);
-		mutex_unlock(&s->lock);
-		return -ENOBUFS;
+	crpc_enqueue_one(s, buf, len, cque);
+	for(i = 0; i < s->num_conns; ++i) {
+		cc = s->c[i];
+		mutex_lock(&cc->lock);
+		crpc_drain_queue(s, cc);
+		mutex_unlock(&cc->lock);
 	}
-	crpc_drain_queue(s);
 	mutex_unlock(&s->lock);
 
 	return len;
@@ -299,7 +319,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
  * On success, returns the length received in bytes. On failure returns standard
  * socket errors (<= 0).
  */
-ssize_t crpc_recv_one(struct crpc_session *s, void *buf, size_t len)
+ssize_t crpc_recv_one(struct crpc_session *s, struct crpc_conn *cc, void *buf, size_t len)
 {
 	struct srpc_hdr shdr;
 	ssize_t ret;
@@ -307,7 +327,7 @@ ssize_t crpc_recv_one(struct crpc_session *s, void *buf, size_t len)
 
 again:
 	/* read the server header */
-	ret = tcp_read_full(s->c, &shdr, sizeof(shdr));
+	ret = tcp_read_full(cc->c, &shdr, sizeof(shdr));
 	if (unlikely(ret <= 0))
 		return ret;
 	assert(ret == sizeof(shdr));
@@ -327,30 +347,32 @@ again:
 	case RPC_OP_CALL:
 		/* read the payload */
 		if (shdr.len > 0) {
-			ret = tcp_read_full(s->c, buf, shdr.len);
+			ret = tcp_read_full(cc->c, buf, shdr.len);
 			if (unlikely(ret <= 0))
 				return ret;
 			assert(ret == shdr.len);
-			s->resp_rx_++;
+			cc->resp_rx_++;
 		}
 
 		/* update the window */
 		mutex_lock(&s->lock);
-		assert(s->win_used > 0);
-		s->win_used--;
-		s->win_avail = shdr.win;
-		s->waiting_winupdate = false;
+		mutex_lock(&cc->lock);
+		assert(cc->win_used > 0);
+		cc->win_used--;
+		cc->win_avail = shdr.win;
+		cc->waiting_winupdate = false;
 
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
 			printf("[%lu] ===> response: id=%lu, shdr.win=%lu, win=%u/%u\n",
-			       now, shdr.id, shdr.win, s->win_used, s->win_avail);
+			       now, shdr.id, shdr.win, cc->win_used, cc->win_avail);
 		}
 #endif
 
-		if (s->win_avail > 0) {
-			crpc_drain_queue(s);
+		if (cc->win_avail > 0) {
+			crpc_drain_queue(s, cc);
 		}
+		mutex_unlock(&cc->lock);
 		mutex_unlock(&s->lock);
 
 		if (shdr.len == 0)
@@ -366,21 +388,23 @@ again:
 
 		/* update the window */
 		mutex_lock(&s->lock);
-		s->win_avail = shdr.win;
-		s->waiting_winupdate = false;
+		mutex_lock(&cc->lock);
+		cc->win_avail = shdr.win;
+		cc->waiting_winupdate = false;
 
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
 			printf("[%lu] ===> Winupdate: shdr.win=%lu, win=%u/%u\n",
-			       microtime(), shdr.win, s->win_used, s->win_avail);
+			       microtime(), shdr.win, cc->win_used, cc->win_avail);
 		}
 #endif
 
-		if (s->win_avail > 0) {
-			crpc_drain_queue(s);
+		if (cc->win_avail > 0) {
+			crpc_drain_queue(s, cc);
 		}
+		cc->winu_rx_++;
+		mutex_unlock(&cc->lock);
 		mutex_unlock(&s->lock);
-		s->winu_rx_++;
 
 		goto again;
 	default:
@@ -430,10 +454,12 @@ static void crpc_timer(void *arg)
 
 		// If queue becomes empty
 		if (s->head == s->tail) {
+/*
 			if (num_drops > 0 && s->demand_sync) {
 				s->waiting_winupdate = false;
 				crpc_send_winupdate(s);
 			}
+*/
 			continue;
 		}
 
@@ -462,6 +488,7 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 {
 	struct netaddr laddr;
 	struct crpc_session *s;
+	struct crpc_conn *cc;
 	tcpconn_t *c;
 	int i, ret;
 
@@ -472,6 +499,7 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 	if (raddr.port != SRPC_PORT)
 		return -EINVAL;
 
+	/* establish connection */
 	ret = tcp_dial(laddr, raddr, &c);
 	if (ret)
 		return ret;
@@ -483,13 +511,27 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 	}
 	memset(s, 0, sizeof(*s));
 
+	cc = smalloc(sizeof(*cc));
+	if (!cc) {
+		tcp_close(c);
+		sfree(s);
+		return -ENOMEM;
+	}
+	memset(cc, 0, sizeof(*cc));
+
+	/* initialize connection */
+	mutex_init(&cc->lock);
+	cc->c = c;
+
+	/* initialize queue */
 	for (i = 0; i < CRPC_QLEN; ++i) {
 		s->qreq[i] = smalloc(sizeof(struct crpc_ctx));
 		if (!s->qreq[i])
 			goto fail;
 	}
 
-	s->c = c;
+	/* initialize session */
+	s->c[0] = cc;
 	mutex_init(&s->lock);
 	condvar_init(&s->timer_cv);
 	waitgroup_init(&s->timer_waiter);
@@ -499,6 +541,7 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 	if (id != -1)
 		s->id = id;
 	s->req_id = 1;
+	s->num_conns = 1;
 	*sout = s;
 
 	ret = thread_spawn(crpc_timer, s);
@@ -510,8 +553,56 @@ fail:
 	tcp_close(c);
 	for (i = i - 1; i >= 0; i--)
 		sfree(s->qreq[i]);
+	sfree(cc);
 	sfree(s);
 	return -ENOMEM;
+}
+
+/**
+ *
+ * crpc_add_conn - add a connection to a replica to a session
+ * @raddr: the remote address to connect to
+ * @s: the session to add replica
+ *
+ * Returns 0 if successful.
+ */
+int crpc_add_conn(struct netaddr raddr, struct crpc_session *s)
+{
+	struct netaddr laddr;
+	tcpconn_t *c;
+	struct crpc_conn *cc;
+	int i, ret;
+
+	/* set up ephemeral IP and port */
+	laddr.ip = 0;
+	laddr.port = 0;
+
+	if (s->num_conns >= CRPC_MAX_REPLICA)
+		return -ENOMEM;
+
+	if (raddr.port != SRPC_PORT)
+		return -EINVAL;
+
+	/* establish connection */
+	ret = tcp_dial(laddr, raddr, &c);
+	if (ret)
+		return ret;
+
+	cc = smalloc(sizeof(*cc));
+	if (!cc) {
+		tcp_close(c);
+		return -ENOMEM;
+	}
+	memset(cc, 0, sizeof(*cc));
+
+	/* initialize connection */
+	mutex_init(&cc->lock);
+	cc->c = c;
+
+	/* add connection to session*/
+	s->c[s->num_conns++] = cc;
+
+	return 0;
 }
 
 /**
@@ -523,6 +614,7 @@ fail:
 void crpc_close(struct crpc_session *s)
 {
 	int i;
+	struct crpc_conn *cc;
 
 	mutex_lock(&s->lock);
 	s->running = false;
@@ -531,7 +623,12 @@ void crpc_close(struct crpc_session *s)
 
 	waitgroup_wait(&s->timer_waiter);
 
-	tcp_close(s->c);
+	for(i = 0; i < s->num_conns; ++i) {
+		cc = s->c[i];
+		tcp_close(cc->c);
+		sfree(cc);
+	}
+
 	for(i = 0; i < CRPC_QLEN; ++i)
 		sfree(s->qreq[i]);
 	sfree(s);
@@ -540,32 +637,68 @@ void crpc_close(struct crpc_session *s)
 /* client-side stats */
 uint32_t crpc_win_avail(struct crpc_session *s)
 {
-	return s->win_avail;
+	uint32_t sum = 0;
+	int i;
+
+	for(i = 0; i < s->num_conns; ++i)
+		sum += s->c[i]->win_avail;
+
+	return sum;
 }
 
 uint64_t crpc_stat_win_expired(struct crpc_session *s)
 {
-	return s->win_expired_;
+	uint64_t sum = 0;
+	int i;
+
+	for(i = 0; i < s->num_conns; ++i)
+		sum += s->c[i]->win_expired_;
+
+	return sum;
 }
 
 uint64_t crpc_stat_winu_rx(struct crpc_session *s)
 {
-	return s->winu_rx_;
+	uint64_t sum = 0;
+	int i;
+
+	for(i = 0; i < s->num_conns; ++i)
+		sum += s->c[i]->winu_rx_;
+
+	return sum;
 }
 
 uint64_t crpc_stat_winu_tx(struct crpc_session *s)
 {
-	return s->winu_tx_;
+	uint64_t sum = 0;
+	int i;
+
+	for(i = 0; i < s->num_conns; ++i)
+		sum += s->c[i]->winu_tx_;
+
+	return sum;
 }
 
 uint64_t crpc_stat_resp_rx(struct crpc_session *s)
 {
-	return s->resp_rx_;
+	uint64_t sum = 0;
+	int i;
+
+	for(i = 0; i < s->num_conns; ++i)
+		sum += s->c[i]->resp_rx_;
+
+	return sum;
 }
 
 uint64_t crpc_stat_req_tx(struct crpc_session *s)
 {
-	return s->req_tx_;
+	uint64_t sum = 0;
+	int i;
+
+	for(i = 0; i < s->num_conns; ++i)
+		sum += s->c[i]->req_tx_;
+
+	return sum;
 }
 
 uint64_t crpc_stat_req_dropped(struct crpc_session *s)
