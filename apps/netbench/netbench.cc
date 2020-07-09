@@ -366,68 +366,110 @@ void RPCSStatServer() {
 }
 
 sstat_raw ReadRPCSStat() {
-  std::unique_ptr<rt::TcpConn> c(
-      rt::TcpConn::Dial({0, 0}, {raddrs[0].ip, kRPCSStatPort}));
-  uint64_t magic = hton64(kRPCSStatMagic);
-  ssize_t ret = c->WriteFull(&magic, sizeof(magic));
-  if (ret != static_cast<ssize_t>(sizeof(magic)))
-    panic("sstat request failed, ret = %ld", ret);
-  sstat_raw u;
-  ret = c->ReadFull(&u, sizeof(u));
-  if (ret != static_cast<ssize_t>(sizeof(u)))
-    panic("sstat response failed, ret = %ld", ret);
-  return sstat_raw{u.idle, u.busy, u.num_cores, u.max_cores, u.winu_rx,
-                   u.winu_tx, u.credit_tx, u.req_rx, u.req_dropped, u.resp_tx};
+  uint64_t idle = 0;
+  uint64_t busy = 0;
+  unsigned int num_cores = 0;
+  unsigned int max_cores = 0;
+  uint64_t winu_rx = 0;
+  uint64_t winu_tx = 0;
+  uint64_t credit_tx = 0;
+  uint64_t req_rx = 0;
+  uint64_t req_dropped = 0;
+  uint64_t resp_tx = 0;
+
+  for(int i = 0; i < num_remote; ++i) {
+    std::unique_ptr<rt::TcpConn> c(
+        rt::TcpConn::Dial({0, 0}, {raddrs[i].ip, kRPCSStatPort}));
+    uint64_t magic = hton64(kRPCSStatMagic);
+    ssize_t ret = c->WriteFull(&magic, sizeof(magic));
+    if (ret != static_cast<ssize_t>(sizeof(magic)))
+      panic("sstat request failed, ret = %ld", ret);
+    sstat_raw u;
+    ret = c->ReadFull(&u, sizeof(u));
+    if (ret != static_cast<ssize_t>(sizeof(u)))
+      panic("sstat response failed, ret = %ld", ret);
+    idle += u.idle;
+    busy += u.busy;
+    num_cores += u.num_cores;
+    max_cores += u.max_cores;
+    winu_rx += u.winu_rx;
+    winu_tx += u.winu_tx;
+    credit_tx += u.credit_tx;
+    req_rx += u.req_rx;
+    req_dropped += u.req_dropped;
+    resp_tx += u.resp_tx;
+  }
+
+  num_cores /= num_remote;
+  max_cores /= num_remote;
+
+  return sstat_raw{idle, busy, num_cores, max_cores, winu_rx,
+                   winu_tx, credit_tx, req_rx, req_dropped, resp_tx};
 }
 
 shstat_raw ReadShenangoStat() {
-  char *buf_;
-  std::string buf;
-  std::map<std::string, uint64_t> smap;
-  std::unique_ptr<rt::TcpConn> c(
-      rt::TcpConn::Dial({0,0}, {raddrs[0].ip, kShenangoStatPort}));
-  uint64_t magic = hton64(kShenangoStatMagic);
-  ssize_t ret = c->WriteFull(&magic, sizeof(magic));
-  if (ret != static_cast<ssize_t>(sizeof(magic)))
-    panic("Shenango stat request failed, ret = %ld", ret);
+  uint64_t rx_packets = 0;
+  uint64_t tx_packets = 0;
+  uint64_t rx_bytes = 0;
+  uint64_t tx_bytes = 0;
+  uint64_t drops = 0;
+  uint64_t rx_tcp_out_of_order = 0;
 
-  size_t resp_len;
-  ret = c->ReadFull(&resp_len, sizeof(resp_len));
-  if (ret != static_cast<ssize_t>(sizeof(resp_len)))
-    panic("Shenango stat response failed, ret = %ld", ret);
+  for (int i = 0; i < num_remote; ++i) {
+    char *buf_;
+    std::string buf;
+    std::map<std::string, uint64_t> smap;
+    std::unique_ptr<rt::TcpConn> c(
+        rt::TcpConn::Dial({0,0}, {raddrs[0].ip, kShenangoStatPort}));
+    uint64_t magic = hton64(kShenangoStatMagic);
+    ssize_t ret = c->WriteFull(&magic, sizeof(magic));
+    if (ret != static_cast<ssize_t>(sizeof(magic)))
+      panic("Shenango stat request failed, ret = %ld", ret);
 
-  buf_ = (char *)malloc(resp_len);
+    size_t resp_len;
+    ret = c->ReadFull(&resp_len, sizeof(resp_len));
+    if (ret != static_cast<ssize_t>(sizeof(resp_len)))
+      panic("Shenango stat response failed, ret = %ld", ret);
 
-  ret = c->ReadFull(buf_, resp_len);
-  if (ret != static_cast<ssize_t>(resp_len))
-    panic("Shenango stat response failed, ret = %ld", ret);
+    buf_ = (char *)malloc(resp_len);
 
-  buf = std::string(buf_);
+    ret = c->ReadFull(buf_, resp_len);
+    if (ret != static_cast<ssize_t>(resp_len))
+      panic("Shenango stat response failed, ret = %ld", ret);
 
-  size_t pos_com = 0;
-  size_t pos_col = 0;
-  std::string token;
-  std::string key;
-  uint64_t value;
+    buf = std::string(buf_);
 
-  while ((pos_com = buf.find(",")) != std::string::npos) {
-    token = buf.substr(0, pos_com);
-    pos_col = token.find(":");
-    if (pos_col == std::string::npos)
-      continue;
+    size_t pos_com = 0;
+    size_t pos_col = 0;
+    std::string token;
+    std::string key;
+    uint64_t value;
 
-    key = token.substr(0, pos_col);
-    value = std::stoull(token.substr(pos_col+1, pos_com));
+    while ((pos_com = buf.find(",")) != std::string::npos) {
+      token = buf.substr(0, pos_com);
+      pos_col = token.find(":");
+      if (pos_col == std::string::npos)
+        continue;
 
-    smap[key] = value;
+      key = token.substr(0, pos_col);
+      value = std::stoull(token.substr(pos_col+1, pos_com));
 
-    buf.erase(0, pos_com + 1);
+      smap[key] = value;
+
+      buf.erase(0, pos_com + 1);
+    }
+
+    free(buf_);
+    rx_packets += smap["rx_packets"];
+    tx_packets += smap["tx_packets"];
+    rx_bytes += smap["rx_bytes"];
+    tx_bytes += smap["tx_bytes"];
+    drops += smap["drops"];
+    rx_tcp_out_of_order += smap["rx_tcp_out_of_order"];
   }
 
-  free(buf_);
-
-  return shstat_raw{smap["rx_packets"], smap["tx_packets"], smap["rx_bytes"],
-	            smap["tx_bytes"], smap["drops"], smap["rx_tcp_out_of_order"]};
+  return shstat_raw{rx_packets, tx_packets, rx_bytes,
+	            tx_bytes, drops, rx_tcp_out_of_order};
 }
 
 constexpr uint64_t kNetbenchPort = 8001;
