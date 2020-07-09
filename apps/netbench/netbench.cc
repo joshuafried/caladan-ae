@@ -83,7 +83,7 @@ struct sstat_raw {
   unsigned int max_cores;
   uint64_t winu_rx;
   uint64_t winu_tx;
-  uint64_t win_tx;
+  uint64_t credit_tx;
   uint64_t req_rx;
   uint64_t req_dropped;
   uint64_t resp_tx;
@@ -110,7 +110,7 @@ struct sstat {
   double rx_ooo_pps;
   double winu_rx_pps;
   double winu_tx_pps;
-  double win_tx_wps;
+  double credit_tx_cps;
   double req_rx_pps;
   double req_drop_rate;
   double resp_tx_pps;
@@ -339,7 +339,7 @@ void RPCSStatWorker(std::unique_ptr<rt::TcpConn> c) {
 	           static_cast<unsigned int>(sysconf(_SC_NPROCESSORS_ONLN)),
 	           rt::RpcServerStatWinuRx(),
 	           rt::RpcServerStatWinuTx(),
-		   rt::RpcServerStatWinTx(),
+		   rt::RpcServerStatCreditTx(),
 	           rt::RpcServerStatReqRx(),
 		   rt::RpcServerStatReqDropped(),
 	           rt::RpcServerStatRespTx()};
@@ -377,7 +377,7 @@ sstat_raw ReadRPCSStat() {
   if (ret != static_cast<ssize_t>(sizeof(u)))
     panic("sstat response failed, ret = %ld", ret);
   return sstat_raw{u.idle, u.busy, u.num_cores, u.max_cores, u.winu_rx,
-                   u.winu_tx, u.win_tx, u.req_rx, u.req_dropped, u.resp_tx};
+                   u.winu_tx, u.credit_tx, u.req_rx, u.req_dropped, u.resp_tx};
 }
 
 shstat_raw ReadShenangoStat() {
@@ -704,13 +704,13 @@ std::vector<work_unit> RunExperiment(
 
     uint64_t winu_rx_pkts = s2.winu_rx - s1.winu_rx;
     uint64_t winu_tx_pkts = s2.winu_tx - s1.winu_tx;
-    uint64_t win_tx_wins = s2.win_tx - s1.win_tx;
+    uint64_t credit_tx_credits = s2.credit_tx - s1.credit_tx;
     uint64_t req_rx_pkts = s2.req_rx - s1.req_rx;
     uint64_t req_drop_pkts = s2.req_dropped - s1.req_dropped;
     uint64_t resp_tx_pkts = s2.resp_tx - s1.resp_tx;
     ss->winu_rx_pps = static_cast<double>(winu_rx_pkts) / elapsed_ * 1000000;
     ss->winu_tx_pps = static_cast<double>(winu_tx_pkts) / elapsed_ * 1000000;
-    ss->win_tx_wps = static_cast<double>(win_tx_wins) / elapsed_ * 1000000;
+    ss->credit_tx_cps = static_cast<double>(credit_tx_credits) / elapsed_ * 1000000;
     ss->req_rx_pps = static_cast<double>(req_rx_pkts) / elapsed_ * 1000000;
     ss->req_drop_rate = static_cast<double>(req_drop_pkts) / static_cast<double>(req_rx_pkts);
     ss->resp_tx_pps = static_cast<double>(resp_tx_pkts) / elapsed_ * 1000000;
@@ -742,7 +742,7 @@ void PrintHeader(std::ostream& os) {
      << "mean_q," << "p99_q," << "mean_stime," << "p99_stime," << "server:rx_pps,"
      << "server:tx_pps," << "server:rx_bps," << "server:tx_bps," << "server:rx_drops_pps,"
      << "server:rx_ooo_pps," << "server:winu_rx_pps," << "server:winu_tx_pps,"
-     << "server:win_tx_wps," << "server:req_rx_pps," << "server:req_drop_rate,"
+     << "server:credit_tx_cps," << "server:req_rx_pps," << "server:req_drop_rate,"
      << "server:resp_tx_pps," << "client:min_tput," << "client:max_tput," << "client:winu_rx_pps,"
      << "client:winu_tx_pps," << "client:resp_rx_pps," << "client:req_tx_pps,"
      << "client:win_expired_wps," << "client:req_dropped_rps" << std::endl;
@@ -902,7 +902,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << ss->rx_bps << "," << ss->tx_bps << ","
       << ss->rx_drops_pps << "," << ss->rx_ooo_pps << ","
       << ss->winu_rx_pps << "," << ss->winu_tx_pps << ","
-      << ss->win_tx_wps << "," << ss->req_rx_pps << ","
+      << ss->credit_tx_cps << "," << ss->req_rx_pps << ","
       << ss->req_drop_rate << ","<< ss->resp_tx_pps << ","
       << cs->min_percli_tput << "," << cs->max_percli_tput << ","
       << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
@@ -920,7 +920,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
       << p99_stime << "," << ss->rx_pps << "," << ss->tx_pps << ","
       << ss->rx_bps << "," << ss->tx_bps << "," << ss->rx_drops_pps << ","
       << ss->rx_ooo_pps << "," << ss->winu_rx_pps << "," << ss->winu_tx_pps << ","
-      << ss->win_tx_wps << "," << ss->req_rx_pps << ","
+      << ss->credit_tx_cps << "," << ss->req_rx_pps << ","
       << ss->req_drop_rate << "," << ss->resp_tx_pps << ","
       << cs->min_percli_tput << "," << cs->max_percli_tput << ","
       << mean_cque << "," << cs->winu_rx_pps << "," << cs->resp_rx_pps << ","
@@ -965,7 +965,7 @@ void PrintStatResults(std::vector<work_unit> w, struct cstat *cs,
 	   << "\"server:rx_ooo_pps\":" << ss->rx_ooo_pps << ","
 	   << "\"server:winu_rx_pps\":" << ss->winu_rx_pps << ","
 	   << "\"server:winu_tx_pps\":" << ss->winu_tx_pps << ","
-	   << "\"server:win_tx_wps\":" << ss->win_tx_wps << ","
+	   << "\"server:credit_tx_cps\":" << ss->credit_tx_cps << ","
 	   << "\"server:req_rx_pps\":" << ss->req_rx_pps << ","
 	   << "\"server:req_drop_rate\":" << ss->req_drop_rate << ","
 	   << "\"server:resp_tx_pps\":" << ss->resp_tx_pps << ","

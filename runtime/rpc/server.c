@@ -130,7 +130,7 @@ struct srpc_session {
 /* credit-related stats */
 atomic64_t srpc_stat_winu_rx_;
 atomic64_t srpc_stat_winu_tx_;
-atomic64_t srpc_stat_win_tx_;
+atomic64_t srpc_stat_credit_tx_;
 atomic64_t srpc_stat_req_rx_;
 atomic64_t srpc_stat_req_dropped_;
 atomic64_t srpc_stat_resp_tx_;
@@ -209,7 +209,6 @@ static int srpc_winupdate(struct srpc_session *s)
 		return ret;
 
 	atomic64_inc(&srpc_stat_winu_tx_);
-	atomic64_fetch_and_add(&srpc_stat_win_tx_, shdr.win);
 
 #if SRPC_TRACK_FLOW
 	if (s->id == SRPC_TRACK_FLOW_ID) {
@@ -267,7 +266,6 @@ static int srpc_send_completion_vector(struct srpc_session *s,
 #endif
 	atomic_sub_and_fetch(&srpc_num_pending, nrhdr);
 	atomic64_fetch_and_add(&srpc_stat_resp_tx_, nrhdr);
-	atomic64_fetch_and_add(&srpc_stat_win_tx_, s->win * nrhdr);
 
 	if (unlikely(ret < 0))
 		return ret;
@@ -319,6 +317,8 @@ static void srpc_update_window(struct srpc_session *s, bool req_dropped)
 finish:
 	win_diff = s->win - old_win;
 	atomic_fetch_and_add(&srpc_win_used, win_diff);
+	atomic64_fetch_and_add(&srpc_stat_credit_tx_, win_diff + 1);
+
 #if SRPC_TRACK_FLOW
 	if (s->id == SRPC_TRACK_FLOW_ID) {
 		printf("[%lu] window update: win_avail = %d, win_used = %d, req_dropped = %d, num_pending = %d, demand = %d, num_sess = %d, old_win = %d, new_win = %d\n",
@@ -1016,9 +1016,9 @@ uint64_t srpc_stat_winu_tx()
 	return atomic64_read(&srpc_stat_winu_tx_);
 }
 
-uint64_t srpc_stat_win_tx()
+uint64_t srpc_stat_credit_tx()
 {
-	return atomic64_read(&srpc_stat_win_tx_);
+	return atomic64_read(&srpc_stat_credit_tx_);
 }
 
 uint64_t srpc_stat_req_rx()

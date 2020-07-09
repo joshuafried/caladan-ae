@@ -35,7 +35,7 @@ typedef void (*srpc_fn_t)(struct srpc_ctx *ctx);
 extern int srpc_enable(srpc_fn_t handler);
 extern uint64_t srpc_stat_winu_rx();
 extern uint64_t srpc_stat_winu_tx();
-extern uint64_t srpc_stat_win_tx();
+extern uint64_t srpc_stat_credit_tx();
 extern uint64_t srpc_stat_req_rx();
 extern uint64_t srpc_stat_req_dropped();
 extern uint64_t srpc_stat_resp_tx();

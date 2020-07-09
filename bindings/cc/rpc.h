@@ -106,7 +106,7 @@ int RpcServerEnable(std::function<void(struct srpc_ctx *)> f);
 
 uint64_t RpcServerStatWinuRx();
 uint64_t RpcServerStatWinuTx();
-uint64_t RpcServerStatWinTx();
+uint64_t RpcServerStatCreditTx();
 uint64_t RpcServerStatReqRx();
 uint64_t RpcServerStatReqDropped();
 uint64_t RpcServerStatRespTx();

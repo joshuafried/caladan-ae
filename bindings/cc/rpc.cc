@@ -27,8 +27,8 @@ uint64_t RpcServerStatWinuTx() {
   return srpc_stat_winu_tx();
 }
 
-uint64_t RpcServerStatWinTx() {
-  return srpc_stat_win_tx();
+uint64_t RpcServerStatCreditTx() {
+  return srpc_stat_credit_tx();
 }
 
 uint64_t RpcServerStatReqRx() {
