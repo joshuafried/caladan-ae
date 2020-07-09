@@ -30,7 +30,6 @@ ssize_t crpc_send_winupdate(struct crpc_session *s, struct crpc_conn *cc)
         struct crpc_hdr chdr;
         ssize_t ret;
 
-	assert_mutex_held(&cc->lock);
 	assert_mutex_held(&s->lock);
 
 	/* construct the client header */
@@ -67,7 +66,6 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s, struct crpc_conn
 	ssize_t ret;
 	uint64_t now = microtime();
 
-	assert_mutex_held(&cc->lock);
 	assert_mutex_held(&s->lock);
 
 	if (s->head == s->tail || cc->win_used >= cc->win_avail)
@@ -163,7 +161,6 @@ static void crpc_drain_queue(struct crpc_session *s, struct crpc_conn *cc)
 	struct crpc_ctx *c;
 	uint64_t now = microtime();
 
-	assert_mutex_held(&cc->lock);
 	assert_mutex_held(&s->lock);
 
 	if (s->head == s->tail || cc->waiting_winupdate)
@@ -237,10 +234,8 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 	if (!s->init) {
 		for(i = 0; i < s->num_conns; ++i) {
 			struct crpc_conn *cc = s->c[i];
-			mutex_lock(&cc->lock);
 			crpc_send_winupdate(s, cc);
 			cc->waiting_winupdate = true;
-			mutex_unlock(&cc->lock);
 		}
 		s->init = true;
 	}
@@ -282,16 +277,13 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	if (s->head == s->tail) {
 		for(i = 0; i < s->num_conns; ++i) {
 			cc = s->c[i];
-			mutex_lock(&cc->lock);
 			if (cc->win_used < cc->win_avail) {
 				cc->win_used++;
 				*cque = 0;
 				ret = crpc_send_raw(s, cc, buf, len, s->req_id++);
-				mutex_unlock(&cc->lock);
 				mutex_unlock(&s->lock);
 				return ret;
 			}
-			mutex_unlock(&cc->lock);
 		}
 	}
 
@@ -299,9 +291,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	crpc_enqueue_one(s, buf, len, cque);
 	for(i = 0; i < s->num_conns; ++i) {
 		cc = s->c[i];
-		mutex_lock(&cc->lock);
 		crpc_drain_queue(s, cc);
-		mutex_unlock(&cc->lock);
 	}
 	mutex_unlock(&s->lock);
 
@@ -356,7 +346,6 @@ again:
 
 		/* update the window */
 		mutex_lock(&s->lock);
-		mutex_lock(&cc->lock);
 		assert(cc->win_used > 0);
 		cc->win_used--;
 		cc->win_avail = shdr.win;
@@ -372,7 +361,6 @@ again:
 		if (cc->win_avail > 0) {
 			crpc_drain_queue(s, cc);
 		}
-		mutex_unlock(&cc->lock);
 		mutex_unlock(&s->lock);
 
 		if (shdr.len == 0)
@@ -388,7 +376,6 @@ again:
 
 		/* update the window */
 		mutex_lock(&s->lock);
-		mutex_lock(&cc->lock);
 		cc->win_avail = shdr.win;
 		cc->waiting_winupdate = false;
 
@@ -403,7 +390,6 @@ again:
 			crpc_drain_queue(s, cc);
 		}
 		cc->winu_rx_++;
-		mutex_unlock(&cc->lock);
 		mutex_unlock(&s->lock);
 
 		goto again;
@@ -520,7 +506,6 @@ int crpc_open(struct netaddr raddr, struct crpc_session **sout, int id)
 	memset(cc, 0, sizeof(*cc));
 
 	/* initialize connection */
-	mutex_init(&cc->lock);
 	cc->c = c;
 
 	/* initialize queue */
@@ -596,7 +581,6 @@ int crpc_add_conn(struct netaddr raddr, struct crpc_session *s)
 	memset(cc, 0, sizeof(*cc));
 
 	/* initialize connection */
-	mutex_init(&cc->lock);
 	cc->c = c;
 
 	/* add connection to session*/

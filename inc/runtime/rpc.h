@@ -59,7 +59,6 @@ struct crpc_conn {
 	uint32_t		win_avail;
 	uint32_t		win_used;
 	bool			waiting_winupdate;
-	mutex_t			lock;
 
 	/* client-side stats */
 	uint64_t		winu_rx_;
