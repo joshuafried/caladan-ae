@@ -50,7 +50,7 @@ extern uint64_t srpc_stat_resp_tx();
 struct crpc_ctx {
 	size_t			len;
 	uint64_t		id;
-	uint64_t		*cque;
+	uint64_t		cqdel;
 	char			buf[SRPC_BUF_SIZE];
 };
 
@@ -98,7 +98,7 @@ struct crpc_session {
 };
 
 extern ssize_t crpc_send_one(struct crpc_session *s,
-			     const void *buf, size_t len, uint64_t *cque);
+			     const void *buf, size_t len);
 extern ssize_t crpc_recv_one(struct crpc_session *s, struct crpc_conn *cc,
 			     void *buf, size_t len);
 

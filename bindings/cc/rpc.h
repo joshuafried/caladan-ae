@@ -34,8 +34,8 @@ class RpcClient {
   }
 
   // Sends an RPC request.
-  ssize_t Send(const void *buf, size_t len, uint64_t *cque = nullptr) {
-    return crpc_send_one(s_, buf, len, cque);
+  ssize_t Send(const void *buf, size_t len) {
+    return crpc_send_one(s_, buf, len);
   }
 
   // Receives an RPC request.

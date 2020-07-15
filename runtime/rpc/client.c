@@ -90,7 +90,7 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s, struct crpc_conn
 			v[nriov].iov_base = c->buf;
 			v[nriov++].iov_len = c->len;
 		}
-		*c->cque = now - *c->cque;
+		c->cqdel = now - c->cqdel;
 
 		cc->win_used++;
 	}
@@ -176,7 +176,7 @@ static void crpc_drain_queue(struct crpc_session *s, struct crpc_conn *cc)
 	while (s->head != s->tail) {
 		pos = s->tail % CRPC_QLEN;
 		c = s->qreq[pos];
-		if (now - *c->cque <= CRPC_MAX_CLIENT_DELAY_US)
+		if (now - c->cqdel <= CRPC_MAX_CLIENT_DELAY_US)
 			break;
 
 		s->tail++;
@@ -193,7 +193,7 @@ static void crpc_drain_queue(struct crpc_session *s, struct crpc_conn *cc)
 }
 
 static bool crpc_enqueue_one(struct crpc_session *s,
-			     const void *buf, size_t len, uint64_t *cque)
+			     const void *buf, size_t len)
 {
 	int pos;
 	struct crpc_ctx *c;
@@ -217,11 +217,10 @@ static bool crpc_enqueue_one(struct crpc_session *s,
 
 	pos = s->head++ % CRPC_QLEN;
 	c = s->qreq[pos];
-	*cque = now;
 	memcpy(c->buf, buf, len);
 	c->id = s->req_id++;
 	c->len = len;
-	c->cque = cque;
+	c->cqdel = now;
 
 #if CRPC_TRACK_FLOW
 	if (s->id == CRPC_TRACK_FLOW_ID) {
@@ -261,7 +260,7 @@ static bool crpc_enqueue_one(struct crpc_session *s,
  * errors (< 0).
  */
 ssize_t crpc_send_one(struct crpc_session *s,
-		      const void *buf, size_t len, uint64_t *cque)
+		      const void *buf, size_t len)
 {
 	ssize_t ret;
 	uint64_t now = microtime();
@@ -279,7 +278,6 @@ ssize_t crpc_send_one(struct crpc_session *s,
 			cc = s->c[i];
 			if (cc->win_used < cc->win_avail) {
 				cc->win_used++;
-				*cque = 0;
 				ret = crpc_send_raw(s, cc, buf, len, s->req_id++);
 				mutex_unlock(&s->lock);
 				return ret;
@@ -288,7 +286,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	}
 
 	/* cold path, enqueue request and drain the queue */
-	crpc_enqueue_one(s, buf, len, cque);
+	crpc_enqueue_one(s, buf, len);
 	for(i = 0; i < s->num_conns; ++i) {
 		cc = s->c[i];
 		crpc_drain_queue(s, cc);
@@ -424,7 +422,7 @@ static void crpc_timer(void *arg)
 		while (s->head != s->tail) {
 			pos = s->tail % CRPC_QLEN;
 			c = s->qreq[pos];
-			if (now - *c->cque <= CRPC_MAX_CLIENT_DELAY_US)
+			if (now - c->cqdel <= CRPC_MAX_CLIENT_DELAY_US)
 				break;
 
 			s->tail++;
@@ -453,7 +451,7 @@ static void crpc_timer(void *arg)
 		pos = (s->head - 1) % CRPC_QLEN;
 		c = s->qreq[pos];
 		mutex_unlock(&s->lock);
-		timer_sleep_until(*c->cque + CRPC_MAX_CLIENT_DELAY_US);
+		timer_sleep_until(c->cqdel + CRPC_MAX_CLIENT_DELAY_US);
 		mutex_lock(&s->lock);
 	}
 done:
