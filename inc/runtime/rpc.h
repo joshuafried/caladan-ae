@@ -36,6 +36,7 @@ extern int srpc_enable(srpc_fn_t handler);
 extern uint64_t srpc_stat_winu_rx();
 extern uint64_t srpc_stat_winu_tx();
 extern uint64_t srpc_stat_credit_tx();
+extern uint64_t srpc_stat_credit_revoked();
 extern uint64_t srpc_stat_req_rx();
 extern uint64_t srpc_stat_req_dropped();
 extern uint64_t srpc_stat_resp_tx();

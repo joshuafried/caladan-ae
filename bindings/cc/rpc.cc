@@ -31,6 +31,10 @@ uint64_t RpcServerStatCreditTx() {
   return srpc_stat_credit_tx();
 }
 
+uint64_t RpcServerStatCreditRevoked() {
+  return srpc_stat_credit_revoked();
+}
+
 uint64_t RpcServerStatReqRx() {
   return srpc_stat_req_rx();
 }

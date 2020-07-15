@@ -131,6 +131,7 @@ struct srpc_session {
 atomic64_t srpc_stat_winu_rx_;
 atomic64_t srpc_stat_winu_tx_;
 atomic64_t srpc_stat_credit_tx_;
+atomic64_t srpc_stat_credit_revoked_;
 atomic64_t srpc_stat_req_rx_;
 atomic64_t srpc_stat_req_dropped_;
 atomic64_t srpc_stat_resp_tx_;
@@ -317,7 +318,11 @@ static void srpc_update_window(struct srpc_session *s, bool req_dropped)
 finish:
 	win_diff = s->win - old_win;
 	atomic_fetch_and_add(&srpc_win_used, win_diff);
-	atomic64_fetch_and_add(&srpc_stat_credit_tx_, win_diff + 1);
+
+	if (win_diff > -1)
+		atomic64_fetch_and_add(&srpc_stat_credit_tx_, win_diff + 1);
+	else if (win_diff < -1)
+		atomic64_fetch_and_add(&srpc_stat_credit_revoked_, -win_diff - 1);
 
 #if SRPC_TRACK_FLOW
 	if (s->id == SRPC_TRACK_FLOW_ID) {
@@ -1019,6 +1024,11 @@ uint64_t srpc_stat_winu_tx()
 uint64_t srpc_stat_credit_tx()
 {
 	return atomic64_read(&srpc_stat_credit_tx_);
+}
+
+uint64_t srpc_stat_credit_revoked()
+{
+	return atomic64_read(&srpc_stat_credit_revoked_);
 }
 
 uint64_t srpc_stat_req_rx()
