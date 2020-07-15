@@ -341,6 +341,7 @@ void RPCSStatWorker(std::unique_ptr<rt::TcpConn> c) {
 	           rt::RpcServerStatWinuRx(),
 	           rt::RpcServerStatWinuTx(),
 		   rt::RpcServerStatCreditTx(),
+		   rt::RpcServerStatCreditRevoked(),
 	           rt::RpcServerStatReqRx(),
 		   rt::RpcServerStatReqDropped(),
 	           rt::RpcServerStatRespTx()};
