@@ -74,6 +74,7 @@ struct crpc_session {
 	uint64_t		req_id;
 	struct crpc_conn	*c[CRPC_MAX_REPLICA];
 	int			num_conns;
+	int			next_conn_idx;
 	mutex_t			lock;
 	waitgroup_t		timer_waiter;
 //	bool			waiting_winupdate;

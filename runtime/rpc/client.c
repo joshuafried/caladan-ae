@@ -264,7 +264,7 @@ ssize_t crpc_send_one(struct crpc_session *s,
 {
 	ssize_t ret;
 	uint64_t now = microtime();
-	int i;
+	int i, idx;
 	struct crpc_conn *cc;
 
 	/* implementation is currently limited to a maximum payload size */
@@ -274,11 +274,13 @@ ssize_t crpc_send_one(struct crpc_session *s,
 	mutex_lock(&s->lock);
 	/* hot path, just send */
 	if (s->head == s->tail) {
-		for(i = 0; i < s->num_conns; ++i) {
-			cc = s->c[i];
+		for (i = 0; i < s->num_conns; ++i) {
+			idx = (s->next_conn_idx + i) % s->num_conns;
+			cc = s->c[idx];
 			if (cc->win_used < cc->win_avail) {
 				cc->win_used++;
 				ret = crpc_send_raw(s, cc, buf, len, s->req_id++);
+				s->next_conn_idx = (idx + 1) % s->num_conns;
 				mutex_unlock(&s->lock);
 				return ret;
 			}
@@ -287,9 +289,15 @@ ssize_t crpc_send_one(struct crpc_session *s,
 
 	/* cold path, enqueue request and drain the queue */
 	crpc_enqueue_one(s, buf, len);
+
 	for(i = 0; i < s->num_conns; ++i) {
-		cc = s->c[i];
+		idx = (s->next_conn_idx + i) % s->num_conns;
+		cc = s->c[idx];
 		crpc_drain_queue(s, cc);
+		if (s->head == s->tail) {
+			s->next_conn_idx = (idx + 1) % s->num_conns;
+			break;
+		}
 	}
 	mutex_unlock(&s->lock);
 
