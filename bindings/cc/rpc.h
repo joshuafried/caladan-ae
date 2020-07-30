@@ -102,7 +102,8 @@ class RpcClient {
 
 // Enables the RPC server, listening for new sessions.
 // Can only be called once.
-int RpcServerEnable(std::function<void(struct srpc_ctx *)> f);
+int RpcServerEnable(std::function<void(struct srpc_ctx *)> f,
+		    std::function<void(struct srpc_ctx *)> df);
 
 uint64_t RpcServerStatWinuRx();
 uint64_t RpcServerStatWinuTx();

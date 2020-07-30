@@ -5,16 +5,23 @@ namespace rt {
 namespace {
 
 std::function<void(struct srpc_ctx *)> handler;
+std::function<void(struct srpc_ctx *)> drop_handler;
 
 void RpcServerTrampoline(struct srpc_ctx *arg) {
   handler(arg);
 }
 
+void RpcServerDropTrampoline(struct srpc_ctx *arg) {
+  drop_handler(arg);
+}
+
 } // namespace
 
-int RpcServerEnable(std::function<void(struct srpc_ctx *)> f) {
+int RpcServerEnable(std::function<void(struct srpc_ctx *)> f,
+		    std::function<void(struct srpc_ctx *)> df) {
   handler = f;
-  int ret = srpc_enable(RpcServerTrampoline);
+  drop_handler = df;
+  int ret = srpc_enable(RpcServerTrampoline, RpcServerDropTrampoline);
   BUG_ON(ret == -EBUSY);
   return ret;
 }

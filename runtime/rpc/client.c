@@ -333,6 +333,7 @@ again:
 		log_warn("crpc: got invalid magic %x", shdr.magic);
 		return -EINVAL;
 	}
+
 	if (unlikely(shdr.len > MIN(SRPC_BUF_SIZE, len))) {
 		log_warn("crpc: request len %ld too large (limit %ld)",
 			 shdr.len, MIN(SRPC_BUF_SIZE, len));
@@ -341,14 +342,17 @@ again:
 
 	switch (shdr.op) {
 	case RPC_OP_CALL:
-		/* read the payload */
-		if (shdr.len > 0) {
-			ret = tcp_read_full(cc->c, buf, shdr.len);
-			if (unlikely(ret <= 0))
-				return ret;
-			assert(ret == shdr.len);
-			cc->resp_rx_++;
+		if (unlikely(shdr.len == 0)) {
+			log_warn("crpc: zero response len");
+			return -EINVAL;
 		}
+
+		/* read the payload */
+		ret = tcp_read_full(cc->c, buf, shdr.len);
+		if (unlikely(ret <= 0))
+			return ret;
+		assert(ret == shdr.len);
+		cc->resp_rx_++;
 
 		/* update the window */
 		mutex_lock(&s->lock);
@@ -368,10 +372,6 @@ again:
 			crpc_drain_queue(s, cc);
 		}
 		mutex_unlock(&s->lock);
-
-		if (shdr.len == 0)
-			goto again;
-
 		break;
 	case RPC_OP_WINUPDATE:
 		if (unlikely(shdr.len != 0)) {

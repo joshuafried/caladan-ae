@@ -150,6 +150,7 @@ struct cstat {
 struct work_unit {
   double start_us, work_us, duration_us;
   uint64_t window;
+  int hash;
   uint64_t tsc;
   uint32_t cpu;
   uint64_t server_queue;
@@ -479,6 +480,7 @@ shstat_raw ReadShenangoStat() {
 
 constexpr uint64_t kNetbenchPort = 8001;
 struct payload {
+  int status;
   uint64_t work_iterations;
   uint64_t index;
   uint64_t tsc_end;
@@ -508,9 +510,25 @@ void RpcServer(struct srpc_ctx *ctx) {
   ctx->resp_len = sizeof(payload);
   payload *out = reinterpret_cast<payload *>(ctx->resp_buf);
   memcpy(out, in, sizeof(*out));
+  out->status = 1; // success
   out->tsc_end = hton64(rdtscp(&out->cpu));
   out->cpu = hton32(out->cpu);
   out->server_queue = hton64(rt::RuntimeQueueUS());
+}
+
+void RpcServerDrop(struct srpc_ctx *ctx) {
+  // Validate the request.
+  if (unlikely(ctx->req_len != sizeof(payload))) {
+    log_err("got invalid RPC len %ld", ctx->req_len);
+    return;
+  }
+  const payload *in = reinterpret_cast<const payload *>(ctx->req_buf);
+
+  // Craft a response.
+  ctx->resp_len = sizeof(payload);
+  payload *out = reinterpret_cast<payload *>(ctx->resp_buf);
+  memcpy(out, in, sizeof(*out));
+  out->status = hton32(2); // drop
 }
 
 void ServerHandler(void *arg) {
@@ -522,7 +540,7 @@ void ServerHandler(void *arg) {
     if (workers[i] == nullptr) panic("cannot create worker");
   }
 
-  int ret = rt::RpcServerEnable(RpcServer);
+  int ret = rt::RpcServerEnable(RpcServer, RpcServerDrop);
   if (ret) panic("couldn't enable RPC server");
   // waits forever.
   rt::WaitGroup(1).Wait();
@@ -535,7 +553,7 @@ std::vector<work_unit> GenerateWork(Arrival a, Service s, double cur_us,
   while (true) {
     cur_us += a();
     if (cur_us > last_us) break;
-    w.emplace_back(work_unit{cur_us, s(), 0, 0});
+    w.emplace_back(work_unit{cur_us, s(), 0, 0, rand()});
   }
 
   return w;
@@ -560,6 +578,10 @@ std::vector<work_unit> ClientWorker(
           if (ret == 0 || ret < 0) break;
           panic("read failed, ret = %ld", ret);
         }
+
+	int status = ntoh32(rp.status);
+	if (status == 2) // drop
+	  continue;
 
         uint64_t now = microtime();
         uint64_t idx = ntoh64(rp.index);
@@ -598,8 +620,10 @@ std::vector<work_unit> ClientWorker(
     timings[i] = microtime();
 
     // Send an RPC request.
+    p.status = 0;
     p.work_iterations = hton64(w[i].work_us * kIterationsPerUS);
     p.index = hton64(i);
+    p.server_queue = hton64(static_cast<uint64_t>(w[i].hash));
     ssize_t ret = c->Send(&p, sizeof(p));
     if (ret == -ENOBUFS) continue;
     if (ret != static_cast<ssize_t>(sizeof(p)))

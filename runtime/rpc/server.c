@@ -61,6 +61,9 @@ struct Event {
 /* the handler function for each RPC */
 static srpc_fn_t srpc_handler;
 
+/* the handler function for dropped request */
+static srpc_fn_t srpc_drop_handler;
+
 /* total number of session */
 atomic_t srpc_num_sess;
 
@@ -459,11 +462,13 @@ static void srpc_worker(void *arg)
 		goto done;
 	}
 */
-	c->drop = false;
-	srpc_handler(c);
-	st = microtime() - st;
-
-	srpc_avg_st = (int)((1 - EWMA_WEIGHT) * srpc_avg_st + EWMA_WEIGHT * st);
+	if (c->drop) {
+		srpc_drop_handler(c);
+	} else {
+		srpc_handler(c);
+		st = microtime() - st;
+		srpc_avg_st = (int)((1 - EWMA_WEIGHT) * srpc_avg_st + EWMA_WEIGHT * st);
+	}
 done:
 	spin_lock_np(&s->lock);
 	bitmap_set(s->completed_slots, c->idx);
@@ -528,6 +533,7 @@ again:
 			return ret;
 		}
 
+		s->slots[idx]->drop = false;
 		s->slots[idx]->req_len = chdr.len;
 		s->slots[idx]->resp_len = 0;
 		s->slots[idx]->id = chdr.id;
@@ -548,17 +554,8 @@ again:
 		atomic_inc(&srpc_num_pending);
 
 		if (runtime_queue_us() >= SRPC_DROP_THRESH) {
-			thread_t *th;
-
 			s->slots[idx]->drop = true;
-			bitmap_set(s->completed_slots, idx);
-			th = s->sender_th;
-			s->sender_th = NULL;
-			spin_unlock_np(&s->lock);
-			if (th)
-				thread_ready(th);
 			atomic64_inc(&srpc_stat_req_dropped_);
-			goto again;
 		}
 
 		spin_unlock_np(&s->lock);
@@ -993,17 +990,18 @@ static void srpc_listener(void *arg)
  *
  * Returns 0 if successful.
  */
-int srpc_enable(srpc_fn_t handler)
+int srpc_enable(srpc_fn_t handler, srpc_fn_t drop_handler)
 {
 	static DEFINE_SPINLOCK(l);
 	int ret;
 
 	spin_lock_np(&l);
-	if (srpc_handler) {
+	if (srpc_handler || srpc_drop_handler) {
 		spin_unlock_np(&l);
 		return -EBUSY;
 	}
 	srpc_handler = handler;
+	srpc_drop_handler = drop_handler;
 	spin_unlock_np(&l);
 
 	ret = thread_spawn(srpc_listener, NULL);
