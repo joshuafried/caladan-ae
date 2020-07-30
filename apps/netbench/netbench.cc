@@ -510,7 +510,7 @@ void RpcServer(struct srpc_ctx *ctx) {
   ctx->resp_len = sizeof(payload);
   payload *out = reinterpret_cast<payload *>(ctx->resp_buf);
   memcpy(out, in, sizeof(*out));
-  out->status = 1; // success
+  out->status = hton32(1); // success
   out->tsc_end = hton64(rdtscp(&out->cpu));
   out->cpu = hton32(out->cpu);
   out->server_queue = hton64(rt::RuntimeQueueUS());
