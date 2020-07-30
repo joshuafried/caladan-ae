@@ -46,7 +46,7 @@ extern uint64_t srpc_stat_resp_tx();
  */
 
 #define CRPC_QLEN		16
-#define CRPC_MAX_REPLICA	4
+#define CRPC_MAX_REPLICA	16
 
 struct crpc_ctx {
 	size_t			len;

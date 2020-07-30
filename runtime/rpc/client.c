@@ -14,7 +14,7 @@
 #include "util.h"
 #include "proto.h"
 
-#define CRPC_MAX_CLIENT_DELAY_US	100
+#define CRPC_MAX_CLIENT_DELAY_US	10
 
 #define CRPC_TRACK_FLOW			false
 #define CRPC_TRACK_FLOW_ID		1
