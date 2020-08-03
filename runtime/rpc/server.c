@@ -237,7 +237,6 @@ static int srpc_send_completion_vector(struct srpc_session *s,
 
 	bitmap_for_each_set(slots, SRPC_MAX_WINDOW, i) {
 		struct srpc_ctx *c = s->slots[i];
-		struct crpc_hdr *chdr = (struct crpc_hdr *)c->req_buf;
 
 		shdr[nrhdr].magic = RPC_RESP_MAGIC;
 		shdr[nrhdr].op = RPC_OP_CALL;
@@ -245,7 +244,7 @@ static int srpc_send_completion_vector(struct srpc_session *s,
 		shdr[nrhdr].id = c->id;
 		shdr[nrhdr].win = (uint64_t)s->win;
 		shdr[nrhdr].drop = c->drop;
-		shdr[nrhdr].timestamp = chdr->timestamp;
+		shdr[nrhdr].timestamp = c->timestamp;
 
 		v[nriov].iov_base = &shdr[nrhdr];
 		v[nriov].iov_len = sizeof(struct srpc_hdr);
@@ -540,6 +539,7 @@ again:
 		s->slots[idx]->req_len = chdr.len;
 		s->slots[idx]->resp_len = 0;
 		s->slots[idx]->id = chdr.id;
+		s->slots[idx]->timestamp = chdr.timestamp;
 
 		spin_lock_np(&s->lock);
 		old_demand = s->demand;

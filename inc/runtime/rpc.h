@@ -28,6 +28,7 @@ struct srpc_ctx {
 	char			req_buf[SRPC_BUF_SIZE];
 	char			resp_buf[SRPC_BUF_SIZE];
 	bool			drop;
+	uint64_t		timestamp;
 };
 
 typedef void (*srpc_fn_t)(struct srpc_ctx *ctx);
