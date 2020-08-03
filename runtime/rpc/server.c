@@ -237,12 +237,15 @@ static int srpc_send_completion_vector(struct srpc_session *s,
 
 	bitmap_for_each_set(slots, SRPC_MAX_WINDOW, i) {
 		struct srpc_ctx *c = s->slots[i];
+		struct crpc_hdr *chdr = (struct crpc_hdr *)c->req_buf;
 
 		shdr[nrhdr].magic = RPC_RESP_MAGIC;
 		shdr[nrhdr].op = RPC_OP_CALL;
 		shdr[nrhdr].len = c->resp_len;
 		shdr[nrhdr].id = c->id;
 		shdr[nrhdr].win = (uint64_t)s->win;
+		shdr[nrhdr].drop = c->drop;
+		shdr[nrhdr].timestamp = chdr->timestamp;
 
 		v[nriov].iov_base = &shdr[nrhdr];
 		v[nriov].iov_len = sizeof(struct srpc_hdr);

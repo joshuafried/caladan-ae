@@ -60,6 +60,7 @@ struct crpc_conn {
 	uint32_t		win_avail;
 	uint32_t		win_used;
 	bool			waiting_winupdate;
+	uint64_t		resp_time;
 
 	/* client-side stats */
 	uint64_t		winu_rx_;
@@ -77,9 +78,6 @@ struct crpc_session {
 	int			next_conn_idx;
 	mutex_t			lock;
 	waitgroup_t		timer_waiter;
-//	bool			waiting_winupdate;
-//	uint32_t		win_avail;
-//	uint32_t		win_used;
 	bool			running;
 	bool			demand_sync;
 	condvar_t		timer_cv;
@@ -91,11 +89,6 @@ struct crpc_session {
 	struct crpc_ctx		*qreq[CRPC_QLEN];
 
 	/* client-side stats */
-//	uint64_t		winu_rx_;
-//	uint64_t		winu_tx_;
-//	uint64_t		resp_rx_;
-//	uint64_t		req_tx_;
-//	uint64_t		win_expired_;
 	uint64_t		req_dropped_;
 };
 

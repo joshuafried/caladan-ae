@@ -23,6 +23,7 @@ struct crpc_hdr {
 	uint64_t	id;    /* Request / Response ID */
 	uint64_t	demand;/* the demanded window size */
 	bool		sync;
+	uint64_t	timestamp;
 };
 
 /* header used for SERVER -> CLIENT */
@@ -32,4 +33,6 @@ struct srpc_hdr {
 	size_t		len;   /* length of response in bytes */
 	uint64_t	id;    /* Request / Response ID */
 	uint64_t	win;   /* the offered window size */
+	bool		drop;
+	uint64_t	timestamp;
 };

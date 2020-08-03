@@ -80,6 +80,7 @@ static ssize_t crpc_send_request_vector(struct crpc_session *s, struct crpc_conn
 		chdr[nrhdr].len = c->len;
 		chdr[nrhdr].demand = s->head - s->tail;
 		chdr[nrhdr].sync = s->demand_sync;
+		chdr[nrhdr].timestamp = now;
 
 		v[nriov].iov_base = &chdr[nrhdr];
 		v[nriov].iov_len = sizeof(struct crpc_hdr);
@@ -172,7 +173,6 @@ static void crpc_drain_queue(struct crpc_session *s, struct crpc_conn *cc)
 		return;
 	}
 */
-	s->req_dropped_++;
 	while (s->head != s->tail) {
 		pos = s->tail % CRPC_QLEN;
 		c = s->qreq[pos];
@@ -180,6 +180,7 @@ static void crpc_drain_queue(struct crpc_session *s, struct crpc_conn *cc)
 			break;
 
 		s->tail++;
+		s->req_dropped_++;
 
 #if CRPC_TRACK_FLOW
 		if (s->id == CRPC_TRACK_FLOW_ID) {
@@ -320,6 +321,7 @@ ssize_t crpc_recv_one(struct crpc_session *s, struct crpc_conn *cc, void *buf, s
 	struct srpc_hdr shdr;
 	ssize_t ret;
 	uint64_t now = microtime();
+	uint64_t resp_time;
 
 again:
 	/* read the server header */
@@ -353,6 +355,9 @@ again:
 			return ret;
 		assert(ret == shdr.len);
 		cc->resp_rx_++;
+		resp_time = now - shdr.timestamp;
+		if (!shdr.drop)
+			cc->resp_time = 0.8 * cc->resp_time + 0.2 * resp_time;
 
 		/* update the window */
 		mutex_lock(&s->lock);
