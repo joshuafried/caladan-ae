@@ -33,11 +33,6 @@
 #include <linux/uaccess.h>
 
 #include "ksched.h"
-#include "../iokernel/pmc.h"
-
-#define KSCHED_PMC_PROBE_DELAY (1)
-#define CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_0 (0x1)
-#define CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_1 (0x2)
 
 #ifdef ZAIN_VECTOR
 #ifndef SUPPRESS_CUSTOMIZED_IPI_HANDLER
@@ -287,16 +282,6 @@ static void ksched_deliver_signal(struct ksched_percpu *p, unsigned int signum)
 		send_sig(signum, p->running_task, 0);
 }
 
-static u64 ksched_measure_pmc(u64 sel)
-{
-	u64 start, end;
-
-	rdmsrl(MSR_P6_PERFCTR0, start);
-	udelay(KSCHED_PMC_PROBE_DELAY);
-	rdmsrl(MSR_P6_PERFCTR0, end);
-	return end - start;
-}
-
 static void ipi_handler(void)
 {
 	struct ksched_percpu *p;
@@ -312,13 +297,6 @@ static void ipi_handler(void)
 	if (tmp == p->last_gen) {
 		ksched_deliver_signal(p, READ_ONCE(s->signum));
 		smp_store_release(&s->sig, 0);
-	}
-
-	/* check if a performance counter has been requested */
-	tmp = smp_load_acquire(&s->pmc);
-	if (tmp != 0) {
-		s->pmcval = ksched_measure_pmc(READ_ONCE(s->pmcsel));
-		smp_store_release(&s->pmc, 0);
 	}
 
 	put_cpu();
@@ -546,16 +524,6 @@ static void __exit ksched_cpuidle_unhijack(void)
 	cpuidle_resume_and_unlock();
 }
 
-static void __init ksched_init_pmc(void *arg)
-{
-        wrmsrl(MSR_P6_EVNTSEL0, PMC_LLC_MISSES);
-	wrmsrl(MSR_CORE_PERF_FIXED_CTR_CTRL, 0x333);
-        wrmsrl(MSR_CORE_PERF_GLOBAL_CTRL,
-	       CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_0 |
-	       CORE_PERF_GLOBAL_CTRL_ENABLE_PMC_1 |
-	       (1UL << 32) | (1UL << 33) | (1UL << 34));
-}
-
 static int __init ksched_init(void)
 {
 	dev_t devno_ksched = MKDEV(KSCHED_MAJOR, KSCHED_MINOR);
@@ -596,7 +564,6 @@ static int __init ksched_init(void)
 	if (ret)
 		goto fail_hijack;
 
-	smp_call_function(ksched_init_pmc, NULL, 1);
 	printk(KERN_INFO "ksched: API V2 enabled");
 
         devno_pci_cfg = MKDEV(PCI_CFG_MAJOR, PCI_CFG_MINOR);

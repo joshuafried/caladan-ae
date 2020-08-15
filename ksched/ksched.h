@@ -32,16 +32,13 @@ struct ksched_shm_cpu {
 	unsigned int		mwait_hint;
 	unsigned int		sig;
 	unsigned int		signum;
-	unsigned int		pmc;
-	__u64			pmcsel;
 
 	/* written by kernelspace */
 	unsigned int		busy;
 	unsigned int		last_gen;
-	__u64			pmcval;
 
 	/* extra space for future features (and cache alignment) */
-	unsigned long		rsv[2];
+	char			rsv[36];
 };
 
 #define KSCHED_MAGIC		0xF0

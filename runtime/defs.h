@@ -38,7 +38,6 @@
 #define RUNTIME_SCHED_POLL_ITERS	0
 #define RUNTIME_SCHED_MIN_POLL_US	2
 #define RUNTIME_WATCHDOG_US		50
-#define RUNTIME_PMC_US			10
 
 
 /*
@@ -468,7 +467,6 @@ BUILD_ASSERT(sizeof(struct cpu_record) == CACHE_LINE_SIZE);
 
 extern struct cpu_record cpu_map[NCPU];
 extern int preferred_socket;
-void pmc_periodic(struct kthread *k);
 
 /**
  * STAT - gets a stat counter

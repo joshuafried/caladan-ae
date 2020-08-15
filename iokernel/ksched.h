@@ -130,34 +130,6 @@ static inline void ksched_enqueue_intr(unsigned int core, int type)
 }
 
 /**
- * ksched_enqueue_pmc - enqueues a performance counter request on a core
- * @core: the core to measure
- * @sel: the architecture-specific counter selector
- */
-static inline void ksched_enqueue_pmc(unsigned int core, uint64_t sel)
-{
-	ksched_shm[core].pmcsel = sel;
-	store_release(&ksched_shm[core].pmc, 1);
-	CPU_SET(core, &ksched_set);
-	ksched_count++;
-}
-
-/**
- * ksched_poll_pmc - polls for a performance counter result
- * @core: the core to poll
- * @val: a pointer to store the result
- *
- * Returns true if succesful, otherwise counter is still being measured.
- */
-static inline bool ksched_poll_pmc(unsigned int core, uint64_t *val)
-{
-	if (load_acquire(&ksched_shm[core].pmc) != 0)
-		return false;
-	*val = ACCESS_ONCE(ksched_shm[core].pmcval);
-	return true;
-}
-
-/**
  * ksched_send_intrs - sends any pending interrupts
  */
 static inline void ksched_send_intrs(void)
