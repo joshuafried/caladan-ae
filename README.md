@@ -81,7 +81,8 @@ interface to it (e.g., using the script `./dpdk/usertools/dpdk-setup.sh`).
 #### Directpath
 Directpath is currently only supported with Mellanox ConnectX-5 using Mellanox OFED v4.6 or newer.
 NIC firmware must include support for User Context Objects (DEVX) and Software Managed Steering Tables.
-For the ConnectX-5, the firmware version must be at least 16.26.1040.
+For the ConnectX-5, the firmware version must be at least 16.26.1040. Additionally, directpath requires
+Linux kernel version 5.0.0 or newer.
 
 To enable directpath, set `CONFIG_DIRECTPATH=y` in shared.mk before building and add `enable_directpath`
 to the config file for all runtimes that should use directpath. Runtimes launched with directpath must
