@@ -81,6 +81,8 @@ is currently only supported with MLX4 and MLX5 NICs.
 
 ### Storage
 This code has been tested with an Intel Optane SSD 900P Series NVMe device.
+If your device has op latencies that are greater than 10us, consider updating the device_latency_us
+variable (or the known_devices list) in runtme/storage.c.
 
 ## Running a simple block storage server
 Ensure that you have compiled Shenango withs storage support by setting the appropriate flag in shared.mk,
