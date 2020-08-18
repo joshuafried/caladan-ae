@@ -83,7 +83,9 @@ Directpath is currently only supported with Mellanox ConnectX-5 using Mellanox O
 NIC firmware must include support for User Context Objects (DEVX) and Software Managed Steering Tables.
 For the ConnectX-5, the firmware version must be at least 16.26.1040.
 
-Runtimes launched with directpath must currently run as root.
+To enable directpath, set `CONFIG_DIRECTPATH=y` in shared.mk before building and add `enable_directpath`
+to the config file for all runtimes that should use directpath. Runtimes launched with directpath must
+currently run as root.
 
 ### Storage
 This code has been tested with an Intel Optane SSD 900P Series NVMe device.
