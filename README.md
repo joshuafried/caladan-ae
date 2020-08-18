@@ -31,7 +31,7 @@ make clean && make
 pushd ksched
 make clean & make
 popd
-./scripts/setup_machine.sh
+sudo ./scripts/setup_machine.sh
 ```
 
 To enable debugging, set `CONFIG_DEBUG=y` in shared.mk.
@@ -81,3 +81,26 @@ is currently only supported with MLX4 and MLX5 NICs.
 
 ### Storage
 This code has been tested with an Intel Optane SSD 900P Series NVMe device.
+
+## Running a simple block storage server
+Ensure that you have compiled Shenango withs storage support by setting the appropriate flag in shared.mk,
+and that you have built the synthetic client application.
+
+Compile the C++ bindings and the storage server:
+```
+make -C bindings/cc
+make -C apps/storage_service
+```
+
+On the server:
+```
+sudo ./iokerneld
+sudo spdk/scripts/setup.sh
+sudo apps/storage_service/storage_server storage_server.config
+```
+
+On the client:
+```
+sudo ./iokerneld
+sudo apps/synthetic/target/release/synthetic --config=storage_client.config --mode=runtime-client --mpps=0.55 --protocol=reflex --runtime=10 --samples=10 --threads=20 --transport=tcp 192.168.1.3:5000 
+```
